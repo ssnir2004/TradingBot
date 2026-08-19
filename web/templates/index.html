@@ -157,11 +157,15 @@
       <div class="card">
         <div class="card-header d-flex justify-content-between align-items-center">
           <span>Watchlist (today) — live filter check</span>
-          <span class="text-muted small">Checked: <span id="watchlist-checked" class="mono">-</span></span>
+          <div class="d-flex align-items-center gap-2">
+            <span class="text-muted small">Checked: <span id="watchlist-checked" class="mono">-</span></span>
+            <button id="btn-run-prefilter" class="btn btn-sm btn-outline-primary">Run scan now</button>
+          </div>
         </div>
         <div class="small text-muted px-3 pt-2">
-          Sorted by how many of the 6 entry filters currently pass (best candidates first). This runs on its own ~5-minute schedule, independent of trade entries — a symbol can show a full pass here without the bot actually buying it (daily trade/position caps, or the bot being paused).
+          Sorted by how many of the 6 entry filters currently pass (best candidates first). The gap scan itself runs on a schedule (9:25-12:55 ET, every 30 min) — "Run scan now" triggers it on demand instead of waiting. Only shows candidates for a direction with an active strategy — a symbol can show a full pass without the bot actually buying it (daily trade/position caps, or the bot being paused).
         </div>
+        <div id="prefilter-error" class="text-danger small px-3"></div>
         <div class="card-body p-0" style="overflow-x:auto;">
           <table class="table table-sm mb-0">
             <thead><tr>
@@ -498,6 +502,29 @@ async function refreshWatchlist() {
     </tr>`;
   }).join("");
 }
+
+document.getElementById("btn-run-prefilter").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-run-prefilter");
+  const errorEl = document.getElementById("prefilter-error");
+  errorEl.textContent = "";
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = "Scanning… (up to ~1 min)";
+  try {
+    const result = await api("/api/prefilter/run", { method: "POST" });
+    if (!result.success) {
+      errorEl.textContent = "Scan failed: " + (result.error || "unknown error");
+    } else {
+      errorEl.textContent = "";
+    }
+    await refreshWatchlist();
+  } catch (e) {
+    errorEl.textContent = "Scan failed: " + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+});
 
 async function refreshTrades() {
   const rows = await modeApi("/api/trades?limit=50");

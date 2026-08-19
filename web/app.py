@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 import cycle
+import morning_prefilter
 from src import db, mode_config, perf
 from web import gateway_control
 from web.auth import COOKIE_NAME, make_session_cookie, read_session, require_user
@@ -282,6 +283,21 @@ def api_watchlist(mode: str = Depends(require_mode), user: str = Depends(require
 @app.get("/api/watchlist_filters")
 def api_watchlist_filters(mode: str = Depends(require_mode), user: str = Depends(require_user)):
     return db.get_watchlist_filters(mode)
+
+
+@app.post("/api/prefilter/run")
+def api_run_prefilter(user: str = Depends(require_user)):
+    """On-demand gap scan — the same scan the scheduler runs at :25/:55 past
+    the hour (9:25-12:55 ET), triggered right now instead of waiting for
+    the next scheduled slot. Mode-agnostic like the scan itself: writes the
+    same watchlist to both paper and live. Takes a while (scans the whole
+    S&P 500 via yfinance) — the request blocks until it's done."""
+    result = morning_prefilter.run_scan(morning_prefilter.DEFAULT_MIN_GAP_PCT, morning_prefilter.DEFAULT_MIN_PRICE, False)
+    if result.get("success"):
+        cycle.scan_watchlist_filters()
+    _log_strategy_action(user, action="run_prefilter_now", success=result.get("success"),
+                          up=result.get("up_survivors_count"), down=result.get("down_survivors_count"))
+    return result
 
 
 @app.get("/api/decision_log")
