@@ -401,10 +401,21 @@ def record_cycle_run(mode: str, status: str):
     set_setting(_mode_key(mode, "last_cycle_timestamp"), datetime.now(ET).isoformat(timespec="seconds"))
 
 
+def set_next_cycle_at(mode: str, next_run_iso: str):
+    """Records when the scheduler will next fire the 'cycle' job for this
+    mode (see run_service.py), so the dashboard can show a countdown. This
+    is the scheduler's own next firing time, independent of whether that
+    firing will actually do anything (run_cycle() self-gates on market
+    hours) — it always fires every 5 minutes, so the countdown is accurate
+    even outside trading hours."""
+    set_setting(_mode_key(mode, "next_cycle_at"), next_run_iso)
+
+
 def get_cycle_status(mode: str) -> dict:
     return {
         "last_cycle_status": get_setting(_mode_key(mode, "last_cycle_status"), ""),
         "last_cycle_timestamp": get_setting(_mode_key(mode, "last_cycle_timestamp"), ""),
+        "next_cycle_at": get_setting(_mode_key(mode, "next_cycle_at"), ""),
         "bot_enabled": is_bot_enabled(mode),
         "flatten_pending": get_setting(_mode_key(mode, "flatten_now"), "false") == "true",
     }

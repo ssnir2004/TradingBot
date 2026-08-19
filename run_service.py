@@ -15,7 +15,7 @@ import argparse
 import logging
 import sys
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -49,6 +49,17 @@ def _guarded(mode: str, job_name: str, fn, *args, **kwargs):
         db.log_cycle_error(mode, f"[{job_name}]\n{traceback.format_exc()}")
 
 
+def _run_cycle_job(scheduler: BlockingScheduler, mode: str):
+    """Runs the 'cycle' job, then records the scheduler's own next firing
+    time for it — this always advances every 5 minutes regardless of
+    market hours (run_cycle() self-gates internally), so it's an accurate
+    countdown source for the dashboard even outside trading hours."""
+    _guarded(mode, "cycle", cycle.run_cycle, mode)
+    job = scheduler.get_job("cycle")
+    if job and job.next_run_time:
+        db.set_next_cycle_at(mode, job.next_run_time.isoformat())
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=db.MODES, default="paper")
@@ -61,10 +72,14 @@ def main():
     scheduler = BlockingScheduler(timezone=ET)
 
     scheduler.add_job(
-        lambda: _guarded(mode, "cycle", cycle.run_cycle, mode),
+        lambda: _run_cycle_job(scheduler, mode),
         IntervalTrigger(minutes=5),
         id="cycle", misfire_grace_time=60,
     )
+    # BlockingScheduler doesn't compute next_run_time until .start() runs, so
+    # seed an estimate now (accurate the moment start() actually happens, a
+    # few lines below) — _run_cycle_job self-corrects it after every firing.
+    db.set_next_cycle_at(mode, (datetime.now(ET) + timedelta(minutes=5)).isoformat())
 
     scheduler.add_job(
         lambda: _guarded(mode, "emergency_check", cycle.emergency_check, mode),
