@@ -1,7 +1,6 @@
-ib_async==1.0.3
-pandas==2.2.3
-numpy==1.26.4
-python-dotenv==1.0.1
-requests==2.32.3
-yfinance==0.2.51
-loguru==0.7.2
+ib_async
+python-dotenv
+pandas
+numpy
+yfinance
+requests

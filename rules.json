@@ -1,0 +1,43 @@
+{
+  "strategy_name": "Trend Join Long",
+  "direction": "long_only",
+  "trade_timeframe": "5m",
+
+  "universe_filters": {
+    "index": "S&P 500",
+    "min_price_usd": 3.0
+  },
+
+  "daily_filters": {
+    "D1_above_prior_day_high": true,
+    "D2_prior_close_above_sma200": true,
+    "D3_min_gap_pct_from_prior_close": 3.0
+  },
+
+  "intraday_filters": {
+    "I1_above_premarket_high": true,
+    "I2_above_today_hod": true,
+    "I3_rvol_min": 2.0,
+    "I3_rvol_lookback_days": 14
+  },
+
+  "time_filter": {
+    "earliest_entry_et": "10:05",
+    "latest_entry_et": "15:30",
+    "force_close_et": "15:51"
+  },
+
+  "exit": {
+    "initial_stop_rule": "lod_minus_1pct",
+    "partial_profit_trigger_R": 0.75,
+    "partial_profit_fraction": 0.3333,
+    "breakeven_trigger_R": 1.0,
+    "post_breakeven_trail": "swing_low_5m_2_2"
+  },
+
+  "risk": {
+    "max_risk_per_trade_pct": 1.0,
+    "max_position_size_pct_of_portfolio": 10,
+    "max_concurrent_positions": 5
+  }
+}
