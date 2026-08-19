@@ -1,7 +1,14 @@
-# IBC (https://github.com/IbcAlpha/IBC) configuration for headless IB
-# Gateway login. Copy this to config.ini, fill in your real credentials, and
-# NEVER commit that file — it holds your IBKR password in plain text.
-# (deploy/ibc/config.ini is already in .gitignore for exactly this reason.)
+# IBC (https://github.com/IbcAlpha/IBC) configuration for the PAPER-mode
+# headless IB Gateway. Copy this to config-paper.ini, fill in your real
+# credentials, and NEVER commit that file — it holds your IBKR password in
+# plain text. (deploy/ibc/config-paper.ini is already in .gitignore.)
+#
+# Paper and live run as two SEPARATE, simultaneous IB Gateway processes on
+# this box (see deploy/ibgateway-paper.service / ibgateway-live.service and
+# DEPLOY.md) — this is the paper one. See config-live.ini.example for the
+# live counterpart; the only difference between the two is TradingMode and
+# usually nothing else, since paper trading uses the same IBKR login as
+# your live account.
 #
 # This covers the settings that matter for this project. IBC ships its own
 # reference config.ini with the full, authoritative list of every option —
@@ -11,9 +18,6 @@
 # ---- credentials ----
 IbLoginId=your_ibkr_username
 IbPassword=your_ibkr_password
-# paper or live. Keep this "paper" until you've read the main README's
-# "Going live" section — it exists for the same reason as the PAPER_TRADING
-# guard in .env.
 TradingMode=paper
 
 # ---- unattended operation ----
@@ -44,7 +48,9 @@ SecondFactorAuthenticationTimeout=180
 # approve the push notification yourself, especially right after you first
 # start the service. Don't design the rest of this deployment around "zero
 # touch forever"; design it around "rare enough that a Telegram alert with
-# no cycle data for a while is your signal to go check."
+# no cycle data for a while is your signal to go check." Staggered by a few
+# minutes from the live instance's restart time so the two don't both
+# reconnect (and both potentially need 2FA) at the exact same moment.
 AutoRestartTime=11:55 PM
 
 # ---- logging ----

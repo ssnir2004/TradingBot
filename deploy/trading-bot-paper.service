@@ -1,0 +1,16 @@
+[Unit]
+Description=TradingBot trading engine - PAPER (run_service.py --mode paper)
+After=ibgateway-paper.service network-online.target
+Wants=network-online.target
+Requires=ibgateway-paper.service
+
+[Service]
+Type=simple
+User=tradingbot
+WorkingDirectory=/opt/tradingbot
+ExecStart=/opt/tradingbot/.venv/bin/python /opt/tradingbot/run_service.py --mode paper
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

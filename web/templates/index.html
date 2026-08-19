@@ -11,6 +11,9 @@
   textarea.rules-editor { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; min-height: 320px; }
   .hist-bar-track { height: 18px; background:#e9ecef; border-radius:4px; overflow:hidden; }
   .hist-bar { height:100%; }
+  .mode-tab { cursor:pointer; }
+  .mode-tab.active-paper { background:#0dcaf0 !important; color:#000 !important; }
+  .mode-tab.active-live { background:#dc3545 !important; color:#fff !important; }
 </style>
 </head>
 <body>
@@ -25,6 +28,12 @@
 
 <div class="container-fluid px-4 pb-5">
 
+  <!-- Paper/Live tabs: both engines always run; this only selects which one's data you're viewing/controlling. -->
+  <div class="d-flex gap-2 mb-3">
+    <button id="tab-paper" class="btn btn-outline-info mode-tab fw-bold">PAPER</button>
+    <button id="tab-live" class="btn btn-outline-danger mode-tab fw-bold">LIVE — real money</button>
+  </div>
+
   <div class="d-flex flex-wrap align-items-center justify-content-between mb-4 p-3 bg-white rounded shadow-sm gap-3">
     <div class="d-flex align-items-center gap-3">
       <span id="status-badge" class="badge bg-secondary fs-6">...</span>
@@ -37,8 +46,9 @@
     </div>
   </div>
   <div class="small text-muted mb-4">
-    "Pause new entries" stops the bot from opening new positions but keeps managing stops/trailing on anything already open.
-    "Flatten all now" is the emergency button — it market-sells every open position immediately, on the next ~20s check.
+    Controls above apply only to the selected tab (<span id="mode-hint" class="fw-bold">PAPER</span>) — paper and live run independently.
+    "Pause new entries" stops that engine from opening new positions but keeps managing stops/trailing on anything already open.
+    "Flatten all now" is the emergency button — it market-sells every open position in this mode immediately, on the next ~20s check.
   </div>
 
   <div class="row g-3 mb-3">
@@ -117,7 +127,7 @@
 
   <div class="card mb-4">
     <div class="card-header d-flex justify-content-between align-items-center">
-      <span>Strategies</span>
+      <span>Strategies <span class="badge bg-secondary fw-normal">shared across paper &amp; live</span></span>
       <button id="btn-new-strategy" class="btn btn-sm btn-primary">+ New strategy</button>
     </div>
     <div class="card-body p-0">
@@ -160,19 +170,39 @@
 const POLL_MS = 5000;
 let editingStrategyId = null;
 let strategyModal;
+let currentMode = "paper";
 
 async function api(path, options) {
   const res = await fetch(path, Object.assign({ credentials: "same-origin" }, options || {}));
   if (res.status === 401) { window.location.href = "/login"; throw new Error("unauthenticated"); }
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    const text = await res.text();
+    try { throw new Error(JSON.parse(text).detail || text); } catch (e) { throw new Error(e.message || text); }
+  }
   return res.status === 204 ? null : res.json();
 }
 
-function fmtMoney(v) { return (v === null || v === undefined) ? "-" : `$${Number(v).toFixed(2)}`; }
+function modeApi(path, options) {
+  const sep = path.includes("?") ? "&" : "?";
+  return api(`${path}${sep}mode=${currentMode}`, options);
+}
+
+function fmtMoney(v) { return (v === null || v === undefined || v === "") ? "-" : `$${Number(v).toFixed(2)}`; }
 function fmtR(v) { return (v === null || v === undefined) ? "-" : `${Number(v).toFixed(2)}R`; }
 
+function setMode(mode) {
+  currentMode = mode;
+  document.getElementById("tab-paper").classList.toggle("active-paper", mode === "paper");
+  document.getElementById("tab-live").classList.toggle("active-live", mode === "live");
+  document.getElementById("mode-hint").textContent = mode.toUpperCase();
+  document.getElementById("mode-hint").className = "fw-bold " + (mode === "live" ? "text-danger" : "text-info");
+  refreshAll();
+}
+document.getElementById("tab-paper").addEventListener("click", () => setMode("paper"));
+document.getElementById("tab-live").addEventListener("click", () => setMode("live"));
+
 async function refreshStatus() {
-  const s = await api("/api/status");
+  const s = await modeApi("/api/status");
   const badge = document.getElementById("status-badge");
   badge.textContent = s.bot_enabled ? "ENABLED" : "PAUSED";
   badge.className = "badge fs-6 " + (s.bot_enabled ? "bg-success" : "bg-warning text-dark");
@@ -181,7 +211,7 @@ async function refreshStatus() {
 }
 
 async function refreshAccount() {
-  const a = await api("/api/account");
+  const a = await modeApi("/api/account");
   const el = document.getElementById("account-summary");
   if (!a.updated_at) {
     el.innerHTML = '<p class="text-muted mb-0">No account data yet — the service refreshes this every 5 minutes.</p>';
@@ -197,7 +227,7 @@ async function refreshAccount() {
 }
 
 async function refreshPositions() {
-  const rows = await api("/api/positions");
+  const rows = await modeApi("/api/positions");
   const body = document.getElementById("positions-body");
   if (!rows.length) { body.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No open positions</td></tr>'; return; }
   body.innerHTML = rows.map(p => `<tr>
@@ -208,14 +238,14 @@ async function refreshPositions() {
 }
 
 async function refreshWatchlist() {
-  const rows = await api("/api/watchlist");
+  const rows = await modeApi("/api/watchlist");
   const body = document.getElementById("watchlist-body");
   if (!rows.length) { body.innerHTML = '<tr><td colspan="3" class="text-center text-muted">Empty</td></tr>'; return; }
   body.innerHTML = rows.map(r => `<tr><td>${r.symbol}</td><td>${Number(r.gap_pct).toFixed(2)}%</td><td>${fmtMoney(r.open_price)}</td></tr>`).join("");
 }
 
 async function refreshTrades() {
-  const rows = await api("/api/trades?limit=50");
+  const rows = await modeApi("/api/trades?limit=50");
   const body = document.getElementById("trades-body");
   if (!rows.length) { body.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No trades yet</td></tr>'; return; }
   body.innerHTML = rows.map(t => `<tr>
@@ -225,14 +255,14 @@ async function refreshTrades() {
 }
 
 async function refreshLog() {
-  const rows = await api("/api/decision_log?limit=50");
+  const rows = await modeApi("/api/decision_log?limit=50");
   const body = document.getElementById("log-body");
   if (!rows.length) { body.innerHTML = '<tr><td colspan="2" class="text-center text-muted">Empty</td></tr>'; return; }
   body.innerHTML = rows.map(r => `<tr><td class="small">${r.timestamp_iso}</td><td class="small">${r.event}</td></tr>`).join("");
 }
 
 async function refreshPerformance() {
-  const data = await api("/api/performance");
+  const data = await modeApi("/api/performance");
   const a = data.aggregates;
   document.getElementById("perf-summary").innerHTML = `
     <p>Trades: <strong>${a.total_trades}</strong> (${a.wins}W / ${a.losses}L, ${a.win_rate_pct}%)</p>
@@ -319,11 +349,11 @@ document.getElementById("btn-save-strategy").addEventListener("click", async () 
   }
 });
 
-document.getElementById("btn-enable").addEventListener("click", async () => { await api("/api/control/enable", { method: "POST" }); refreshStatus(); });
-document.getElementById("btn-disable").addEventListener("click", async () => { await api("/api/control/disable", { method: "POST" }); refreshStatus(); });
+document.getElementById("btn-enable").addEventListener("click", async () => { await modeApi("/api/control/enable", { method: "POST" }); refreshStatus(); });
+document.getElementById("btn-disable").addEventListener("click", async () => { await modeApi("/api/control/disable", { method: "POST" }); refreshStatus(); });
 document.getElementById("btn-flatten").addEventListener("click", async () => {
-  if (!confirm("This will market-sell every open position immediately. Continue?")) return;
-  await api("/api/control/flatten", { method: "POST" });
+  if (!confirm(`This will market-sell every open ${currentMode.toUpperCase()} position immediately. Continue?`)) return;
+  await modeApi("/api/control/flatten", { method: "POST" });
   refreshStatus();
 });
 
@@ -334,7 +364,7 @@ function refreshAll() {
 
 window.addEventListener("DOMContentLoaded", () => {
   strategyModal = new bootstrap.Modal(document.getElementById("strategy-modal"));
-  refreshAll();
+  setMode("paper");
   setInterval(refreshAll, POLL_MS);
 });
 </script>

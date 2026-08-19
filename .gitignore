@@ -4,4 +4,5 @@ __pycache__/
 *.pyc
 logs/
 data/
-deploy/ibc/config.ini
+deploy/ibc/config-paper.ini
+deploy/ibc/config-live.ini

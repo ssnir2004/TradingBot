@@ -1,14 +1,15 @@
 """Dashboard web app: login, bot start/stop/emergency-flatten controls, live
-positions/trades/performance views, and the multi-strategy switcher. Reads
-and writes the same SQLite DB the trading service (run_service.py) uses; it
-never talks to IBKR directly, so it can safely run as a separate process
-(and even on a separate box) from the trading engine.
+positions/trades/performance views, and the multi-strategy switcher — for
+BOTH the paper and live engines at once, selected per-request via a `mode`
+query param (the frontend has a Paper/Live tab). Reads and writes the same
+SQLite DB the two trading services (run_service.py --mode paper/live) use;
+it never talks to IBKR directly, so it can safely run as a separate process.
 """
 import json
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 import cycle
@@ -24,6 +25,12 @@ app = FastAPI(title="TradingBot Dashboard")
 @app.on_event("startup")
 def on_startup():
     db.init_db(seed_rules_path=PROJECT_DIR / "rules.json")
+
+
+def require_mode(mode: str = Query(...)) -> str:
+    if mode not in db.MODES:
+        raise HTTPException(status_code=400, detail=f"mode must be one of {db.MODES}")
+    return mode
 
 
 # ------------------------------------------------------------------ pages ---
@@ -84,44 +91,39 @@ def index(request: Request):
 
 # -------------------------------------------------------------------- API ---
 @app.get("/api/status")
-def api_status(user: str = Depends(require_user)):
-    return {
-        "bot_enabled": db.is_bot_enabled(),
-        "last_cycle_status": db.get_setting("last_cycle_status"),
-        "last_cycle_timestamp": db.get_setting("last_cycle_timestamp"),
-        "flatten_pending": db.get_setting("flatten_now", "false") == "true",
-    }
+def api_status(mode: str = Depends(require_mode), user: str = Depends(require_user)):
+    return db.get_cycle_status(mode)
 
 
 @app.post("/api/control/enable")
-def api_enable(user: str = Depends(require_user)):
-    db.set_bot_enabled(True)
-    db.log_decision("dashboard_control", action="enable", user=user)
+def api_enable(mode: str = Depends(require_mode), user: str = Depends(require_user)):
+    db.set_bot_enabled(mode, True)
+    db.log_decision(mode, "dashboard_control", action="enable", user=user)
     return {"bot_enabled": True}
 
 
 @app.post("/api/control/disable")
-def api_disable(user: str = Depends(require_user)):
-    db.set_bot_enabled(False)
-    db.log_decision("dashboard_control", action="disable", user=user)
+def api_disable(mode: str = Depends(require_mode), user: str = Depends(require_user)):
+    db.set_bot_enabled(mode, False)
+    db.log_decision(mode, "dashboard_control", action="disable", user=user)
     return {"bot_enabled": False}
 
 
 @app.post("/api/control/flatten")
-def api_flatten(user: str = Depends(require_user)):
-    db.request_flatten_now()
-    db.log_decision("dashboard_control", action="flatten_now", user=user)
+def api_flatten(mode: str = Depends(require_mode), user: str = Depends(require_user)):
+    db.request_flatten_now(mode)
+    db.log_decision(mode, "dashboard_control", action="flatten_now", user=user)
     return {"flatten_pending": True}
 
 
 @app.get("/api/account")
-def api_account(user: str = Depends(require_user)):
-    return db.get_account_info()
+def api_account(mode: str = Depends(require_mode), user: str = Depends(require_user)):
+    return db.get_account_info(mode)
 
 
 @app.get("/api/positions")
-def api_positions(user: str = Depends(require_user)):
-    positions = db.get_open_positions()
+def api_positions(mode: str = Depends(require_mode), user: str = Depends(require_user)):
+    positions = db.get_open_positions(mode)
     for pos in positions:
         price = None
         try:
@@ -138,13 +140,13 @@ def api_positions(user: str = Depends(require_user)):
 
 
 @app.get("/api/trades")
-def api_trades(limit: int = 100, user: str = Depends(require_user)):
-    return db.get_trades(limit=limit)
+def api_trades(limit: int = 100, mode: str = Depends(require_mode), user: str = Depends(require_user)):
+    return db.get_trades(mode, limit=limit)
 
 
 @app.get("/api/performance")
-def api_performance(user: str = Depends(require_user)):
-    rows = db.get_trades(limit=5000, today_only=True)
+def api_performance(mode: str = Depends(require_mode), user: str = Depends(require_user)):
+    rows = db.get_trades(mode, limit=5000, today_only=True)
     pairs = perf.pair_trades(rows)
     aggregates = perf.aggregate(pairs)
     r_values = perf.compute_r_multiples(pairs)
@@ -155,13 +157,13 @@ def api_performance(user: str = Depends(require_user)):
 
 
 @app.get("/api/watchlist")
-def api_watchlist(user: str = Depends(require_user)):
-    return db.get_watchlist()
+def api_watchlist(mode: str = Depends(require_mode), user: str = Depends(require_user)):
+    return db.get_watchlist(mode)
 
 
 @app.get("/api/decision_log")
-def api_decision_log(limit: int = 100, user: str = Depends(require_user)):
-    rows = db.get_decision_log(limit=limit)
+def api_decision_log(limit: int = 100, mode: str = Depends(require_mode), user: str = Depends(require_user)):
+    rows = db.get_decision_log(mode, limit=limit)
     for r in rows:
         try:
             r["payload"] = json.loads(r["payload_json"])
@@ -171,6 +173,13 @@ def api_decision_log(limit: int = 100, user: str = Depends(require_user)):
 
 
 # ------------------------------------------------------------- strategies ---
+# Strategies are shared across both modes — no `mode` param here. Actions
+# are logged into both modes' activity logs so either tab shows them.
+def _log_strategy_action(user: str, **fields):
+    for m in db.MODES:
+        db.log_decision(m, "dashboard_control", user=user, **fields)
+
+
 @app.get("/api/strategies")
 def api_list_strategies(user: str = Depends(require_user)):
     return db.list_strategies()
@@ -193,7 +202,7 @@ async def api_create_strategy(request: Request, user: str = Depends(require_user
     if not name or not isinstance(rules, dict):
         raise HTTPException(status_code=400, detail="name and rules are required")
     strategy_id = db.create_strategy(name, rules)
-    db.log_decision("dashboard_control", action="create_strategy", user=user, name=name)
+    _log_strategy_action(user, action="create_strategy", name=name)
     return {"id": strategy_id}
 
 
@@ -206,7 +215,7 @@ async def api_update_strategy(strategy_id: int, request: Request, user: str = De
     if not isinstance(rules, dict):
         raise HTTPException(status_code=400, detail="rules is required")
     db.update_strategy(strategy_id, rules)
-    db.log_decision("dashboard_control", action="update_strategy", user=user, strategy_id=strategy_id)
+    _log_strategy_action(user, action="update_strategy", strategy_id=strategy_id)
     return {"ok": True}
 
 
@@ -215,7 +224,7 @@ def api_activate_strategy(strategy_id: int, user: str = Depends(require_user)):
     if not db.get_strategy(strategy_id):
         raise HTTPException(status_code=404, detail="Strategy not found")
     db.activate_strategy(strategy_id)
-    db.log_decision("dashboard_control", action="activate_strategy", user=user, strategy_id=strategy_id)
+    _log_strategy_action(user, action="activate_strategy", strategy_id=strategy_id)
     return {"ok": True}
 
 
@@ -225,5 +234,5 @@ def api_delete_strategy(strategy_id: int, user: str = Depends(require_user)):
         db.delete_strategy(strategy_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    db.log_decision("dashboard_control", action="delete_strategy", user=user, strategy_id=strategy_id)
+    _log_strategy_action(user, action="delete_strategy", strategy_id=strategy_id)
     return {"ok": True}

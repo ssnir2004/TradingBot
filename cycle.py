@@ -1,11 +1,13 @@
-"""The autonomous trading cycle. Runs every 5 minutes from the always-on
-service (see run_service.py). On each tick: checks market hours, handles any
-pending emergency flatten-all request from the dashboard, reconciles
-stop-outs, manages open positions (breakeven flip, partial profit, swing-low
-trailing stop) — always, regardless of the enabled flag, so an open position
-never goes unmanaged — then, only if the bot is enabled from the dashboard,
-scans the watchlist for new Trend Join Long entries. Force-closes everything
-before the close.
+"""One tick of the trading cycle, for a given mode ('paper' or 'live'). Runs
+every 5 minutes from the always-on service (see run_service.py) — one
+scheduler instance per mode, each connecting to its own IB Gateway process.
+On each tick: checks market hours, handles any pending emergency
+flatten-all request from the dashboard, reconciles stop-outs, manages open
+positions (breakeven flip, partial profit, swing-low trailing stop) —
+always, regardless of the enabled flag, so an open position never goes
+unmanaged — then, only if the bot is enabled from the dashboard, scans the
+watchlist for new Trend Join Long entries. Force-closes everything before
+the close.
 
 Time gate (America/New_York):
     Sat/Sun                        -> "weekend"   (exit <1s)
@@ -14,6 +16,7 @@ Time gate (America/New_York):
     15:51-16:00                    -> "force_close"
     10:05-15:30                    -> "ok" (full cycle: manage + scan)
 """
+import argparse
 import math
 import subprocess
 import sys
@@ -27,7 +30,7 @@ import yfinance as yf
 from dotenv import dotenv_values
 from ib_async import Stock, StopOrder
 
-from src import db
+from src import db, mode_config
 from src.ibkr_client import IBKRClient
 from src.notify import notify
 
@@ -40,6 +43,8 @@ MANAGE_ONLY_MORNING_END = dt_time(10, 5)
 MANAGE_ONLY_AFTERNOON_START = dt_time(15, 30)
 FORCE_CLOSE_START = dt_time(15, 51)
 CLOSED_START = dt_time(16, 0)
+
+ACCOUNT_REFRESH_CLIENT_ID = 5  # dedicated id so this never collides with the cycle (2) or trade.py (3) connections
 
 
 # ---------------------------------------------------------------- Step 1 ---
@@ -59,18 +64,26 @@ def time_gate(now_et: datetime | None = None) -> str:
     return "ok"
 
 
-def log_decision(entry: dict):
+def log_decision(mode: str, entry: dict):
     entry = dict(entry)
     event = entry.pop("event")
-    db.log_decision(event, **entry)
+    db.log_decision(mode, event, **entry)
 
 
 def _env() -> dict:
     return dotenv_values(PROJECT_DIR / ".env")
 
 
+def _connect(env: dict, mode: str, client_id: int) -> IBKRClient:
+    return IBKRClient(
+        env.get("IBKR_HOST", "127.0.0.1"),
+        mode_config.ibkr_port(env, mode),
+        client_id,
+    )
+
+
 # ---------------------------------------------------------------- Step 3 ---
-def check_stop_outs(ib, positions: list[dict]) -> list[dict]:
+def check_stop_outs(mode: str, ib, positions: list[dict]) -> list[dict]:
     if not positions:
         return positions
 
@@ -90,10 +103,10 @@ def check_stop_outs(ib, positions: list[dict]) -> list[dict]:
                 continue
             if fill.execution.orderId == stop_order_id:
                 pnl = (fill.execution.avgPrice - pos["entry_price"]) * pos["qty"]
-                notify(f"STOP {pos['symbol']}", f"exit ${fill.execution.avgPrice:.2f}, P&L ${pnl:+.2f}", "default")
-                log_decision({"event": "stop_out", "symbol": pos["symbol"], "fill_price": fill.execution.avgPrice, "pnl": pnl})
+                notify(f"[{mode.upper()}] STOP {pos['symbol']}", f"exit ${fill.execution.avgPrice:.2f}, P&L ${pnl:+.2f}", "default")
+                log_decision(mode, {"event": "stop_out", "symbol": pos["symbol"], "fill_price": fill.execution.avgPrice, "pnl": pnl})
                 stopped_symbols.add(pos["symbol"])
-                db.remove_position(pos["symbol"])
+                db.remove_position(mode, pos["symbol"])
 
     return [p for p in positions if p["symbol"] not in stopped_symbols]
 
@@ -127,13 +140,13 @@ def _place_stop(ib, symbol: str, quantity: int, stop_price: float) -> int:
     return trade.order.orderId
 
 
-def _market_sell(ib, symbol: str, quantity: int) -> bool:
+def _market_sell(mode: str, ib, symbol: str, quantity: int) -> bool:
     proc = subprocess.run(
-        [sys.executable, str(PROJECT_DIR / "trade.py"),
+        [sys.executable, str(PROJECT_DIR / "trade.py"), "--mode", mode,
          "--symbol", symbol, "--side", "SELL", "--size", str(quantity)],
         capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
     )
-    log_decision({"event": "market_sell_subprocess", "symbol": symbol, "qty": quantity, "stdout": proc.stdout})
+    log_decision(mode, {"event": "market_sell_subprocess", "symbol": symbol, "qty": quantity, "stdout": proc.stdout})
     return proc.returncode == 0
 
 
@@ -163,7 +176,7 @@ def _current_price(symbol: str) -> float | None:
 
 
 # ---------------------------------------------------------------- Step 4 ---
-def manage_position(ib, pos: dict, rules: dict) -> dict:
+def manage_position(mode: str, ib, pos: dict, rules: dict) -> dict:
     exit_cfg = rules["exit"]
     price = _current_price(pos["symbol"])
     if price is None:
@@ -182,12 +195,12 @@ def manage_position(ib, pos: dict, rules: dict) -> dict:
             pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], entry)
             pos["stop_price"] = entry
             pos["state"] = "post_breakeven_no_partial"
-            notify(f"BE {pos['symbol']}", f"stop -> ${entry:.2f}", "default")
-            log_decision({"event": "breakeven_flip", "symbol": pos["symbol"], "new_stop": entry})
+            notify(f"[{mode.upper()}] BE {pos['symbol']}", f"stop -> ${entry:.2f}", "default")
+            log_decision(mode, {"event": "breakeven_flip", "symbol": pos["symbol"], "new_stop": entry})
         elif r_multiple >= exit_cfg["partial_profit_trigger_R"]:
             sell_qty = math.ceil(pos["qty"] * exit_cfg["partial_profit_fraction"])
             sell_qty = min(sell_qty, pos["qty"])
-            if _market_sell(ib, pos["symbol"], sell_qty):
+            if _market_sell(mode, ib, pos["symbol"], sell_qty):
                 remaining = pos["qty"] - sell_qty
                 new_stop_price = entry * 0.99
                 _cancel_stop(ib, pos.get("stop_order_id"))
@@ -196,8 +209,8 @@ def manage_position(ib, pos: dict, rules: dict) -> dict:
                     pos["stop_order_id"] = _place_stop(ib, pos["symbol"], remaining, new_stop_price)
                     pos["stop_price"] = new_stop_price
                 pos["state"] = "post_breakeven_partial_done"
-                notify(f"PARTIAL {pos['symbol']}", f"sold {sell_qty}/{sell_qty + remaining} @ ${price:.2f}", "default")
-                log_decision({"event": "partial_profit", "symbol": pos["symbol"], "sold": sell_qty, "price": price})
+                notify(f"[{mode.upper()}] PARTIAL {pos['symbol']}", f"sold {sell_qty}/{sell_qty + remaining} @ ${price:.2f}", "default")
+                log_decision(mode, {"event": "partial_profit", "symbol": pos["symbol"], "sold": sell_qty, "price": price})
 
     if pos["state"].startswith("post_breakeven"):
         bars = _get_5min_bars(pos["symbol"])
@@ -211,29 +224,29 @@ def manage_position(ib, pos: dict, rules: dict) -> dict:
                     pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], candidate_stop)
                     old_stop = pos.get("stop_price", pos["initial_stop"])
                     pos["stop_price"] = candidate_stop
-                    notify(f"TRAIL {pos['symbol']}", f"stop ${old_stop:.2f} -> ${candidate_stop:.2f}", "default")
-                    log_decision({"event": "trail_stop", "symbol": pos["symbol"], "old": old_stop, "new": candidate_stop})
+                    notify(f"[{mode.upper()}] TRAIL {pos['symbol']}", f"stop ${old_stop:.2f} -> ${candidate_stop:.2f}", "default")
+                    log_decision(mode, {"event": "trail_stop", "symbol": pos["symbol"], "old": old_stop, "new": candidate_stop})
 
     if pos["qty"] > 0:
-        db.upsert_position(pos)
+        db.upsert_position(mode, pos)
     return pos
 
 
 # ---------------------------------------------------------------- Step 6 ---
-def force_close_all(ib, positions: list[dict]):
+def force_close_all(mode: str, ib, positions: list[dict]):
     if not positions:
         return
 
-    notify("EOD Force Close", f"flattening {len(positions)} positions", "high")
+    notify(f"[{mode.upper()}] EOD Force Close", f"flattening {len(positions)} positions", "high")
     for pos in positions:
         _cancel_stop(ib, pos.get("stop_order_id"))
-        _market_sell(ib, pos["symbol"], pos["qty"])
-        log_decision({"event": "force_close", "symbol": pos["symbol"], "qty": pos["qty"]})
-        db.remove_position(pos["symbol"])
+        _market_sell(mode, ib, pos["symbol"], pos["qty"])
+        log_decision(mode, {"event": "force_close", "symbol": pos["symbol"], "qty": pos["qty"]})
+        db.remove_position(mode, pos["symbol"])
 
 
 # ---------------------------------------------------------------- Step 8 ---
-def _evaluate_entry_filters(ticker: str, rules: dict) -> dict | None:
+def _evaluate_entry_filters(mode: str, ticker: str, rules: dict) -> dict | None:
     """Evaluate D1-D3 (daily) and I1-I3 (intraday) from the active strategy's
     rules for one ticker. Returns {"price", "low_of_day"} on a full pass,
     else None. Uses yfinance only (same free/keyless data source as
@@ -289,7 +302,7 @@ def _evaluate_entry_filters(ticker: str, rules: dict) -> dict | None:
         i3 = rvol >= intraday_filters["I3_rvol_min"]
 
         passed = bool(d1 and d2 and d3 and i1 and i2 and i3)
-        log_decision({
+        log_decision(mode, {
             "event": "filter_eval", "symbol": ticker, "pass": passed,
             "D1": bool(d1), "D2": bool(d2), "D3": bool(d3),
             "I1": bool(i1), "I2": bool(i2), "I3": bool(i3),
@@ -300,28 +313,28 @@ def _evaluate_entry_filters(ticker: str, rules: dict) -> dict | None:
             return None
         return {"price": current_price, "low_of_day": low_of_day}
     except Exception as exc:  # noqa: BLE001 - one bad ticker must not kill the scan
-        log_decision({"event": "filter_eval_error", "symbol": ticker, "error": str(exc)})
+        log_decision(mode, {"event": "filter_eval_error", "symbol": ticker, "error": str(exc)})
         return None
 
 
-def entry_scan(ib, positions: list[dict], rules: dict, env: dict) -> list[dict]:
-    max_trades_per_day = int(env.get("MAX_TRADES_PER_DAY", 5))
-    if db.count_todays_buys() >= max_trades_per_day:
+def entry_scan(mode: str, ib, positions: list[dict], rules: dict, env: dict) -> list[dict]:
+    risk = mode_config.risk_params(env, mode)
+    if db.count_todays_buys(mode) >= risk["max_trades_per_day"]:
         return positions
 
     max_concurrent = rules["risk"]["max_concurrent_positions"]
     if len(positions) >= max_concurrent:
         return positions
 
-    watchlist = [row["symbol"] for row in db.get_watchlist()]
+    watchlist = [row["symbol"] for row in db.get_watchlist(mode)]
     if not watchlist:
         return positions
 
     held_symbols = {p.contract.symbol for p in ib.positions() if p.position > 0}
     held_symbols |= {p["symbol"] for p in positions}
 
-    portfolio_value = float(env.get("PORTFOLIO_VALUE_USD", 25000))
-    max_risk_pct = float(env.get("MAX_RISK_PER_TRADE_PCT", 1.0))
+    portfolio_value = risk["portfolio_value"]
+    max_risk_pct = risk["max_risk_pct"]
     max_position_pct = rules["risk"]["max_position_size_pct_of_portfolio"] / 100
 
     for ticker in watchlist:
@@ -329,10 +342,10 @@ def entry_scan(ib, positions: list[dict], rules: dict, env: dict) -> list[dict]:
             break
         if ticker in held_symbols:
             continue
-        if db.count_todays_buys() >= max_trades_per_day:
+        if db.count_todays_buys(mode) >= risk["max_trades_per_day"]:
             break
 
-        signal = _evaluate_entry_filters(ticker, rules)
+        signal = _evaluate_entry_filters(mode, ticker, rules)
         if signal is None:
             continue
 
@@ -351,11 +364,11 @@ def entry_scan(ib, positions: list[dict], rules: dict, env: dict) -> list[dict]:
             continue
 
         proc = subprocess.run(
-            [sys.executable, str(PROJECT_DIR / "trade.py"),
+            [sys.executable, str(PROJECT_DIR / "trade.py"), "--mode", mode,
              "--symbol", ticker, "--side", "BUY", "--size", str(size)],
             capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
         )
-        log_decision({"event": "entry_attempt", "symbol": ticker, "qty": size, "price": price, "stdout": proc.stdout})
+        log_decision(mode, {"event": "entry_attempt", "symbol": ticker, "qty": size, "price": price, "stdout": proc.stdout})
         if proc.returncode != 0:
             continue
 
@@ -371,19 +384,19 @@ def entry_scan(ib, positions: list[dict], rules: dict, env: dict) -> list[dict]:
             "state": "pre_breakeven",
             "r_multiple": 0.0,
         }
-        db.upsert_position(new_position)
+        db.upsert_position(mode, new_position)
         positions.append(new_position)
         held_symbols.add(ticker)
-        notify(f"BUY {ticker}", f"@ ${price:.2f}, stop ${initial_stop:.2f}, qty {size}", "default")
-        log_decision({"event": "entry", "symbol": ticker, "price": price, "stop": initial_stop, "qty": size})
+        notify(f"[{mode.upper()}] BUY {ticker}", f"@ ${price:.2f}, stop ${initial_stop:.2f}, qty {size}", "default")
+        log_decision(mode, {"event": "entry", "symbol": ticker, "price": price, "stop": initial_stop, "qty": size})
 
     return positions
 
 
 # -------------------------------------------------------------------- main
-def run_cycle():
-    """Runs one tick of the trading cycle. Safe to call every 5 minutes
-    all day — it self-gates on market hours."""
+def run_cycle(mode: str):
+    """Runs one tick of the trading cycle for the given mode. Safe to call
+    every 5 minutes all day — it self-gates on market hours."""
     status = time_gate()
     if status in ("weekend", "too_early", "closed"):
         return status
@@ -392,57 +405,50 @@ def run_cycle():
     try:
         env = _env()
         rules = db.get_active_rules()
+        client_id = int(env.get("IBKR_CLIENT_ID", 2))
 
         try:
-            ibkr = IBKRClient(
-                env.get("IBKR_HOST", "127.0.0.1"),
-                int(env.get("IBKR_PORT", 7497)),
-                int(env.get("IBKR_CLIENT_ID", 2)),
-            )
+            ibkr = _connect(env, mode, client_id)
         except Exception:
             import time as _time
             _time.sleep(5)
-            ibkr = IBKRClient(
-                env.get("IBKR_HOST", "127.0.0.1"),
-                int(env.get("IBKR_PORT", 7497)),
-                int(env.get("IBKR_CLIENT_ID", 2)),
-            )
+            ibkr = _connect(env, mode, client_id)
 
         ib = ibkr.ib
-        positions = db.get_open_positions()
+        positions = db.get_open_positions(mode)
 
         # Emergency "flatten everything now" request from the dashboard takes
         # priority over the normal cycle, but position management always runs
         # first regardless of the enabled flag, per Step 3/4 below.
-        if db.consume_flatten_request():
-            positions = check_stop_outs(ib, positions)
-            force_close_all(ib, positions)
-            db.record_cycle_run("flattened_on_request")
+        if db.consume_flatten_request(mode):
+            positions = check_stop_outs(mode, ib, positions)
+            force_close_all(mode, ib, positions)
+            db.record_cycle_run(mode, "flattened_on_request")
             return "flattened_on_request"
 
-        positions = check_stop_outs(ib, positions)  # Step 3
-        positions = [manage_position(ib, p, rules) for p in positions]  # Step 4
+        positions = check_stop_outs(mode, ib, positions)  # Step 3
+        positions = [manage_position(mode, ib, p, rules) for p in positions]  # Step 4
 
         if status == "force_close":  # Step 6
-            force_close_all(ib, positions)
-            db.record_cycle_run(status)
+            force_close_all(mode, ib, positions)
+            db.record_cycle_run(mode, status)
             return status
 
         if status == "manage_only":  # Step 7
-            db.record_cycle_run(status)
+            db.record_cycle_run(mode, status)
             return status
 
-        if db.is_bot_enabled():
-            entry_scan(ib, positions, rules, env)  # Step 8
+        if db.is_bot_enabled(mode):
+            entry_scan(mode, ib, positions, rules, env)  # Step 8
         else:
-            log_decision({"event": "entries_paused", "reason": "bot_disabled"})
+            log_decision(mode, {"event": "entries_paused", "reason": "bot_disabled"})
 
-        db.record_cycle_run(status)
+        db.record_cycle_run(mode, status)
         return status
     except Exception as exc:  # noqa: BLE001
-        db.log_cycle_error(traceback.format_exc())
-        notify("Cycle CRASHED", str(exc)[:500], "high")
-        db.record_cycle_run("error")
+        db.log_cycle_error(mode, traceback.format_exc())
+        notify(f"[{mode.upper()}] Cycle CRASHED", str(exc)[:500], "high")
+        db.record_cycle_run(mode, "error")
         if ibkr is not None:
             ibkr.disconnect()
         raise
@@ -451,25 +457,19 @@ def run_cycle():
             ibkr.disconnect()
 
 
-ACCOUNT_REFRESH_CLIENT_ID = 5  # dedicated id so this never collides with the cycle (2) or trade.py (3) connections
-
-
-def refresh_account_info():
+def refresh_account_info(mode: str):
     """Pulls net liquidation / cash balance / buying power from IBKR and
     stores it in the DB for the dashboard. Runs on its own IBKR client id,
     independent of market hours, so the dashboard has something to show
     even outside the trading window."""
     env = _env()
-    ibkr = IBKRClient(
-        env.get("IBKR_HOST", "127.0.0.1"),
-        int(env.get("IBKR_PORT", 7497)),
-        ACCOUNT_REFRESH_CLIENT_ID,
-    )
+    ibkr = _connect(env, mode, ACCOUNT_REFRESH_CLIENT_ID)
     try:
         ib = ibkr.ib
         ib.sleep(2)  # let account summary data populate after connecting
         values = {row.tag: row.value for row in ib.accountSummary()}
         db.update_account_info(
+            mode,
             values.get("NetLiquidation", ""),
             values.get("TotalCashValue", ""),
             values.get("BuyingPower", ""),
@@ -478,33 +478,34 @@ def refresh_account_info():
         ibkr.disconnect()
 
 
-def emergency_check():
+def emergency_check(mode: str):
     """Cheap poll for a pending dashboard flatten-all request. Only opens an
     IBKR connection when the flag is actually set, so this is safe to call
     frequently (e.g. every 15-30s) from the service scheduler."""
-    if db.get_setting("flatten_now", "false") != "true":
+    if db.get_setting(f"{mode}:flatten_now", "false") != "true":
         return
 
     env = _env()
-    ibkr = IBKRClient(
-        env.get("IBKR_HOST", "127.0.0.1"),
-        int(env.get("IBKR_PORT", 7497)),
-        int(env.get("IBKR_CLIENT_ID", 2)),
-    )
+    client_id = int(env.get("IBKR_CLIENT_ID", 2))
+    ibkr = _connect(env, mode, client_id)
     try:
-        if db.consume_flatten_request():
-            positions = db.get_open_positions()
-            positions = check_stop_outs(ibkr.ib, positions)
-            force_close_all(ibkr.ib, positions)
-            db.record_cycle_run("flattened_on_request")
+        if db.consume_flatten_request(mode):
+            positions = db.get_open_positions(mode)
+            positions = check_stop_outs(mode, ibkr.ib, positions)
+            force_close_all(mode, ibkr.ib, positions)
+            db.record_cycle_run(mode, "flattened_on_request")
     finally:
         ibkr.disconnect()
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=db.MODES, default="paper")
+    args = parser.parse_args()
+
     db.init_db(seed_rules_path=PROJECT_DIR / "rules.json")
     try:
-        run_cycle()
+        run_cycle(args.mode)
     except Exception:
         sys.exit(1)
 

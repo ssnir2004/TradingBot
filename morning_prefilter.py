@@ -124,10 +124,14 @@ def run_scan(min_gap: float, min_price: float, dry_run: bool) -> dict:
             )
         WATCHLIST_PATH.write_text("\n".join(lines) + "\n")
 
-        db.replace_watchlist([
-            {"symbol": s["ticker"], "gap_pct": s["gap_pct"], "open_price": s["open"], "prev_close": s["prev_close"]}
-            for s in survivors
-        ])
+        # The scan itself is market data, not account-specific — the same
+        # survivors feed both the paper and live engines, so one scan
+        # writes the watchlist for every mode rather than running it twice.
+        for mode in db.MODES:
+            db.replace_watchlist(mode, [
+                {"symbol": s["ticker"], "gap_pct": s["gap_pct"], "open_price": s["open"], "prev_close": s["prev_close"]}
+                for s in survivors
+            ])
 
     top_20_survivors = [f"{s['ticker']} ({s['gap_pct']:+.2f}%)" for s in survivors]
 

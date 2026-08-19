@@ -15,7 +15,7 @@ from src import db
 ET = ZoneInfo("America/New_York")
 
 
-def evaluate(symbol: str, ib) -> dict:
+def evaluate(mode: str, symbol: str, ib) -> dict:
     rules = db.get_active_rules()
     time_filter = rules["time_filter"]
     earliest = time_filter["earliest_entry_et"]
@@ -25,7 +25,7 @@ def evaluate(symbol: str, ib) -> dict:
     for position in ib.positions():
         if position.contract.symbol == symbol and position.position > 0:
             result = {"pass": bool(False), "reasons": ["already in position"], "price": 0.0}
-            db.log_decision("dev_tool_evaluate", symbol=symbol, **result)
+            db.log_decision(mode, "dev_tool_evaluate", symbol=symbol, **result)
             return result
 
     # b) time window
@@ -37,7 +37,7 @@ def evaluate(symbol: str, ib) -> dict:
             "reasons": [f"outside entry window {earliest}-{latest}"],
             "price": 0.0,
         }
-        db.log_decision("dev_tool_evaluate", symbol=symbol, **result)
+        db.log_decision(mode, "dev_tool_evaluate", symbol=symbol, **result)
         return result
 
     # c) time gate ok, no existing position -> fetch current price
@@ -53,5 +53,5 @@ def evaluate(symbol: str, ib) -> dict:
         "reasons": ["time gate ok", "no existing position"],
         "price": float(price),
     }
-    db.log_decision("dev_tool_evaluate", symbol=symbol, **result)
+    db.log_decision(mode, "dev_tool_evaluate", symbol=symbol, **result)
     return result

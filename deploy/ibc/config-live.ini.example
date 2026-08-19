@@ -1,0 +1,33 @@
+# IBC configuration for the LIVE-mode headless IB Gateway — real money.
+# Copy this to config-live.ini, fill in your real credentials, and NEVER
+# commit that file. (deploy/ibc/config-live.ini is already in .gitignore.)
+#
+# See config-paper.ini.example for the full commentary on every setting
+# below — this file only calls out where it differs.
+
+# ---- credentials ----
+# Usually identical to config-paper.ini — paper trading uses the same IBKR
+# login as your live account, just a different TradingMode.
+IbLoginId=your_ibkr_username
+IbPassword=your_ibkr_password
+TradingMode=live
+
+# ---- unattended operation ----
+AcceptIncomingConnectionAction=accept
+AllowBlindTrading=no
+ReadOnlyLogin=no
+AcceptNonBrokerageAccountWarning=yes
+DismissPasswordExpiryWarning=yes
+DismissNSEComplianceNotice=yes
+ExistingSessionDetectedAction=primary
+
+# ---- the 2FA reality check (same caveat as paper — see config-paper.ini.example) ----
+SecondFactorAuthenticationTimeout=180
+
+# Staggered a few minutes from the paper instance's restart so both don't
+# reconnect (and both potentially need 2FA approval) at the exact same
+# moment.
+AutoRestartTime=11:50 PM
+
+# ---- logging ----
+LogComponents=open

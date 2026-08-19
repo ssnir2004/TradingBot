@@ -1,18 +1,19 @@
-"""Scheduled job (16:05 ET): sends the daily Telegram P&L summary. The live
-dashboard gets the same numbers from src/perf.py directly via the API, so
-this script's only job is the Telegram push.
+"""Scheduled job (16:05 ET): sends the daily Telegram P&L summary, once per
+mode. The live dashboard gets the same numbers from src/perf.py directly
+via the API, so this script's only job is the Telegram push.
 """
+import argparse
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from src import perf
+from src import db, perf
 from src.notify import notify
 
 ET = ZoneInfo("America/New_York")
 
 
-def run():
-    aggregates = perf.today_summary()
+def run(mode: str):
+    aggregates = perf.today_summary(mode)
 
     if aggregates["total_trades"] == 0:
         body = "No closed trades today."
@@ -25,9 +26,12 @@ def run():
             f"Worst: {aggregates['largest_loser']['symbol']} ${aggregates['largest_loser']['pnl_usd']:+.2f}\n"
             f"PF: {aggregates['profit_factor']}"
         )
-    notify(f"Daily Summary {datetime.now(ET).strftime('%Y-%m-%d')}", body, "default")
+    notify(f"[{mode.upper()}] Daily Summary {datetime.now(ET).strftime('%Y-%m-%d')}", body, "default")
     return aggregates
 
 
 if __name__ == "__main__":
-    print(run())
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=db.MODES, default="paper")
+    args = parser.parse_args()
+    print(run(args.mode))
