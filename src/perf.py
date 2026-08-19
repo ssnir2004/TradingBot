@@ -19,38 +19,53 @@ R_BUCKETS = [
 
 
 def pair_trades(rows: list[dict]) -> list[dict]:
-    """FIFO-pair BUY rows with SELL rows per symbol."""
-    open_buys = defaultdict(list)
+    """FIFO-pairs opening and closing trades per symbol. A symbol is only
+    ever long XOR short at a time — cycle.py's entry_scan for either
+    direction checks all currently-held symbols regardless of side before
+    entering — so whichever action opens a symbol's position (BUY or SELL)
+    determines that pair's side: BUY-then-SELL is a long, SELL-then-BUY is
+    a short. pnl_usd = (sell_price - buy_price) * size holds unchanged for
+    both — a short's SELL is its (higher, ideally) opening price and its
+    BUY is its (lower, ideally) closing price, so the same subtraction
+    still yields the profit."""
+    open_trades = defaultdict(list)
     pairs = []
     for row in sorted(rows, key=lambda r: (r["timestamp_iso"], r.get("id", 0))):
         symbol = row["symbol"]
-        if row["side"] == "BUY":
-            open_buys[symbol].append(row)
-        elif row["side"] == "SELL" and open_buys[symbol]:
-            buy_row = open_buys[symbol].pop(0)
-            buy_price = float(buy_row["fill_price"] or 0)
-            sell_price = float(row["fill_price"] or 0)
-            size = min(int(buy_row["size"]), int(row["size"]))
+        pending = open_trades[symbol]
+        if pending and pending[0]["side"] != row["side"]:
+            open_row = pending.pop(0)
+            side = "long" if open_row["side"] == "BUY" else "short"
+            open_price = float(open_row["fill_price"] or 0)
+            close_price = float(row["fill_price"] or 0)
+            buy_price, sell_price = (open_price, close_price) if side == "long" else (close_price, open_price)
+            size = min(int(open_row["size"]), int(row["size"]))
             pnl_usd = (sell_price - buy_price) * size
-            pnl_pct = ((sell_price - buy_price) / buy_price * 100) if buy_price else 0.0
+            move_pct = ((close_price - open_price) / open_price * 100) if open_price else 0.0
+            pnl_pct = move_pct if side == "long" else -move_pct
             try:
                 hold_minutes = (
                     datetime.fromisoformat(row["timestamp_iso"])
-                    - datetime.fromisoformat(buy_row["timestamp_iso"])
+                    - datetime.fromisoformat(open_row["timestamp_iso"])
                 ).total_seconds() / 60
             except ValueError:
                 hold_minutes = None
             pairs.append({
                 "symbol": symbol,
+                "side": side,
                 "buy_price": buy_price,
                 "sell_price": sell_price,
+                "open_price": open_price,
+                "close_price": close_price,
                 "size": size,
                 "pnl_usd": pnl_usd,
                 "pnl_pct": pnl_pct,
                 "hold_minutes": hold_minutes,
-                "buy_time": buy_row["timestamp_iso"],
-                "sell_time": row["timestamp_iso"],
+                "buy_time": open_row["timestamp_iso"] if side == "long" else row["timestamp_iso"],
+                "sell_time": row["timestamp_iso"] if side == "long" else open_row["timestamp_iso"],
             })
+        else:
+            pending.append(row)
     return pairs
 
 
@@ -88,16 +103,23 @@ def aggregate(pairs: list[dict]) -> dict:
 
 
 def compute_r_multiples(pairs: list[dict]) -> list[float]:
-    open_positions_by_symbol = {}  # closed positions won't be in the open table anymore
+    # closed positions won't be in the open table anymore, so this is
+    # always the 1% fallback proxy, mirrored for a short's stop (above
+    # entry) vs a long's (below entry).
     r_values = []
     for p in pairs:
-        stop = open_positions_by_symbol.get(p["symbol"])
-        if stop is None:
-            stop = p["buy_price"] * 0.99  # fallback proxy: 1% initial risk
-        risk_per_share = p["buy_price"] - stop
+        open_price = p["open_price"]
+        if p["side"] == "short":
+            stop = open_price * 1.01
+            risk_per_share = stop - open_price
+            move = open_price - p["close_price"]
+        else:
+            stop = open_price * 0.99
+            risk_per_share = open_price - stop
+            move = p["close_price"] - open_price
         if risk_per_share <= 0:
             continue
-        r_values.append((p["sell_price"] - p["buy_price"]) / risk_per_share)
+        r_values.append(move / risk_per_share)
     return r_values
 
 

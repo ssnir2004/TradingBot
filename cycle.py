@@ -3,11 +3,20 @@ every 5 minutes from the always-on service (see run_service.py) — one
 scheduler instance per mode, each connecting to its own IB Gateway process.
 On each tick: checks market hours, handles any pending emergency
 flatten-all request from the dashboard, reconciles stop-outs, manages open
-positions (breakeven flip, partial profit, swing-low trailing stop) —
-always, regardless of the enabled flag, so an open position never goes
-unmanaged — then, only if the bot is enabled from the dashboard, scans the
-watchlist for new Trend Join Long entries. Force-closes everything before
-the close.
+positions (breakeven flip, partial profit, swing trailing stop) — always,
+regardless of the enabled flag, so an open position never goes unmanaged —
+then, only if the bot is enabled from the dashboard, scans the watchlist for
+new entries under EACH direction's own active strategy (long and short
+trade independently — see db.py's per-direction "active strategy" model;
+either can be off with no active strategy for that side, in which case
+that side simply doesn't open new positions). Force-closes everything
+before the close.
+
+Long and short are exact mirrors of each other throughout this file: a
+long buys low expecting a breakout up (stop below entry, sells to close);
+a short sells high expecting a breakdown down (stop above entry, buys to
+close). Every position-touching function branches on pos["side"] (or an
+explicit `side` argument before a position exists yet).
 
 Time gate (America/New_York):
     Sat/Sun                        -> "weekend"   (exit <1s)
@@ -45,6 +54,16 @@ FORCE_CLOSE_START = dt_time(15, 51)
 CLOSED_START = dt_time(16, 0)
 
 ACCOUNT_REFRESH_CLIENT_ID = 5  # dedicated id so this never collides with the cycle (2) or trade.py (3) connections
+
+# Used by manage_position only when a held position's side no longer has an
+# active strategy (deactivated or deleted after the position was opened) —
+# a position must never go unmanaged just because its strategy is gone.
+# Matches rules.json's original defaults.
+_FALLBACK_EXIT_CFG = {
+    "partial_profit_trigger_R": 0.75,
+    "partial_profit_fraction": 0.3333,
+    "breakeven_trigger_R": 1.0,
+}
 
 
 # ---------------------------------------------------------------- Step 1 ---
@@ -95,6 +114,7 @@ def check_stop_outs(mode: str, ib, positions: list[dict]) -> list[dict]:
         stop_order_id = pos.get("stop_order_id")
         if stop_order_id is None:
             continue
+        side = pos.get("side", "long")
         for fill in fills:
             fill_time = fill.time
             if fill_time.tzinfo is None:
@@ -102,9 +122,12 @@ def check_stop_outs(mode: str, ib, positions: list[dict]) -> list[dict]:
             if fill_time.astimezone(ET) < cutoff:
                 continue
             if fill.execution.orderId == stop_order_id:
-                pnl = (fill.execution.avgPrice - pos["entry_price"]) * pos["qty"]
+                if side == "short":
+                    pnl = (pos["entry_price"] - fill.execution.avgPrice) * pos["qty"]
+                else:
+                    pnl = (fill.execution.avgPrice - pos["entry_price"]) * pos["qty"]
                 notify(f"[{mode.upper()}] STOP {pos['symbol']}", f"exit ${fill.execution.avgPrice:.2f}, P&L ${pnl:+.2f}", "default")
-                log_decision(mode, {"event": "stop_out", "symbol": pos["symbol"], "fill_price": fill.execution.avgPrice, "pnl": pnl})
+                log_decision(mode, {"event": "stop_out", "symbol": pos["symbol"], "side": side, "fill_price": fill.execution.avgPrice, "pnl": pnl})
                 stopped_symbols.add(pos["symbol"])
                 db.remove_position(mode, pos["symbol"])
 
@@ -132,21 +155,27 @@ def _cancel_stop(ib, order_id: int | None):
         ib.cancelOrder(order)
 
 
-def _place_stop(ib, symbol: str, quantity: int, stop_price: float) -> int:
+def _place_stop(ib, symbol: str, quantity: int, stop_price: float, side: str) -> int:
+    """A long's protective stop is a SELL (closes if price falls); a
+    short's is a BUY (closes/covers if price rises)."""
     contract = _qualify(ib, symbol)
-    order = StopOrder("SELL", quantity, round(stop_price, 2))
+    action = "SELL" if side == "long" else "BUY"
+    order = StopOrder(action, quantity, round(stop_price, 2))
     trade = ib.placeOrder(contract, order)
     ib.sleep(1)
     return trade.order.orderId
 
 
-def _market_sell(mode: str, ib, symbol: str, quantity: int) -> bool:
+def _market_close(mode: str, ib, symbol: str, quantity: int, side: str) -> bool:
+    """Closes (or trims) a position at market — SELL for a long, BUY for a
+    short — regardless of whether this is a full close or a partial."""
+    action = "SELL" if side == "long" else "BUY"
     proc = subprocess.run(
         [sys.executable, str(PROJECT_DIR / "trade.py"), "--mode", mode,
-         "--symbol", symbol, "--side", "SELL", "--size", str(quantity)],
+         "--symbol", symbol, "--side", action, "--size", str(quantity)],
         capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
     )
-    log_decision(mode, {"event": "market_sell_subprocess", "symbol": symbol, "qty": quantity, "stdout": proc.stdout})
+    log_decision(mode, {"event": "market_close_subprocess", "symbol": symbol, "side": side, "action": action, "qty": quantity, "stdout": proc.stdout})
     return proc.returncode == 0
 
 
@@ -168,6 +197,19 @@ def _find_latest_swing_low(bars: pd.DataFrame) -> float | None:
     return None
 
 
+def _find_latest_swing_high(bars: pd.DataFrame) -> float | None:
+    """Mirror of _find_latest_swing_low, for a short's trailing stop —
+    trails just above the most recent local high instead of just below
+    the most recent local low."""
+    highs = bars["High"].to_numpy()
+    n = len(highs)
+    for i in range(n - 3, 1, -1):
+        if (highs[i] > highs[i - 1] and highs[i] > highs[i - 2]
+                and highs[i] > highs[i + 1] and highs[i] > highs[i + 2]):
+            return float(highs[i])
+    return None
+
+
 def _current_price(symbol: str) -> float | None:
     bars = _get_5min_bars(symbol)
     if bars is None or bars.empty:
@@ -177,55 +219,71 @@ def _current_price(symbol: str) -> float | None:
 
 # ---------------------------------------------------------------- Step 4 ---
 def manage_position(mode: str, ib, pos: dict, rules: dict) -> dict:
+    """rules must be the exit config for pos["side"] — see run_cycle, which
+    picks the right (long or short) active strategy per position, falling
+    back to a safe default if that side no longer has an active strategy
+    (a position stays managed even if its strategy was deactivated or
+    deleted after it was opened)."""
     exit_cfg = rules["exit"]
+    side = pos.get("side", "long")
     price = _current_price(pos["symbol"])
     if price is None:
         return pos
 
     entry = pos["entry_price"]
-    initial_risk = entry - pos["initial_stop"]
+    if side == "short":
+        initial_risk = pos["initial_stop"] - entry
+    else:
+        initial_risk = entry - pos["initial_stop"]
     if initial_risk <= 0:
         return pos
-    r_multiple = (price - entry) / initial_risk
+    r_multiple = ((entry - price) if side == "short" else (price - entry)) / initial_risk
     pos["r_multiple"] = r_multiple
 
     if pos["state"] == "pre_breakeven":
         if r_multiple >= exit_cfg["breakeven_trigger_R"]:
             _cancel_stop(ib, pos.get("stop_order_id"))
-            pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], entry)
+            pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], entry, side)
             pos["stop_price"] = entry
             pos["state"] = "post_breakeven_no_partial"
             notify(f"[{mode.upper()}] BE {pos['symbol']}", f"stop -> ${entry:.2f}", "default")
-            log_decision(mode, {"event": "breakeven_flip", "symbol": pos["symbol"], "new_stop": entry})
+            log_decision(mode, {"event": "breakeven_flip", "symbol": pos["symbol"], "side": side, "new_stop": entry})
         elif r_multiple >= exit_cfg["partial_profit_trigger_R"]:
-            sell_qty = math.ceil(pos["qty"] * exit_cfg["partial_profit_fraction"])
-            sell_qty = min(sell_qty, pos["qty"])
-            if _market_sell(mode, ib, pos["symbol"], sell_qty):
-                remaining = pos["qty"] - sell_qty
-                new_stop_price = entry * 0.99
+            close_qty = math.ceil(pos["qty"] * exit_cfg["partial_profit_fraction"])
+            close_qty = min(close_qty, pos["qty"])
+            if _market_close(mode, ib, pos["symbol"], close_qty, side):
+                remaining = pos["qty"] - close_qty
+                new_stop_price = entry * 1.01 if side == "short" else entry * 0.99
                 _cancel_stop(ib, pos.get("stop_order_id"))
                 pos["qty"] = remaining
                 if remaining > 0:
-                    pos["stop_order_id"] = _place_stop(ib, pos["symbol"], remaining, new_stop_price)
+                    pos["stop_order_id"] = _place_stop(ib, pos["symbol"], remaining, new_stop_price, side)
                     pos["stop_price"] = new_stop_price
                 pos["state"] = "post_breakeven_partial_done"
-                notify(f"[{mode.upper()}] PARTIAL {pos['symbol']}", f"sold {sell_qty}/{sell_qty + remaining} @ ${price:.2f}", "default")
-                log_decision(mode, {"event": "partial_profit", "symbol": pos["symbol"], "sold": sell_qty, "price": price})
+                notify(f"[{mode.upper()}] PARTIAL {pos['symbol']}", f"closed {close_qty}/{close_qty + remaining} @ ${price:.2f}", "default")
+                log_decision(mode, {"event": "partial_profit", "symbol": pos["symbol"], "side": side, "closed": close_qty, "price": price})
 
     if pos["state"].startswith("post_breakeven"):
         bars = _get_5min_bars(pos["symbol"])
         if bars is not None and len(bars) > 5:
-            swing_low = _find_latest_swing_low(bars)
-            if swing_low is not None and swing_low - 0.01 > pos["initial_stop"]:
-                candidate_stop = swing_low - 0.01
+            if side == "short":
+                swing = _find_latest_swing_high(bars)
+                candidate_stop = (swing + 0.01) if swing is not None else None
+                candidate_valid = candidate_stop is not None and candidate_stop < pos["initial_stop"]
+            else:
+                swing = _find_latest_swing_low(bars)
+                candidate_stop = (swing - 0.01) if swing is not None else None
+                candidate_valid = candidate_stop is not None and candidate_stop > pos["initial_stop"]
+            if candidate_valid:
                 current_stop = pos.get("stop_price", pos["initial_stop"])
-                if candidate_stop > current_stop:
+                improves = (candidate_stop < current_stop) if side == "short" else (candidate_stop > current_stop)
+                if improves:
                     _cancel_stop(ib, pos.get("stop_order_id"))
-                    pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], candidate_stop)
+                    pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], candidate_stop, side)
                     old_stop = pos.get("stop_price", pos["initial_stop"])
                     pos["stop_price"] = candidate_stop
                     notify(f"[{mode.upper()}] TRAIL {pos['symbol']}", f"stop ${old_stop:.2f} -> ${candidate_stop:.2f}", "default")
-                    log_decision(mode, {"event": "trail_stop", "symbol": pos["symbol"], "old": old_stop, "new": candidate_stop})
+                    log_decision(mode, {"event": "trail_stop", "symbol": pos["symbol"], "side": side, "old": old_stop, "new": candidate_stop})
 
     if pos["qty"] > 0:
         db.upsert_position(mode, pos)
@@ -239,23 +297,32 @@ def force_close_all(mode: str, ib, positions: list[dict]):
 
     notify(f"[{mode.upper()}] EOD Force Close", f"flattening {len(positions)} positions", "high")
     for pos in positions:
+        side = pos.get("side", "long")
         _cancel_stop(ib, pos.get("stop_order_id"))
-        _market_sell(mode, ib, pos["symbol"], pos["qty"])
-        log_decision(mode, {"event": "force_close", "symbol": pos["symbol"], "qty": pos["qty"]})
+        _market_close(mode, ib, pos["symbol"], pos["qty"], side)
+        log_decision(mode, {"event": "force_close", "symbol": pos["symbol"], "side": side, "qty": pos["qty"]})
         db.remove_position(mode, pos["symbol"])
 
 
 # ---------------------------------------------------------------- Step 8 ---
-def _evaluate_entry_filters(mode: str, ticker: str, rules: dict) -> dict:
-    """Evaluate D1-D3 (daily) and I1-I3 (intraday) from the active strategy's
-    rules for one ticker. Always returns a detail dict with a "pass" bool;
-    on a full pass it also carries "price"/"low_of_day" for sizing, and
-    whenever all six filters could be computed it carries each one's
-    individual result (D1..I3) plus "price"/"gap_pct"/"rvol" — this detail
-    is what the dashboard's Watchlist table shows, so entry_scan (which
-    stops early once daily trade/position caps are hit) isn't the only
-    place this gets computed. Uses yfinance only (same free/keyless data
-    source as morning_prefilter.py), no IBKR connection needed."""
+def _evaluate_entry_filters(mode: str, ticker: str, rules: dict, side: str) -> dict:
+    """Evaluate D1-D3 (daily) and I1-I3 (intraday) from the active side
+    ('long' or 'short') strategy's rules for one ticker. Always returns a
+    detail dict with a "pass" bool; on a full pass it also carries
+    "price"/"stop_ref" for sizing (stop_ref is the low of day for a long's
+    stop, the high of day for a short's), and whenever all six filters
+    could be computed it carries each one's individual result (D1..I3)
+    plus "price"/"gap_pct"/"rvol" — this detail is what the dashboard's
+    Watchlist table shows, so entry_scan (which stops early once daily
+    trade/position caps are hit) isn't the only place this gets computed.
+    Uses yfinance only (same free/keyless data source as
+    morning_prefilter.py), no IBKR connection needed.
+
+    Long and short are exact mirrors: D1 breaks the prior day's high (long)
+    or low (short); D2 wants the prior close on the trend side of the
+    200-day SMA; D3 wants a gap in the trade's direction; I1/I2 want a new
+    premarket/intraday extreme in the trade's direction; I3 (relative
+    volume) is direction-agnostic."""
     daily_filters = rules["daily_filters"]
     intraday_filters = rules["intraday_filters"]
     yahoo_symbol = ticker.replace(" ", "-")
@@ -263,43 +330,47 @@ def _evaluate_entry_filters(mode: str, ticker: str, rules: dict) -> dict:
     try:
         daily = yf.Ticker(yahoo_symbol).history(period="260d", interval="1d")
         if len(daily) < 201:
-            return {"pass": False, "error": "not enough daily history"}
+            return {"pass": False, "side": side, "error": "not enough daily history"}
         prior_day = daily.iloc[-2]
         sma200 = daily["Close"].iloc[-201:-1].mean()
 
         intraday = yf.Ticker(yahoo_symbol).history(period="1d", interval="5m", prepost=True)
         if intraday.empty:
-            return {"pass": False, "error": "no intraday data"}
+            return {"pass": False, "side": side, "error": "no intraday data"}
         intraday.index = intraday.index.tz_convert(ET)
 
         current_price = float(intraday["Close"].iloc[-1])
         today = datetime.now(ET).date()
         today_bars = intraday[intraday.index.date == today]
         if today_bars.empty:
-            return {"pass": False, "error": "no bars for today yet"}
+            return {"pass": False, "side": side, "error": "no bars for today yet"}
 
         premarket_bars = today_bars[today_bars.index.time < dt_time(9, 30)]
         regular_bars = today_bars[today_bars.index.time >= dt_time(9, 30)]
-        low_of_day = float(regular_bars["Low"].min()) if not regular_bars.empty else float(today_bars["Low"].min())
 
-        # D1: price above yesterday's daily high
-        d1 = current_price > float(prior_day["High"])
-        # D2: yesterday's close above the 200-day SMA
-        d2 = float(prior_day["Close"]) > float(sma200)
-        # D3: gap >= min_gap_pct from previous close
         prior_close = float(prior_day["Close"])
         gap_pct = (current_price - prior_close) / prior_close * 100 if prior_close else 0.0
-        d3 = gap_pct >= daily_filters["D3_min_gap_pct_from_prior_close"]
 
-        # I1: price above today's premarket high
-        premarket_high = float(premarket_bars["High"].max()) if not premarket_bars.empty else float("-inf")
-        i1 = current_price > premarket_high
+        if side == "long":
+            stop_ref = float(regular_bars["Low"].min()) if not regular_bars.empty else float(today_bars["Low"].min())
+            d1 = current_price > float(prior_day["High"])  # above yesterday's high
+            d2 = float(prior_day["Close"]) > float(sma200)  # yesterday's close above the 200-day SMA
+            d3 = gap_pct >= daily_filters["D3_min_gap_pct_from_prior_close"]  # gap up >= threshold
+            premarket_extreme = float(premarket_bars["High"].max()) if not premarket_bars.empty else float("-inf")
+            i1 = current_price > premarket_extreme  # above today's premarket high
+            extreme_so_far = float(today_bars["High"].iloc[:-1].max()) if len(today_bars) > 1 else float("-inf")
+            i2 = current_price > extreme_so_far  # new high-of-day
+        else:
+            stop_ref = float(regular_bars["High"].max()) if not regular_bars.empty else float(today_bars["High"].max())
+            d1 = current_price < float(prior_day["Low"])  # below yesterday's low
+            d2 = float(prior_day["Close"]) < float(sma200)  # yesterday's close below the 200-day SMA
+            d3 = gap_pct <= -daily_filters["D3_min_gap_pct_down_from_prior_close"]  # gap down >= threshold
+            premarket_extreme = float(premarket_bars["Low"].min()) if not premarket_bars.empty else float("inf")
+            i1 = current_price < premarket_extreme  # below today's premarket low
+            extreme_so_far = float(today_bars["Low"].iloc[:-1].min()) if len(today_bars) > 1 else float("inf")
+            i2 = current_price < extreme_so_far  # new low-of-day
 
-        # I2: price above today's high-so-far (excluding the current/last bar)
-        hod_so_far = float(today_bars["High"].iloc[:-1].max()) if len(today_bars) > 1 else float("-inf")
-        i2 = current_price > hod_so_far
-
-        # I3: relative volume vs lookback-day average >= threshold
+        # I3: relative volume vs lookback-day average >= threshold (direction-agnostic)
         lookback = intraday_filters["I3_rvol_lookback_days"]
         avg_daily_volume = float(daily["Volume"].iloc[-(lookback + 1):-1].mean())
         today_volume_so_far = float(today_bars["Volume"].sum())
@@ -308,55 +379,66 @@ def _evaluate_entry_filters(mode: str, ticker: str, rules: dict) -> dict:
 
         passed = bool(d1 and d2 and d3 and i1 and i2 and i3)
         detail = {
-            "pass": passed,
+            "pass": passed, "side": side,
             "D1": bool(d1), "D2": bool(d2), "D3": bool(d3),
             "I1": bool(i1), "I2": bool(i2), "I3": bool(i3),
             "price": current_price, "rvol": rvol, "gap_pct": gap_pct,
-            "low_of_day": low_of_day,
+            "stop_ref": stop_ref,
         }
         log_decision(mode, {"event": "filter_eval", "symbol": ticker, **detail})
         return detail
     except Exception as exc:  # noqa: BLE001 - one bad ticker must not kill the scan
-        log_decision(mode, {"event": "filter_eval_error", "symbol": ticker, "error": str(exc)})
-        return {"pass": False, "error": str(exc)}
+        log_decision(mode, {"event": "filter_eval_error", "symbol": ticker, "side": side, "error": str(exc)})
+        return {"pass": False, "side": side, "error": str(exc)}
 
 
-def entry_scan(mode: str, ib, positions: list[dict], rules: dict, env: dict) -> list[dict]:
+def entry_scan(mode: str, ib, positions: list[dict], rules: dict, env: dict, side: str) -> list[dict]:
+    """Scans this side's ('long' or 'short') watchlist for new entries
+    under its own active strategy. positions holds ALL open positions
+    (both sides) — run_cycle chains a long scan then a short scan over the
+    same growing list, so each sees what the other already opened this
+    cycle. Concurrent-position and daily-entry caps are enforced per side
+    (this side's own count against this side's own rules), not pooled
+    across both directions."""
     risk = mode_config.risk_params(env, mode)
-    if db.count_todays_buys(mode) >= risk["max_trades_per_day"]:
+    if db.count_todays_entries(mode, side) >= risk["max_trades_per_day"]:
         return positions
 
     max_concurrent = rules["risk"]["max_concurrent_positions"]
-    if len(positions) >= max_concurrent:
+    side_positions = [p for p in positions if p.get("side", "long") == side]
+    if len(side_positions) >= max_concurrent:
         return positions
 
-    watchlist = [row["symbol"] for row in db.get_watchlist(mode)]
+    watchlist = [row["symbol"] for row in db.get_watchlist(mode, direction=side)]
     if not watchlist:
         return positions
 
-    held_symbols = {p.contract.symbol for p in ib.positions() if p.position > 0}
+    # != 0 (not just > 0) so an existing short in the real account also
+    # blocks a duplicate/conflicting entry, not just existing longs.
+    held_symbols = {p.contract.symbol for p in ib.positions() if p.position != 0}
     held_symbols |= {p["symbol"] for p in positions}
 
     portfolio_value = risk["portfolio_value"]
     max_risk_pct = risk["max_risk_pct"]
     max_position_pct = rules["risk"]["max_position_size_pct_of_portfolio"] / 100
+    action = "BUY" if side == "long" else "SELL"
 
     for ticker in watchlist:
-        if len(positions) >= max_concurrent:
+        if len(side_positions) >= max_concurrent:
             break
         if ticker in held_symbols:
             continue
-        if db.count_todays_buys(mode) >= risk["max_trades_per_day"]:
+        if db.count_todays_entries(mode, side) >= risk["max_trades_per_day"]:
             break
 
-        signal = _evaluate_entry_filters(mode, ticker, rules)
+        signal = _evaluate_entry_filters(mode, ticker, rules, side)
         if not signal.get("pass"):
             continue
 
         price = signal["price"]
-        low_of_day = signal["low_of_day"]
-        initial_stop = low_of_day * 0.99
-        r = price - initial_stop
+        stop_ref = signal["stop_ref"]
+        initial_stop = stop_ref * 1.01 if side == "short" else stop_ref * 0.99
+        r = (initial_stop - price) if side == "short" else (price - initial_stop)
         if r <= 0:
             continue
 
@@ -369,16 +451,17 @@ def entry_scan(mode: str, ib, positions: list[dict], rules: dict, env: dict) -> 
 
         proc = subprocess.run(
             [sys.executable, str(PROJECT_DIR / "trade.py"), "--mode", mode,
-             "--symbol", ticker, "--side", "BUY", "--size", str(size)],
+             "--symbol", ticker, "--side", action, "--size", str(size)],
             capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
         )
-        log_decision(mode, {"event": "entry_attempt", "symbol": ticker, "qty": size, "price": price, "stdout": proc.stdout})
+        log_decision(mode, {"event": "entry_attempt", "symbol": ticker, "side": side, "qty": size, "price": price, "stdout": proc.stdout})
         if proc.returncode != 0:
             continue
 
-        stop_order_id = _place_stop(ib, ticker, size, initial_stop)
+        stop_order_id = _place_stop(ib, ticker, size, initial_stop, side)
         new_position = {
             "symbol": ticker,
+            "side": side,
             "entry_price": price,
             "entry_time_iso": datetime.now(ET).isoformat(timespec="seconds"),
             "qty": size,
@@ -390,32 +473,38 @@ def entry_scan(mode: str, ib, positions: list[dict], rules: dict, env: dict) -> 
         }
         db.upsert_position(mode, new_position)
         positions.append(new_position)
+        side_positions.append(new_position)
         held_symbols.add(ticker)
-        notify(f"[{mode.upper()}] BUY {ticker}", f"@ ${price:.2f}, stop ${initial_stop:.2f}, qty {size}", "default")
-        log_decision(mode, {"event": "entry", "symbol": ticker, "price": price, "stop": initial_stop, "qty": size})
+        notify(f"[{mode.upper()}] {action} {ticker}", f"@ ${price:.2f}, stop ${initial_stop:.2f}, qty {size}", "default")
+        log_decision(mode, {"event": "entry", "symbol": ticker, "side": side, "price": price, "stop": initial_stop, "qty": size})
 
     return positions
 
 
 def scan_watchlist_filters():
-    """Evaluates every watchlist symbol's D1-D3/I1-I3 filters and stores a
-    snapshot for the dashboard's Watchlist table — independent of
-    entry_scan, which stops early once the day's trade/position caps are
-    hit and so doesn't necessarily check every symbol. Pure yfinance, no
-    IBKR connection needed. Mode-agnostic like morning_prefilter (paper and
-    live share the same watchlist and market data), so this runs once and
-    writes the same snapshot to both modes — see run_service.py, which
-    schedules it from the paper instance only."""
+    """Evaluates every watchlist symbol's D1-D3/I1-I3 filters, for whichever
+    side(s) currently have an active strategy, and stores a snapshot for
+    the dashboard's Watchlist table — independent of entry_scan, which
+    stops early once the day's trade/position caps are hit and so doesn't
+    necessarily check every symbol. Pure yfinance, no IBKR connection
+    needed. Mode-agnostic like morning_prefilter (paper and live share the
+    same watchlist and market data), so this runs once and writes the same
+    snapshot to both modes — see run_service.py, which schedules it from
+    the paper instance only. A side with no active strategy is skipped —
+    there's no criteria to check its candidates against."""
     status = time_gate()
     if status in ("weekend", "too_early", "closed"):
         return
 
-    rules = db.get_active_rules()
-    watchlist = db.get_watchlist("paper")
-    results = [
-        {"symbol": row["symbol"], "gap_pct": row["gap_pct"], **_evaluate_entry_filters("paper", row["symbol"], rules)}
-        for row in watchlist
-    ]
+    results = []
+    for side in db.DIRECTIONS:
+        rules = db.get_active_rules(side)
+        if rules is None:
+            continue
+        for row in db.get_watchlist("paper", direction=side):
+            detail = _evaluate_entry_filters("paper", row["symbol"], rules, side)
+            results.append({"symbol": row["symbol"], "gap_pct": row["gap_pct"], **detail})
+
     for mode in db.MODES:
         db.update_watchlist_filters(mode, results)
 
@@ -431,7 +520,8 @@ def run_cycle(mode: str):
     ibkr = None
     try:
         env = _env()
-        rules = db.get_active_rules()
+        long_rules = db.get_active_rules("long")
+        short_rules = db.get_active_rules("short")
         client_id = int(env.get("IBKR_CLIENT_ID", 2))
 
         try:
@@ -454,7 +544,11 @@ def run_cycle(mode: str):
             return "flattened_on_request"
 
         positions = check_stop_outs(mode, ib, positions)  # Step 3
-        positions = [manage_position(mode, ib, p, rules) for p in positions]  # Step 4
+        rules_by_side = {"long": long_rules, "short": short_rules}
+        positions = [
+            manage_position(mode, ib, p, rules_by_side.get(p.get("side", "long")) or {"exit": _FALLBACK_EXIT_CFG})
+            for p in positions
+        ]  # Step 4
 
         if status == "force_close":  # Step 6
             force_close_all(mode, ib, positions)
@@ -465,8 +559,11 @@ def run_cycle(mode: str):
             db.record_cycle_run(mode, status)
             return status
 
-        if db.is_bot_enabled(mode):
-            entry_scan(mode, ib, positions, rules, env)  # Step 8
+        if db.is_bot_enabled(mode):  # Step 8 — each direction scans under its own active strategy
+            if long_rules is not None:
+                positions = entry_scan(mode, ib, positions, long_rules, env, "long")
+            if short_rules is not None:
+                positions = entry_scan(mode, ib, positions, short_rules, env, "short")
         else:
             log_decision(mode, {"event": "entries_paused", "reason": "bot_disabled"})
 

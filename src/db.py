@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS trades (
 CREATE TABLE IF NOT EXISTS positions (
     mode TEXT NOT NULL DEFAULT 'paper',
     symbol TEXT NOT NULL,
+    side TEXT NOT NULL DEFAULT 'long',
     entry_price REAL NOT NULL,
     entry_time_iso TEXT NOT NULL,
     qty INTEGER NOT NULL,
@@ -67,6 +68,7 @@ CREATE TABLE IF NOT EXISTS positions (
 CREATE TABLE IF NOT EXISTS watchlist (
     mode TEXT NOT NULL DEFAULT 'paper',
     symbol TEXT NOT NULL,
+    direction TEXT NOT NULL DEFAULT 'long',
     gap_pct REAL,
     open_price REAL,
     prev_close REAL,
@@ -77,6 +79,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
 CREATE TABLE IF NOT EXISTS strategies (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
+    direction TEXT NOT NULL DEFAULT 'long',
     rules_json TEXT NOT NULL,
     is_active INTEGER NOT NULL DEFAULT 0,
     risk_rating TEXT NOT NULL DEFAULT 'moderate',
@@ -135,6 +138,11 @@ DEFAULT_SETTINGS_PER_MODE = {
 # them (delete is permanent; it will not come back on the next restart
 # unless its exact name is re-inserted, which INSERT OR IGNORE only does
 # while a row with that name doesn't already exist elsewhere).
+#
+# Each tuple is (name, rules_dict, risk_rating, direction). Long and short
+# strategies activate independently (see activate_strategy) — one active
+# strategy per direction at a time, not one global active strategy — so
+# both a long and a short strategy can be active and trading at once.
 EXTRA_STRATEGY_PRESETS = [
     (
         "Trend Join Long - Moderate",
@@ -169,6 +177,7 @@ EXTRA_STRATEGY_PRESETS = [
             },
         },
         "moderate",
+        "long",
     ),
     (
         "Trend Join Long - Aggressive",
@@ -203,6 +212,48 @@ EXTRA_STRATEGY_PRESETS = [
             },
         },
         "aggressive",
+        "long",
+    ),
+    (
+        # Exact mirror of rules.json's long default, flipped for breakdowns
+        # instead of breakouts: below the prior day's low/SMA200 instead of
+        # above, gap DOWN instead of up, stop above the high of day instead
+        # of below the low, profit-taking/breakeven/trailing all trigger on
+        # the price falling instead of rising. Same numeric thresholds as
+        # the long default, so it's the "same conservatism," mirrored.
+        "Trend Break Short (default)",
+        {
+            "strategy_name": "Trend Break Short",
+            "direction": "short_only",
+            "trade_timeframe": "5m",
+            "universe_filters": {"index": "S&P 500", "min_price_usd": 3.0},
+            "daily_filters": {
+                "D1_below_prior_day_low": True,
+                "D2_prior_close_below_sma200": True,
+                "D3_min_gap_pct_down_from_prior_close": 3.0,
+            },
+            "intraday_filters": {
+                "I1_below_premarket_low": True,
+                "I2_below_today_lod": True,
+                "I3_rvol_min": 2.0,
+                "I3_rvol_lookback_days": 14,
+            },
+            "time_filter": {"earliest_entry_et": "10:05", "latest_entry_et": "15:30", "force_close_et": "15:51"},
+            "exit": {
+                "initial_stop_rule": "hod_plus_1pct",
+                "partial_profit_trigger_R": 0.75,
+                "partial_profit_fraction": 0.3333,
+                "breakeven_trigger_R": 1.0,
+                "post_breakeven_trail": "swing_high_5m_2_2",
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+            },
+        },
+        "conservative",
+        "short",
     ),
 ]
 
@@ -302,6 +353,9 @@ def init_db(seed_rules_path: Path | None = None):
         )
         _migrate_settings_to_per_mode(conn)
         _migrate_add_column(conn, "strategies", "risk_rating", "TEXT NOT NULL DEFAULT 'moderate'")
+        _migrate_add_column(conn, "strategies", "direction", "TEXT NOT NULL DEFAULT 'long'")
+        _migrate_add_column(conn, "positions", "side", "TEXT NOT NULL DEFAULT 'long'")
+        _migrate_add_column(conn, "watchlist", "direction", "TEXT NOT NULL DEFAULT 'long'")
         # The shipped default strategy predates risk_rating and got the
         # generic 'moderate' default from the ALTER TABLE above — it's
         # actually the conservative baseline every preset above is loosened
@@ -324,17 +378,17 @@ def init_db(seed_rules_path: Path | None = None):
             now = datetime.now(ET).isoformat(timespec="seconds")
             rules_json = seed_rules_path.read_text()
             conn.execute(
-                "INSERT INTO strategies (name, rules_json, is_active, risk_rating, created_at, updated_at) "
-                "VALUES (?, ?, 1, 'conservative', ?, ?)",
+                "INSERT INTO strategies (name, direction, rules_json, is_active, risk_rating, created_at, updated_at) "
+                "VALUES (?, 'long', ?, 1, 'conservative', ?, ?)",
                 ("Trend Join Long (default)", rules_json, now, now),
             )
 
-        for name, rules, risk_rating in EXTRA_STRATEGY_PRESETS:
+        for name, rules, risk_rating, direction in EXTRA_STRATEGY_PRESETS:
             now = datetime.now(ET).isoformat(timespec="seconds")
             conn.execute(
-                "INSERT OR IGNORE INTO strategies (name, rules_json, is_active, risk_rating, created_at, updated_at) "
-                "VALUES (?, ?, 0, ?, ?, ?)",
-                (name, json.dumps(rules, indent=2), risk_rating, now, now),
+                "INSERT OR IGNORE INTO strategies (name, direction, rules_json, is_active, risk_rating, created_at, updated_at) "
+                "VALUES (?, ?, ?, 0, ?, ?, ?)",
+                (name, direction, json.dumps(rules, indent=2), risk_rating, now, now),
             )
 
 
@@ -447,15 +501,28 @@ def get_trades(mode: str, limit: int = 200, today_only: bool = False) -> list[di
         return [dict(r) for r in rows]
 
 
-def count_todays_buys(mode: str) -> int:
+def count_todays_entries(mode: str, side: str) -> int:
+    """Counts today's *opening* trades for one side ('long' or 'short') —
+    long opens with a BUY, short opens with a SELL, so this can't just
+    count trades table rows by BUY/SELL action (a SELL can also be a long
+    being closed). Backed by the 'entry' decision_log events cycle.py logs
+    on every successful open, each tagged with its side."""
     _check_mode(mode)
     today = datetime.now(ET).strftime("%Y-%m-%d")
     with get_conn() as conn:
-        row = conn.execute(
-            "SELECT COUNT(*) AS c FROM trades WHERE mode = ? AND side = 'BUY' AND timestamp_iso LIKE ?",
+        rows = conn.execute(
+            "SELECT payload_json FROM decision_log WHERE mode = ? AND event = 'entry' AND timestamp_iso LIKE ?",
             (mode, f"{today}%"),
-        ).fetchone()
-        return row["c"]
+        ).fetchall()
+    count = 0
+    for r in rows:
+        try:
+            payload = json.loads(r["payload_json"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if payload.get("side") == side:
+            count += 1
+    return count
 
 
 # ------------------------------------------------------------- positions ---
@@ -468,11 +535,12 @@ def get_open_positions(mode: str) -> list[dict]:
 
 def upsert_position(mode: str, pos: dict):
     _check_mode(mode)
+    pos = {"side": "long", **pos}  # default for callers that predate short support
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO positions (mode, symbol, entry_price, entry_time_iso, qty, initial_stop, "
+            "INSERT INTO positions (mode, symbol, side, entry_price, entry_time_iso, qty, initial_stop, "
             "stop_price, stop_order_id, state, r_multiple) VALUES "
-            "(:mode, :symbol, :entry_price, :entry_time_iso, :qty, :initial_stop, :stop_price, "
+            "(:mode, :symbol, :side, :entry_price, :entry_time_iso, :qty, :initial_stop, :stop_price, "
             ":stop_order_id, :state, :r_multiple) "
             "ON CONFLICT(mode, symbol) DO UPDATE SET "
             "qty=excluded.qty, initial_stop=excluded.initial_stop, stop_price=excluded.stop_price, "
@@ -489,23 +557,31 @@ def remove_position(mode: str, symbol: str):
 
 # ------------------------------------------------------------- watchlist ---
 def replace_watchlist(mode: str, entries: list[dict]):
+    """Replaces the ENTIRE watchlist (both directions) for this mode — a
+    caller that only scans one direction must pass the other direction's
+    current entries back in too, or they'll be wiped. morning_prefilter.py
+    scans both in one pass for exactly this reason."""
     _check_mode(mode)
     now = datetime.now(ET).isoformat(timespec="seconds")
     with get_conn() as conn:
         conn.execute("DELETE FROM watchlist WHERE mode = ?", (mode,))
         conn.executemany(
-            "INSERT INTO watchlist (mode, symbol, gap_pct, open_price, prev_close, generated_at) "
-            "VALUES (:mode, :symbol, :gap_pct, :open_price, :prev_close, :generated_at)",
-            [{**e, "mode": mode, "generated_at": now} for e in entries],
+            "INSERT INTO watchlist (mode, symbol, direction, gap_pct, open_price, prev_close, generated_at) "
+            "VALUES (:mode, :symbol, :direction, :gap_pct, :open_price, :prev_close, :generated_at)",
+            [{"direction": "long", **e, "mode": mode, "generated_at": now} for e in entries],
         )
 
 
-def get_watchlist(mode: str) -> list[dict]:
+def get_watchlist(mode: str, direction: str | None = None) -> list[dict]:
     _check_mode(mode)
+    query = "SELECT * FROM watchlist WHERE mode = ?"
+    params = [mode]
+    if direction is not None:
+        query += " AND direction = ?"
+        params.append(direction)
+    query += " ORDER BY ABS(gap_pct) DESC"
     with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM watchlist WHERE mode = ? ORDER BY gap_pct DESC", (mode,)
-        ).fetchall()
+        rows = conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
 
@@ -575,27 +651,43 @@ def trim_old_rows(retention_days: int = 90):
 
 
 # ------------------------------------------------------------ strategies ---
-# Strategies are shared across both modes — there is one active strategy at
-# a time, and both the paper and live engines trade whichever one is active.
+# Strategies are shared across both modes. Unlike before, "active" is now
+# per-direction, not global: one active long strategy and one active short
+# strategy can run at the same time (long and short trade independently
+# and never hold the same symbol at once, since entry_scan for either
+# checks all currently-held symbols regardless of side) — see
+# activate_strategy. A direction with no active strategy simply doesn't
+# trade that side; get_active_rules returns None for it rather than
+# raising, since "short trading off" is a normal, common state.
+DIRECTIONS = ("long", "short")
+
+
+def _check_direction(direction: str):
+    if direction not in DIRECTIONS:
+        raise ValueError(f"direction must be one of {DIRECTIONS}, got {direction!r}")
+
+
 def list_strategies() -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT id, name, is_active, risk_rating, created_at, updated_at FROM strategies ORDER BY id"
+            "SELECT id, name, direction, is_active, risk_rating, created_at, updated_at "
+            "FROM strategies ORDER BY direction, id"
         ).fetchall()
         return [dict(r) for r in rows]
 
 
-def get_active_strategy() -> dict | None:
+def get_active_strategy(direction: str) -> dict | None:
+    _check_direction(direction)
     with get_conn() as conn:
-        row = conn.execute("SELECT * FROM strategies WHERE is_active = 1 LIMIT 1").fetchone()
+        row = conn.execute(
+            "SELECT * FROM strategies WHERE is_active = 1 AND direction = ? LIMIT 1", (direction,)
+        ).fetchone()
         return dict(row) if row else None
 
 
-def get_active_rules() -> dict:
-    strategy = get_active_strategy()
-    if not strategy:
-        raise RuntimeError("No active strategy configured")
-    return json.loads(strategy["rules_json"])
+def get_active_rules(direction: str) -> dict | None:
+    strategy = get_active_strategy(direction)
+    return json.loads(strategy["rules_json"]) if strategy else None
 
 
 def get_strategy(strategy_id: int) -> dict | None:
@@ -604,19 +696,24 @@ def get_strategy(strategy_id: int) -> dict | None:
         return dict(row) if row else None
 
 
-def create_strategy(name: str, rules: dict, risk_rating: str = "moderate") -> int:
+def create_strategy(name: str, rules: dict, direction: str, risk_rating: str = "moderate") -> int:
+    _check_direction(direction)
     _check_risk_rating(risk_rating)
     now = datetime.now(ET).isoformat(timespec="seconds")
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO strategies (name, rules_json, is_active, risk_rating, created_at, updated_at) "
-            "VALUES (?, ?, 0, ?, ?, ?)",
-            (name, json.dumps(rules, indent=2), risk_rating, now, now),
+            "INSERT INTO strategies (name, direction, rules_json, is_active, risk_rating, created_at, updated_at) "
+            "VALUES (?, ?, ?, 0, ?, ?, ?)",
+            (name, direction, json.dumps(rules, indent=2), risk_rating, now, now),
         )
         return cur.lastrowid
 
 
 def update_strategy(strategy_id: int, rules: dict, risk_rating: str | None = None):
+    # direction is intentionally not editable here — it defines what the
+    # rules JSON's fields even mean (D1_above_prior_day_high vs
+    # D1_below_prior_day_low, etc), so changing it on an existing strategy
+    # would silently invalidate its own rules rather than convert them.
     if risk_rating is not None:
         _check_risk_rating(risk_rating)
     now = datetime.now(ET).isoformat(timespec="seconds")
@@ -634,8 +731,14 @@ def update_strategy(strategy_id: int, rules: dict, risk_rating: str | None = Non
 
 
 def activate_strategy(strategy_id: int):
+    """Deactivates only OTHER strategies of the SAME direction, then
+    activates this one — so activating a short strategy never touches
+    whichever long strategy is currently active, and vice versa."""
     with get_conn() as conn:
-        conn.execute("UPDATE strategies SET is_active = 0")
+        row = conn.execute("SELECT direction FROM strategies WHERE id = ?", (strategy_id,)).fetchone()
+        if not row:
+            raise ValueError(f"Strategy {strategy_id} not found")
+        conn.execute("UPDATE strategies SET is_active = 0 WHERE direction = ?", (row["direction"],))
         conn.execute("UPDATE strategies SET is_active = 1 WHERE id = ?", (strategy_id,))
 
 

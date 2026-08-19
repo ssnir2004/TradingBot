@@ -16,7 +16,12 @@ ET = ZoneInfo("America/New_York")
 
 
 def evaluate(mode: str, symbol: str, ib) -> dict:
-    rules = db.get_active_rules()
+    # bot.py (this function's only caller) is a long-only dev tool.
+    rules = db.get_active_rules("long")
+    if rules is None:
+        result = {"pass": bool(False), "reasons": ["no active long strategy"], "price": 0.0}
+        db.log_decision(mode, "dev_tool_evaluate", symbol=symbol, **result)
+        return result
     time_filter = rules["time_filter"]
     earliest = time_filter["earliest_entry_et"]
     latest = time_filter["latest_entry_et"]

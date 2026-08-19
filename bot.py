@@ -39,7 +39,7 @@ def main():
     env = dotenv_values(PROJECT_DIR / ".env")
     risk = mode_config.risk_params(env, args.mode)
 
-    if db.count_todays_buys(args.mode) >= risk["max_trades_per_day"]:
+    if db.count_todays_entries(args.mode, "long") >= risk["max_trades_per_day"]:
         log(f"MAX_TRADES_PER_DAY ({risk['max_trades_per_day']}) reached for today, skipping")
         sys.exit(0)
 

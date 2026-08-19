@@ -245,12 +245,15 @@ def api_positions(mode: str = Depends(require_mode), user: str = Depends(require
             price = cycle._current_price(pos["symbol"])
         except Exception:
             pass
-        risk_per_share = pos["entry_price"] - pos["initial_stop"]
+        side = pos.get("side", "long")
+        if side == "short":
+            risk_per_share = pos["initial_stop"] - pos["entry_price"]
+            move = (pos["entry_price"] - price) if price is not None else None
+        else:
+            risk_per_share = pos["entry_price"] - pos["initial_stop"]
+            move = (price - pos["entry_price"]) if price is not None else None
         pos["current_price"] = price
-        pos["unrealized_r"] = (
-            (price - pos["entry_price"]) / risk_per_share
-            if price is not None and risk_per_share > 0 else None
-        )
+        pos["unrealized_r"] = (move / risk_per_share) if move is not None and risk_per_share > 0 else None
     return positions
 
 
@@ -319,13 +322,16 @@ async def api_create_strategy(request: Request, user: str = Depends(require_user
     body = await request.json()
     name = body.get("name")
     rules = body.get("rules")
+    direction = body.get("direction", "long")
     risk_rating = body.get("risk_rating", "moderate")
     if not name or not isinstance(rules, dict):
         raise HTTPException(status_code=400, detail="name and rules are required")
+    if direction not in db.DIRECTIONS:
+        raise HTTPException(status_code=400, detail=f"direction must be one of {db.DIRECTIONS}")
     if risk_rating not in db.RISK_RATINGS:
         raise HTTPException(status_code=400, detail=f"risk_rating must be one of {db.RISK_RATINGS}")
-    strategy_id = db.create_strategy(name, rules, risk_rating)
-    _log_strategy_action(user, action="create_strategy", name=name, risk_rating=risk_rating)
+    strategy_id = db.create_strategy(name, rules, direction, risk_rating)
+    _log_strategy_action(user, action="create_strategy", name=name, direction=direction, risk_rating=risk_rating)
     return {"id": strategy_id}
 
 
