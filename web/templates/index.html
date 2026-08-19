@@ -171,8 +171,8 @@
     </div>
     <div class="card-body p-0">
       <table class="table table-sm mb-0">
-        <thead><tr><th>Name</th><th>Active</th><th>Updated</th><th></th></tr></thead>
-        <tbody id="strategies-body"><tr><td colspan="4" class="text-center text-muted">Loading…</td></tr></tbody>
+        <thead><tr><th>Name</th><th>Risk</th><th>Active</th><th>Updated</th><th></th></tr></thead>
+        <tbody id="strategies-body"><tr><td colspan="5" class="text-center text-muted">Loading…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -191,6 +191,14 @@
         <div class="mb-2">
           <label class="form-label">Name</label>
           <input type="text" id="strategy-name" class="form-control">
+        </div>
+        <div class="mb-2">
+          <label class="form-label">Risk rating</label>
+          <select id="strategy-risk-rating" class="form-select">
+            <option value="conservative">Conservative</option>
+            <option value="moderate">Moderate</option>
+            <option value="aggressive">Aggressive</option>
+          </select>
         </div>
         <label class="form-label">Rules (JSON)</label>
         <textarea id="strategy-rules" class="form-control rules-editor"></textarea>
@@ -360,22 +368,43 @@ async function refreshPerformance() {
     </div>`).join("") || '<p class="text-muted">No closed trades</p>';
 }
 
+const RISK_BADGE_CLASS = { conservative: "bg-info text-dark", moderate: "bg-warning text-dark", aggressive: "bg-danger" };
+
 async function refreshStrategies() {
   const rows = await api("/api/strategies");
   const body = document.getElementById("strategies-body");
   body.innerHTML = rows.map(s => `<tr>
     <td>${s.name}</td>
+    <td><span class="badge ${RISK_BADGE_CLASS[s.risk_rating] || "bg-secondary"}">${s.risk_rating}</span></td>
     <td>${s.is_active ? '<span class="badge bg-success">active</span>' : ""}</td>
     <td class="small">${s.updated_at}</td>
     <td class="text-end">
-      ${s.is_active ? "" : `<button class="btn btn-sm btn-outline-success" onclick="activateStrategy(${s.id})">Activate</button>`}
+      ${s.is_active ? "" : `<button class="btn btn-sm btn-outline-success" onclick="activateStrategy(${s.id}, '${s.risk_rating}')">Activate</button>`}
       <button class="btn btn-sm btn-outline-secondary" onclick="editStrategy(${s.id})">Edit</button>
       ${s.is_active ? "" : `<button class="btn btn-sm btn-outline-danger" onclick="deleteStrategy(${s.id})">Delete</button>`}
     </td>
   </tr>`).join("");
 }
 
-async function activateStrategy(id) { await api(`/api/strategies/${id}/activate`, { method: "POST" }); refreshStrategies(); }
+async function activateStrategy(id, riskRating) {
+  const payload = {};
+  if (riskRating === "aggressive") {
+    const typed = prompt(
+      'This strategy takes effect on LIVE immediately too (strategies are shared across paper/live).\n' +
+      'Type exactly "ACTIVATE AGGRESSIVE" to confirm:'
+    );
+    if (typed !== "ACTIVATE AGGRESSIVE") { alert("Not confirmed — strategy was not activated."); return; }
+    payload.confirm = typed;
+  }
+  try {
+    await api(`/api/strategies/${id}/activate`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    refreshStrategies();
+  } catch (e) {
+    alert("Could not activate: " + e.message);
+  }
+}
 async function deleteStrategy(id) {
   if (!confirm("Delete this strategy?")) return;
   try { await api(`/api/strategies/${id}`, { method: "DELETE" }); refreshStrategies(); }
@@ -387,6 +416,7 @@ async function editStrategy(id) {
   editingStrategyId = id;
   document.getElementById("strategy-name").value = s.name;
   document.getElementById("strategy-name").disabled = true;
+  document.getElementById("strategy-risk-rating").value = s.risk_rating;
   document.getElementById("strategy-rules").value = JSON.stringify(s.rules, null, 2);
   document.getElementById("strategy-error").textContent = "";
   strategyModal.show();
@@ -396,6 +426,7 @@ document.getElementById("btn-new-strategy").addEventListener("click", async () =
   editingStrategyId = null;
   document.getElementById("strategy-name").value = "";
   document.getElementById("strategy-name").disabled = false;
+  document.getElementById("strategy-risk-rating").value = "moderate";
   const active = (await api("/api/strategies")).find(s => s.is_active);
   const base = active ? await api(`/api/strategies/${active.id}`) : null;
   document.getElementById("strategy-rules").value = base ? JSON.stringify(base.rules, null, 2) : "{}";
@@ -408,17 +439,20 @@ document.getElementById("btn-save-strategy").addEventListener("click", async () 
   let rules;
   try { rules = JSON.parse(document.getElementById("strategy-rules").value); }
   catch (e) { errorEl.textContent = "Invalid JSON: " + e.message; return; }
+  const riskRating = document.getElementById("strategy-risk-rating").value;
 
   try {
     if (editingStrategyId) {
       await api(`/api/strategies/${editingStrategyId}`, {
-        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rules }),
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rules, risk_rating: riskRating }),
       });
     } else {
       const name = document.getElementById("strategy-name").value.trim();
       if (!name) { errorEl.textContent = "Name is required."; return; }
       await api("/api/strategies", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, rules }),
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, rules, risk_rating: riskRating }),
       });
     }
     strategyModal.hide();

@@ -147,13 +147,42 @@
   <div class="card">
     <div class="card-body">
       <h4>אסטרטגיות (Strategies)</h4>
-      <p class="mb-0">
+      <p>
         אפשר לשמור כמה גרסאות של חוקי האסטרטגיה (למשל סף gap שונה, סף
-        רווח חלקי שונה) ולעבור ביניהן בלחיצת כפתור ("Activate"). האסטרטגיה
-        הפעילה משותפת ל-paper ול-live גם יחד - כלומר אם תחליף אסטרטגיה,
-        שני הטאבים יעברו להשתמש בה. "New strategy" יוצר גרסה חדשה שאפשר
-        לערוך את חוקי ה-JSON שלה (אותם שדות D1-D3, I1-I3, exit, risk
-        שמופיעים בטבלאות למעלה) ולהפעיל כשמוכנים.
+        רווח חלקי שונה) ולעבור ביניהן בלחיצת כפתור ("Activate") - <strong>המעבר
+        חל מיידית</strong>, כבר במחזור הבא (עד 5 דקות), בלי צורך להפעיל מחדש שום
+        שירות. האסטרטגיה הפעילה משותפת ל-paper ול-live גם יחד - כלומר אם
+        תחליף אסטרטגיה, שני הטאבים יעברו להשתמש בה. "New strategy" יוצר
+        גרסה חדשה שאפשר לערוך את חוקי ה-JSON שלה (אותם שדות D1-D3, I1-I3,
+        exit, risk שמופיעים בטבלאות למעלה) ולהפעיל כשמוכנים.
+      </p>
+      <h5>דירוג סיכון ו-3 אסטרטגיות מובנות</h5>
+      <p>לכל אסטרטגיה יש דירוג סיכון (Risk rating) - תג צבעוני ליד השם:</p>
+      <table class="table table-sm">
+        <thead><tr><th style="width:140px;">דירוג</th><th>מה זה אומר</th></tr></thead>
+        <tbody>
+          <tr><td><span class="badge" style="background:#0dcaf0;color:#000;">conservative</span></td><td>סף כניסה מחמיר, סיכון נמוך לעסקה - ברירת המחדל המקורית.</td></tr>
+          <tr><td><span class="badge bg-warning text-dark">moderate</span></td><td>סף כניסה קצת יותר רופף, סיכון גבוה מעט לעסקה.</td></tr>
+          <tr><td><span class="badge bg-danger">aggressive</span></td><td>סף כניסה רופף משמעותית (יותר עסקאות, יותר "רעש"), סיכון גבוה משמעותית לעסקה.</td></tr>
+        </tbody>
+      </table>
+      <p>שלוש אסטרטגיות מוכנות מגיעות עם הבוט:</p>
+      <table class="table table-sm">
+        <thead><tr><th>שם</th><th>Gap מינימלי</th><th>RVOL מינימלי</th><th>סיכון/עסקה</th><th>גודל פוזיציה מקס'</th><th>פוזיציות בו-זמנית</th></tr></thead>
+        <tbody>
+          <tr><td>Trend Join Long (default)</td><td>3.0%</td><td>x2.0</td><td>1.0%</td><td>10%</td><td>5</td></tr>
+          <tr><td>Trend Join Long - Moderate</td><td>2.0%</td><td>x1.5</td><td>1.5%</td><td>12%</td><td>6</td></tr>
+          <tr><td>Trend Join Long - Aggressive</td><td>1.5%</td><td>x1.2</td><td>2.5%</td><td>20%</td><td>8</td></tr>
+        </tbody>
+      </table>
+      <p class="mb-0">
+        הפעלת אסטרטגיה מדורגת <span class="badge bg-danger">aggressive</span>
+        דורשת הקלדת משפט אישור (<span class="mono">ACTIVATE AGGRESSIVE</span>)
+        - כי היא חלה על live באופן מיידי, ממש כמו עריכת Risk Settings.
+        <strong>הביצועים של האסטרטגיות האלה לא נבדקו היסטורית</strong> - "פחות
+        שמרן" אומר סף כניסה רופף יותר וסיכון גבוה יותר לעסקה, לא בהכרח
+        תוצאה טובה יותר; מומלץ לבדוק כל אסטרטגיה חדשה במצב PAPER לפרק זמן
+        משמעותי לפני שמפעילים אותה על LIVE.
       </p>
     </div>
   </div>

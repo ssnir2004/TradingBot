@@ -253,10 +253,13 @@ async def api_create_strategy(request: Request, user: str = Depends(require_user
     body = await request.json()
     name = body.get("name")
     rules = body.get("rules")
+    risk_rating = body.get("risk_rating", "moderate")
     if not name or not isinstance(rules, dict):
         raise HTTPException(status_code=400, detail="name and rules are required")
-    strategy_id = db.create_strategy(name, rules)
-    _log_strategy_action(user, action="create_strategy", name=name)
+    if risk_rating not in db.RISK_RATINGS:
+        raise HTTPException(status_code=400, detail=f"risk_rating must be one of {db.RISK_RATINGS}")
+    strategy_id = db.create_strategy(name, rules, risk_rating)
+    _log_strategy_action(user, action="create_strategy", name=name, risk_rating=risk_rating)
     return {"id": strategy_id}
 
 
@@ -266,19 +269,40 @@ async def api_update_strategy(strategy_id: int, request: Request, user: str = De
         raise HTTPException(status_code=404, detail="Strategy not found")
     body = await request.json()
     rules = body.get("rules")
+    risk_rating = body.get("risk_rating")
     if not isinstance(rules, dict):
         raise HTTPException(status_code=400, detail="rules is required")
-    db.update_strategy(strategy_id, rules)
+    if risk_rating is not None and risk_rating not in db.RISK_RATINGS:
+        raise HTTPException(status_code=400, detail=f"risk_rating must be one of {db.RISK_RATINGS}")
+    db.update_strategy(strategy_id, rules, risk_rating)
     _log_strategy_action(user, action="update_strategy", strategy_id=strategy_id)
     return {"ok": True}
 
 
+# Strategies are shared across paper AND live — activating one takes effect
+# on the live engine immediately too. A typed confirmation is required only
+# for the highest tier (aggressive), matching the same speed-bump pattern
+# used for editing LIVE risk sizing.
+ACTIVATE_AGGRESSIVE_CONFIRM_PHRASE = "ACTIVATE AGGRESSIVE"
+
+
 @app.post("/api/strategies/{strategy_id}/activate")
-def api_activate_strategy(strategy_id: int, user: str = Depends(require_user)):
-    if not db.get_strategy(strategy_id):
+async def api_activate_strategy(strategy_id: int, request: Request, user: str = Depends(require_user)):
+    strategy = db.get_strategy(strategy_id)
+    if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
+    if strategy["risk_rating"] == "aggressive":
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if body.get("confirm") != ACTIVATE_AGGRESSIVE_CONFIRM_PHRASE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Type '{ACTIVATE_AGGRESSIVE_CONFIRM_PHRASE}' to confirm activating an aggressive strategy.",
+            )
     db.activate_strategy(strategy_id)
-    _log_strategy_action(user, action="activate_strategy", strategy_id=strategy_id)
+    _log_strategy_action(user, action="activate_strategy", strategy_id=strategy_id, name=strategy["name"])
     return {"ok": True}
 
 

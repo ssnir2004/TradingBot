@@ -24,11 +24,17 @@ DB_PATH = PROJECT_DIR / "data" / "trading_bot.db"
 ET = ZoneInfo("America/New_York")
 
 MODES = ("paper", "live")
+RISK_RATINGS = ("conservative", "moderate", "aggressive")
 
 
 def _check_mode(mode: str):
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
+
+
+def _check_risk_rating(risk_rating: str):
+    if risk_rating not in RISK_RATINGS:
+        raise ValueError(f"risk_rating must be one of {RISK_RATINGS}, got {risk_rating!r}")
 
 
 SCHEMA = """
@@ -73,6 +79,7 @@ CREATE TABLE IF NOT EXISTS strategies (
     name TEXT NOT NULL UNIQUE,
     rules_json TEXT NOT NULL,
     is_active INTEGER NOT NULL DEFAULT 0,
+    risk_rating TEXT NOT NULL DEFAULT 'moderate',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -118,6 +125,87 @@ DEFAULT_SETTINGS_PER_MODE = {
     "last_cycle_timestamp": "",
 }
 
+# Two extra presets seeded alongside the conservative default (rules.json),
+# for switching to something less strict without hand-writing rules JSON.
+# Each loosens the entry filters and/or raises the risk knobs relative to
+# the default — that's what "less conservative" means here: more setups
+# pass the filters, and/or a single trade can risk/hold more. Seeded once
+# by unique name (INSERT OR IGNORE), so re-running init_db is a no-op if
+# they already exist — including if the user has since edited or deleted
+# them (delete is permanent; it will not come back on the next restart
+# unless its exact name is re-inserted, which INSERT OR IGNORE only does
+# while a row with that name doesn't already exist elsewhere).
+EXTRA_STRATEGY_PRESETS = [
+    (
+        "Trend Join Long - Moderate",
+        {
+            "strategy_name": "Trend Join Long - Moderate",
+            "direction": "long_only",
+            "trade_timeframe": "5m",
+            "universe_filters": {"index": "S&P 500", "min_price_usd": 3.0},
+            "daily_filters": {
+                "D1_above_prior_day_high": True,
+                "D2_prior_close_above_sma200": True,
+                "D3_min_gap_pct_from_prior_close": 2.0,
+            },
+            "intraday_filters": {
+                "I1_above_premarket_high": True,
+                "I2_above_today_hod": True,
+                "I3_rvol_min": 1.5,
+                "I3_rvol_lookback_days": 14,
+            },
+            "time_filter": {"earliest_entry_et": "10:05", "latest_entry_et": "15:30", "force_close_et": "15:51"},
+            "exit": {
+                "initial_stop_rule": "lod_minus_1pct",
+                "partial_profit_trigger_R": 1.0,
+                "partial_profit_fraction": 0.3333,
+                "breakeven_trigger_R": 1.25,
+                "post_breakeven_trail": "swing_low_5m_2_2",
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.5,
+                "max_position_size_pct_of_portfolio": 12,
+                "max_concurrent_positions": 6,
+            },
+        },
+        "moderate",
+    ),
+    (
+        "Trend Join Long - Aggressive",
+        {
+            "strategy_name": "Trend Join Long - Aggressive",
+            "direction": "long_only",
+            "trade_timeframe": "5m",
+            "universe_filters": {"index": "S&P 500", "min_price_usd": 3.0},
+            "daily_filters": {
+                "D1_above_prior_day_high": True,
+                "D2_prior_close_above_sma200": True,
+                "D3_min_gap_pct_from_prior_close": 1.5,
+            },
+            "intraday_filters": {
+                "I1_above_premarket_high": True,
+                "I2_above_today_hod": True,
+                "I3_rvol_min": 1.2,
+                "I3_rvol_lookback_days": 10,
+            },
+            "time_filter": {"earliest_entry_et": "10:05", "latest_entry_et": "15:30", "force_close_et": "15:51"},
+            "exit": {
+                "initial_stop_rule": "lod_minus_1pct",
+                "partial_profit_trigger_R": 1.5,
+                "partial_profit_fraction": 0.3333,
+                "breakeven_trigger_R": 2.0,
+                "post_breakeven_trail": "swing_low_5m_2_2",
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 2.5,
+                "max_position_size_pct_of_portfolio": 20,
+                "max_concurrent_positions": 8,
+            },
+        },
+        "aggressive",
+    ),
+]
+
 
 @contextmanager
 def get_conn():
@@ -158,6 +246,13 @@ def _migrate_simple_mode_column(conn, table: str):
     need its primary key changed."""
     if "mode" not in _table_columns(conn, table):
         conn.execute(f"ALTER TABLE {table} ADD COLUMN mode TEXT NOT NULL DEFAULT 'paper'")
+
+
+def _migrate_add_column(conn, table: str, column: str, coldef: str):
+    """Adds a column to an existing table if it isn't there yet (generic
+    ALTER TABLE ADD COLUMN, for tables predating a new field)."""
+    if column not in _table_columns(conn, table):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coldef}")
 
 
 def _migrate_settings_to_per_mode(conn):
@@ -206,6 +301,16 @@ def init_db(seed_rules_path: Path | None = None):
             ["symbol", "gap_pct", "open_price", "prev_close", "generated_at"],
         )
         _migrate_settings_to_per_mode(conn)
+        _migrate_add_column(conn, "strategies", "risk_rating", "TEXT NOT NULL DEFAULT 'moderate'")
+        # The shipped default strategy predates risk_rating and got the
+        # generic 'moderate' default from the ALTER TABLE above — it's
+        # actually the conservative baseline every preset above is loosened
+        # from, so correct it (only while still at that generic default, so
+        # a deliberate manual re-rating via the dashboard isn't clobbered).
+        conn.execute(
+            "UPDATE strategies SET risk_rating = 'conservative' "
+            "WHERE name = 'Trend Join Long (default)' AND risk_rating = 'moderate'"
+        )
         conn.executescript(INDEXES_SCHEMA)
 
         for mode in MODES:
@@ -219,9 +324,17 @@ def init_db(seed_rules_path: Path | None = None):
             now = datetime.now(ET).isoformat(timespec="seconds")
             rules_json = seed_rules_path.read_text()
             conn.execute(
-                "INSERT INTO strategies (name, rules_json, is_active, created_at, updated_at) "
-                "VALUES (?, ?, 1, ?, ?)",
+                "INSERT INTO strategies (name, rules_json, is_active, risk_rating, created_at, updated_at) "
+                "VALUES (?, ?, 1, 'conservative', ?, ?)",
                 ("Trend Join Long (default)", rules_json, now, now),
+            )
+
+        for name, rules, risk_rating in EXTRA_STRATEGY_PRESETS:
+            now = datetime.now(ET).isoformat(timespec="seconds")
+            conn.execute(
+                "INSERT OR IGNORE INTO strategies (name, rules_json, is_active, risk_rating, created_at, updated_at) "
+                "VALUES (?, ?, 0, ?, ?, ?)",
+                (name, json.dumps(rules, indent=2), risk_rating, now, now),
             )
 
 
@@ -436,7 +549,9 @@ def trim_old_rows(retention_days: int = 90):
 # a time, and both the paper and live engines trade whichever one is active.
 def list_strategies() -> list[dict]:
     with get_conn() as conn:
-        rows = conn.execute("SELECT id, name, is_active, created_at, updated_at FROM strategies ORDER BY id").fetchall()
+        rows = conn.execute(
+            "SELECT id, name, is_active, risk_rating, created_at, updated_at FROM strategies ORDER BY id"
+        ).fetchall()
         return [dict(r) for r in rows]
 
 
@@ -459,24 +574,33 @@ def get_strategy(strategy_id: int) -> dict | None:
         return dict(row) if row else None
 
 
-def create_strategy(name: str, rules: dict) -> int:
+def create_strategy(name: str, rules: dict, risk_rating: str = "moderate") -> int:
+    _check_risk_rating(risk_rating)
     now = datetime.now(ET).isoformat(timespec="seconds")
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO strategies (name, rules_json, is_active, created_at, updated_at) "
-            "VALUES (?, ?, 0, ?, ?)",
-            (name, json.dumps(rules, indent=2), now, now),
+            "INSERT INTO strategies (name, rules_json, is_active, risk_rating, created_at, updated_at) "
+            "VALUES (?, ?, 0, ?, ?, ?)",
+            (name, json.dumps(rules, indent=2), risk_rating, now, now),
         )
         return cur.lastrowid
 
 
-def update_strategy(strategy_id: int, rules: dict):
+def update_strategy(strategy_id: int, rules: dict, risk_rating: str | None = None):
+    if risk_rating is not None:
+        _check_risk_rating(risk_rating)
     now = datetime.now(ET).isoformat(timespec="seconds")
     with get_conn() as conn:
-        conn.execute(
-            "UPDATE strategies SET rules_json = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(rules, indent=2), now, strategy_id),
-        )
+        if risk_rating is not None:
+            conn.execute(
+                "UPDATE strategies SET rules_json = ?, risk_rating = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(rules, indent=2), risk_rating, now, strategy_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE strategies SET rules_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(rules, indent=2), now, strategy_id),
+            )
 
 
 def activate_strategy(strategy_id: int):
