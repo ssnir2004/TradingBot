@@ -132,6 +132,7 @@
       <h4>מה מוצג בדשבורד</h4>
       <ul>
         <li><strong>Account</strong> - יתרת מזומן, שווי נטו (Net Liquidation) וכוח קנייה, ישירות מ-IBKR (מתעדכן כל 5 דקות).</li>
+        <li><strong>Risk Settings</strong> - תקציב, גודל עסקה מקסימלי, מספר עסקאות ביום וסיכון מקסימלי לעסקה - נפרד לכל טאב, ניתן לעריכה ישירות מהדשבורד; ראה בהמשך.</li>
         <li><strong>Today's Performance</strong> - כמה עסקאות היום, אחוז הצלחה, רווח/הפסד ברוטו.</li>
         <li><strong>R-Multiple Histogram</strong> - התפלגות תוצאות העסקאות של היום לפי R (ירוק = רווח, אדום = הפסד).</li>
         <li><strong>Open Positions</strong> - פוזיציות שהבוט עצמו פתח וכרגע מנהל.</li>
@@ -159,13 +160,30 @@
 
   <div class="card">
     <div class="card-body">
-      <h4>רשת הביטחון של LIVE</h4>
+      <h4>Risk Settings - עריכת תקציב וגודל עסקה</h4>
+      <p>
+        ה-widget "Risk Settings" בדשבורד (מתחת ל-Account) מאפשר לערוך, לכל
+        טאב בנפרד:
+      </p>
+      <ul>
+        <li><strong>Portfolio Value (USD)</strong> - התקציב שממנו מחושב גודל הפוזיציה.</li>
+        <li><strong>Max Trade Size (USD)</strong> - תקרה עליונה לגודל עסקה בודדת.</li>
+        <li><strong>Max Trades / Day</strong> - מספר עסקאות כניסה מקסימלי ביום.</li>
+        <li><strong>Max Risk % / Trade</strong> - כמה אחוז מהתקציב מותר לסכן בעסקה בודדת.</li>
+      </ul>
+      <p>
+        עריכה בטאב <span class="badge badge-paper">PAPER</span> נשמרת מיד. עריכה
+        בטאב <span class="badge badge-live">LIVE</span> דורשת הקלדת משפט אישור
+        מדויק (<span class="mono">CHANGE LIVE RISK</span>) בחלון שנפתח - זו הגנה
+        מכוונת, כי אלה בדיוק הערכים ששולטים כמה כסף אמיתי יסתכן בעסקה בודדת.
+        האישור נבדק גם בשרת עצמו, לא רק בדפדפן.
+      </p>
       <p class="mb-0">
-        בקובץ <span class="mono">.env</span> בשרת יש <span class="mono">LIVE_PORTFOLIO_VALUE_USD</span>
-        ו-<span class="mono">LIVE_MAX_TRADE_SIZE_USD</span>. כל עוד הם מוגדרים ל-0, חישוב גודל
-        הפוזיציה ב-live יוצא 0 מניות - כלומר <strong>הבוט פיזית לא יכול לפתוח
-        פוזיציה חדשה ב-live</strong>, גם אם "Enable trading" דלוק, עד שתעדכן את
-        הערכים האלה בכוונה תחילה בשרת.
+        <strong>ברירת המחדל ב-live היא 0/0</strong> (Portfolio Value ו-Max
+        Trade Size) - כך שגודל הפוזיציה יוצא 0 מניות וה<strong>בוט לא יכול
+        לפתוח פוזיציה חדשה ב-live</strong> עד שתעדכן את הערכים האלה בכוונה
+        תחילה, דרך המסך הזה (או ידנית ב-<span class="mono">.env</span> בשרת,
+        שעדיין עובד כברירת מחדל לכל ערך שלא נערך מהדשבורד).
       </p>
     </div>
   </div>
