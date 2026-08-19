@@ -408,7 +408,14 @@ document.getElementById("btn-gw-resume").addEventListener("click", async () => {
   }
 });
 
+const RISK_INPUT_IDS = ["risk-portfolio-value", "risk-max-trade-size", "risk-max-trades-per-day", "risk-max-risk-pct"];
+
 async function refreshRiskParams() {
+  // Skip while the user is actively editing one of these fields — the 5s
+  // auto-refresh would otherwise overwrite whatever they just typed with
+  // the still-old server value a moment later.
+  if (RISK_INPUT_IDS.includes(document.activeElement && document.activeElement.id)) return;
+
   const r = await modeApi("/api/risk_params");
   document.getElementById("risk-mode-label").textContent = currentMode.toUpperCase();
   document.getElementById("risk-portfolio-value").value = r.portfolio_value;
