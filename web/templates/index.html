@@ -115,7 +115,7 @@
   </div>
 
   <div class="row g-3 mb-3">
-    <div class="col-lg-7">
+    <div class="col-12">
       <div class="card h-100">
         <div class="card-header">Open Positions</div>
         <div class="card-body p-0">
@@ -126,13 +126,25 @@
         </div>
       </div>
     </div>
-    <div class="col-lg-5">
-      <div class="card h-100">
-        <div class="card-header">Watchlist (today)</div>
-        <div class="card-body p-0">
+  </div>
+
+  <div class="row g-3 mb-3">
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span>Watchlist (today) — live filter check</span>
+          <span class="text-muted small">Checked: <span id="watchlist-checked" class="mono">-</span></span>
+        </div>
+        <div class="small text-muted px-3 pt-2">
+          Sorted by how many of the 6 entry filters currently pass (best candidates first). This runs on its own ~5-minute schedule, independent of trade entries — a symbol can show a full pass here without the bot actually buying it (daily trade/position caps, or the bot being paused).
+        </div>
+        <div class="card-body p-0" style="overflow-x:auto;">
           <table class="table table-sm mb-0">
-            <thead><tr><th>Symbol</th><th>Gap</th><th>Open</th></tr></thead>
-            <tbody id="watchlist-body"><tr><td colspan="3" class="text-center text-muted">Loading…</td></tr></tbody>
+            <thead><tr>
+              <th>Symbol</th><th>Passed</th><th>D1</th><th>D2</th><th>D3</th><th>I1</th><th>I2</th><th>I3</th>
+              <th>Gap</th><th>RVOL</th><th>Price</th>
+            </tr></thead>
+            <tbody id="watchlist-body"><tr><td colspan="11" class="text-center text-muted">Loading…</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -324,11 +336,42 @@ async function refreshPositions() {
   </tr>`).join("");
 }
 
+const FILTER_KEYS = ["D1", "D2", "D3", "I1", "I2", "I3"];
+
+function filterCell(r, key) {
+  if (!(key in r)) return '<td class="text-muted">-</td>';
+  return r[key]
+    ? '<td class="text-success fw-bold">&check;</td>'
+    : '<td class="text-danger">&cross;</td>';
+}
+
 async function refreshWatchlist() {
-  const rows = await modeApi("/api/watchlist");
+  const data = await modeApi("/api/watchlist_filters");
+  document.getElementById("watchlist-checked").textContent = data.updated_at || "not checked yet";
+  const rows = data.results || [];
   const body = document.getElementById("watchlist-body");
-  if (!rows.length) { body.innerHTML = '<tr><td colspan="3" class="text-center text-muted">Empty</td></tr>'; return; }
-  body.innerHTML = rows.map(r => `<tr><td>${r.symbol}</td><td>${Number(r.gap_pct).toFixed(2)}%</td><td>${fmtMoney(r.open_price)}</td></tr>`).join("");
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="11" class="text-center text-muted">Empty</td></tr>'; return; }
+
+  const withCount = rows.map(r => ({
+    ...r,
+    _passedCount: FILTER_KEYS.reduce((n, k) => n + (r[k] ? 1 : 0), 0),
+  }));
+  withCount.sort((a, b) => b._passedCount - a._passedCount || (b.gap_pct || 0) - (a.gap_pct || 0));
+
+  body.innerHTML = withCount.map(r => {
+    const hasFilters = FILTER_KEYS.every(k => k in r);
+    const passedBadge = !hasFilters
+      ? `<span class="badge bg-secondary" title="${r.error || 'no data'}">n/a</span>`
+      : `<span class="badge ${r.pass ? "bg-success" : r._passedCount >= 4 ? "bg-warning text-dark" : "bg-secondary"}">${r._passedCount}/6</span>`;
+    return `<tr>
+      <td class="fw-bold">${r.symbol}</td>
+      <td>${passedBadge}</td>
+      ${FILTER_KEYS.map(k => filterCell(r, k)).join("")}
+      <td>${r.gap_pct !== undefined && r.gap_pct !== null ? Number(r.gap_pct).toFixed(2) + "%" : "-"}</td>
+      <td>${r.rvol !== undefined ? "x" + Number(r.rvol).toFixed(2) : "-"}</td>
+      <td>${fmtMoney(r.price)}</td>
+    </tr>`;
+  }).join("");
 }
 
 async function refreshTrades() {

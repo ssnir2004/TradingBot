@@ -98,6 +98,11 @@ def main():
             CronTrigger(day_of_week="mon-fri", hour=9, minute=25, timezone=ET),
             id="maintenance", misfire_grace_time=300,
         )
+        scheduler.add_job(
+            lambda: _guarded(mode, "watchlist_filters", cycle.scan_watchlist_filters),
+            IntervalTrigger(minutes=5),
+            id="watchlist_filters", misfire_grace_time=60,
+        )
 
     logger.info("[%s] Trading service starting. Jobs: %s", mode, [j.id for j in scheduler.get_jobs()])
     try:

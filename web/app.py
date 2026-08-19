@@ -215,6 +215,11 @@ def api_watchlist(mode: str = Depends(require_mode), user: str = Depends(require
     return db.get_watchlist(mode)
 
 
+@app.get("/api/watchlist_filters")
+def api_watchlist_filters(mode: str = Depends(require_mode), user: str = Depends(require_user)):
+    return db.get_watchlist_filters(mode)
+
+
 @app.get("/api/decision_log")
 def api_decision_log(limit: int = 100, mode: str = Depends(require_mode), user: str = Depends(require_user)):
     rows = db.get_decision_log(mode, limit=limit)

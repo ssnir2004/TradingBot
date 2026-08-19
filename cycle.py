@@ -246,11 +246,16 @@ def force_close_all(mode: str, ib, positions: list[dict]):
 
 
 # ---------------------------------------------------------------- Step 8 ---
-def _evaluate_entry_filters(mode: str, ticker: str, rules: dict) -> dict | None:
+def _evaluate_entry_filters(mode: str, ticker: str, rules: dict) -> dict:
     """Evaluate D1-D3 (daily) and I1-I3 (intraday) from the active strategy's
-    rules for one ticker. Returns {"price", "low_of_day"} on a full pass,
-    else None. Uses yfinance only (same free/keyless data source as
-    morning_prefilter.py)."""
+    rules for one ticker. Always returns a detail dict with a "pass" bool;
+    on a full pass it also carries "price"/"low_of_day" for sizing, and
+    whenever all six filters could be computed it carries each one's
+    individual result (D1..I3) plus "price"/"gap_pct"/"rvol" — this detail
+    is what the dashboard's Watchlist table shows, so entry_scan (which
+    stops early once daily trade/position caps are hit) isn't the only
+    place this gets computed. Uses yfinance only (same free/keyless data
+    source as morning_prefilter.py), no IBKR connection needed."""
     daily_filters = rules["daily_filters"]
     intraday_filters = rules["intraday_filters"]
     yahoo_symbol = ticker.replace(" ", "-")
@@ -258,20 +263,20 @@ def _evaluate_entry_filters(mode: str, ticker: str, rules: dict) -> dict | None:
     try:
         daily = yf.Ticker(yahoo_symbol).history(period="260d", interval="1d")
         if len(daily) < 201:
-            return None
+            return {"pass": False, "error": "not enough daily history"}
         prior_day = daily.iloc[-2]
         sma200 = daily["Close"].iloc[-201:-1].mean()
 
         intraday = yf.Ticker(yahoo_symbol).history(period="1d", interval="5m", prepost=True)
         if intraday.empty:
-            return None
+            return {"pass": False, "error": "no intraday data"}
         intraday.index = intraday.index.tz_convert(ET)
 
         current_price = float(intraday["Close"].iloc[-1])
         today = datetime.now(ET).date()
         today_bars = intraday[intraday.index.date == today]
         if today_bars.empty:
-            return None
+            return {"pass": False, "error": "no bars for today yet"}
 
         premarket_bars = today_bars[today_bars.index.time < dt_time(9, 30)]
         regular_bars = today_bars[today_bars.index.time >= dt_time(9, 30)]
@@ -302,19 +307,18 @@ def _evaluate_entry_filters(mode: str, ticker: str, rules: dict) -> dict | None:
         i3 = rvol >= intraday_filters["I3_rvol_min"]
 
         passed = bool(d1 and d2 and d3 and i1 and i2 and i3)
-        log_decision(mode, {
-            "event": "filter_eval", "symbol": ticker, "pass": passed,
+        detail = {
+            "pass": passed,
             "D1": bool(d1), "D2": bool(d2), "D3": bool(d3),
             "I1": bool(i1), "I2": bool(i2), "I3": bool(i3),
             "price": current_price, "rvol": rvol, "gap_pct": gap_pct,
-        })
-
-        if not passed:
-            return None
-        return {"price": current_price, "low_of_day": low_of_day}
+            "low_of_day": low_of_day,
+        }
+        log_decision(mode, {"event": "filter_eval", "symbol": ticker, **detail})
+        return detail
     except Exception as exc:  # noqa: BLE001 - one bad ticker must not kill the scan
         log_decision(mode, {"event": "filter_eval_error", "symbol": ticker, "error": str(exc)})
-        return None
+        return {"pass": False, "error": str(exc)}
 
 
 def entry_scan(mode: str, ib, positions: list[dict], rules: dict, env: dict) -> list[dict]:
@@ -346,7 +350,7 @@ def entry_scan(mode: str, ib, positions: list[dict], rules: dict, env: dict) -> 
             break
 
         signal = _evaluate_entry_filters(mode, ticker, rules)
-        if signal is None:
+        if not signal.get("pass"):
             continue
 
         price = signal["price"]
@@ -391,6 +395,29 @@ def entry_scan(mode: str, ib, positions: list[dict], rules: dict, env: dict) -> 
         log_decision(mode, {"event": "entry", "symbol": ticker, "price": price, "stop": initial_stop, "qty": size})
 
     return positions
+
+
+def scan_watchlist_filters():
+    """Evaluates every watchlist symbol's D1-D3/I1-I3 filters and stores a
+    snapshot for the dashboard's Watchlist table — independent of
+    entry_scan, which stops early once the day's trade/position caps are
+    hit and so doesn't necessarily check every symbol. Pure yfinance, no
+    IBKR connection needed. Mode-agnostic like morning_prefilter (paper and
+    live share the same watchlist and market data), so this runs once and
+    writes the same snapshot to both modes — see run_service.py, which
+    schedules it from the paper instance only."""
+    status = time_gate()
+    if status in ("weekend", "too_early", "closed"):
+        return
+
+    rules = db.get_active_rules()
+    watchlist = db.get_watchlist("paper")
+    results = [
+        {"symbol": row["symbol"], "gap_pct": row["gap_pct"], **_evaluate_entry_filters("paper", row["symbol"], rules)}
+        for row in watchlist
+    ]
+    for mode in db.MODES:
+        db.update_watchlist_filters(mode, results)
 
 
 # -------------------------------------------------------------------- main
