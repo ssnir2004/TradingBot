@@ -8,18 +8,28 @@ it never talks to IBKR directly, so it can safely run as a separate process.
 import json
 from pathlib import Path
 
+from dotenv import dotenv_values
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 import cycle
-from src import db, perf
+from src import db, mode_config, perf
 from web.auth import COOKIE_NAME, make_session_cookie, read_session, require_user
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
 
 app = FastAPI(title="TradingBot Dashboard")
+
+# Typed into the confirmation modal before any LIVE risk-sizing value can be
+# changed from the dashboard — a deliberate speed bump since these numbers
+# directly control how much real money a single live order can risk.
+LIVE_RISK_CONFIRM_PHRASE = "CHANGE LIVE RISK"
+
+
+def _env() -> dict:
+    return dotenv_values(PROJECT_DIR / ".env")
 
 
 @app.on_event("startup")
@@ -126,6 +136,43 @@ def api_flatten(mode: str = Depends(require_mode), user: str = Depends(require_u
 @app.get("/api/account")
 def api_account(mode: str = Depends(require_mode), user: str = Depends(require_user)):
     return db.get_account_info(mode)
+
+
+@app.get("/api/risk_params")
+def api_get_risk_params(mode: str = Depends(require_mode), user: str = Depends(require_user)):
+    return mode_config.risk_params(_env(), mode)
+
+
+@app.post("/api/risk_params")
+async def api_set_risk_params(request: Request, mode: str = Depends(require_mode), user: str = Depends(require_user)):
+    body = await request.json()
+
+    if mode == "live" and body.get("confirm") != LIVE_RISK_CONFIRM_PHRASE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Type '{LIVE_RISK_CONFIRM_PHRASE}' to confirm changing LIVE risk settings.",
+        )
+
+    updates: dict[str, float | int] = {}
+    for key, (_, cast, _default) in mode_config.RISK_PARAM_SPECS.items():
+        if key not in body or body[key] is None or body[key] == "":
+            continue
+        try:
+            value = cast(body[key])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"Invalid value for {key}")
+        if value < 0:
+            raise HTTPException(status_code=400, detail=f"{key} must be >= 0")
+        updates[key] = value
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No values provided")
+
+    for key, value in updates.items():
+        db.set_setting(f"{mode}:risk:{key}", str(value))
+    db.log_decision(mode, "dashboard_control", user=user, action="update_risk_params",
+                     **{k: str(v) for k, v in updates.items()})
+    return mode_config.risk_params(_env(), mode)
 
 
 @app.get("/api/positions")

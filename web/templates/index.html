@@ -64,6 +64,42 @@
   </div>
 
   <div class="row g-3 mb-3">
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span>Risk Settings (<span id="risk-mode-label">PAPER</span>)</span>
+          <button id="btn-save-risk" class="btn btn-sm btn-primary">Save</button>
+        </div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-6 col-md-3">
+              <label class="form-label small">Portfolio Value (USD)</label>
+              <input type="number" step="0.01" min="0" id="risk-portfolio-value" class="form-control form-control-sm">
+            </div>
+            <div class="col-6 col-md-3">
+              <label class="form-label small">Max Trade Size (USD)</label>
+              <input type="number" step="0.01" min="0" id="risk-max-trade-size" class="form-control form-control-sm">
+            </div>
+            <div class="col-6 col-md-3">
+              <label class="form-label small">Max Trades / Day</label>
+              <input type="number" step="1" min="0" id="risk-max-trades-per-day" class="form-control form-control-sm">
+            </div>
+            <div class="col-6 col-md-3">
+              <label class="form-label small">Max Risk % / Trade</label>
+              <input type="number" step="0.01" min="0" id="risk-max-risk-pct" class="form-control form-control-sm">
+            </div>
+          </div>
+          <div id="risk-error" class="text-danger small mt-2"></div>
+          <div class="text-muted small mt-2">
+            Position size uses the lower of a risk-based size (Portfolio Value × Max Risk %, divided by the stop distance) and Max Trade Size.
+            Saving on <strong>LIVE</strong> requires typing a confirmation phrase — it directly controls how much real money a single order can risk.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3 mb-3">
     <div class="col-lg-6">
       <div class="card h-100">
         <div class="card-header">Today's Performance</div>
@@ -171,6 +207,7 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 const POLL_MS = 5000;
+const LIVE_RISK_CONFIRM_PHRASE = "CHANGE LIVE RISK";
 let editingStrategyId = null;
 let strategyModal;
 let currentMode = "paper";
@@ -228,6 +265,45 @@ async function refreshAccount() {
     </div>
     <div class="text-muted small mt-2">Updated: ${a.updated_at}</div>`;
 }
+
+async function refreshRiskParams() {
+  const r = await modeApi("/api/risk_params");
+  document.getElementById("risk-mode-label").textContent = currentMode.toUpperCase();
+  document.getElementById("risk-portfolio-value").value = r.portfolio_value;
+  document.getElementById("risk-max-trade-size").value = r.max_trade_size;
+  document.getElementById("risk-max-trades-per-day").value = r.max_trades_per_day;
+  document.getElementById("risk-max-risk-pct").value = r.max_risk_pct;
+  document.getElementById("risk-error").textContent = "";
+}
+
+document.getElementById("btn-save-risk").addEventListener("click", async () => {
+  const errorEl = document.getElementById("risk-error");
+  errorEl.textContent = "";
+  const payload = {
+    portfolio_value: document.getElementById("risk-portfolio-value").value,
+    max_trade_size: document.getElementById("risk-max-trade-size").value,
+    max_trades_per_day: document.getElementById("risk-max-trades-per-day").value,
+    max_risk_pct: document.getElementById("risk-max-risk-pct").value,
+  };
+  if (currentMode === "live") {
+    const typed = prompt(
+      `This changes how much REAL MONEY the live bot can risk per trade.\nType exactly "${LIVE_RISK_CONFIRM_PHRASE}" to confirm:`
+    );
+    if (typed !== LIVE_RISK_CONFIRM_PHRASE) {
+      errorEl.textContent = "Not confirmed — no changes were saved.";
+      return;
+    }
+    payload.confirm = typed;
+  }
+  try {
+    await modeApi("/api/risk_params", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    refreshRiskParams();
+  } catch (e) {
+    errorEl.textContent = "Save failed: " + e.message;
+  }
+});
 
 async function refreshPositions() {
   const rows = await modeApi("/api/positions");
@@ -361,7 +437,7 @@ document.getElementById("btn-flatten").addEventListener("click", async () => {
 });
 
 function refreshAll() {
-  refreshStatus(); refreshAccount(); refreshPositions(); refreshWatchlist();
+  refreshStatus(); refreshAccount(); refreshRiskParams(); refreshPositions(); refreshWatchlist();
   refreshTrades(); refreshLog(); refreshPerformance(); refreshStrategies();
 }
 
