@@ -146,6 +146,22 @@ def set_setting(key: str, value: str):
         )
 
 
+def update_account_info(net_liquidation: str, cash_balance: str, buying_power: str):
+    set_setting("account_net_liquidation", net_liquidation)
+    set_setting("account_cash_balance", cash_balance)
+    set_setting("account_buying_power", buying_power)
+    set_setting("account_updated_at", datetime.now(ET).isoformat(timespec="seconds"))
+
+
+def get_account_info() -> dict:
+    return {
+        "net_liquidation": get_setting("account_net_liquidation", ""),
+        "cash_balance": get_setting("account_cash_balance", ""),
+        "buying_power": get_setting("account_buying_power", ""),
+        "updated_at": get_setting("account_updated_at", ""),
+    }
+
+
 def is_bot_enabled() -> bool:
     return get_setting("bot_enabled", "true") == "true"
 

@@ -9,6 +9,7 @@ directly, so the two processes never fight over an IBKR client id.
 import logging
 import sys
 import traceback
+from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -63,6 +64,10 @@ def job_maintenance():
     _guarded("maintenance", db.trim_old_rows)
 
 
+def job_account_refresh():
+    _guarded("account_refresh", cycle.refresh_account_info)
+
+
 def main():
     db.init_db(seed_rules_path=PROJECT_DIR / "rules.json")
     logger.info("DB ready at %s", db.DB_PATH)
@@ -100,6 +105,12 @@ def main():
             day_of_week="mon-fri", hour=9, minute=25, timezone=ET,
         ),
         id="maintenance", misfire_grace_time=300,
+    )
+
+    scheduler.add_job(
+        job_account_refresh, IntervalTrigger(minutes=5),
+        id="account_refresh", misfire_grace_time=60,
+        next_run_time=datetime.now(ET),  # fire once immediately, then every 5 min
     )
 
     logger.info("Trading service starting. Jobs: %s", [j.id for j in scheduler.get_jobs()])

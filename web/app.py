@@ -114,6 +114,11 @@ def api_flatten(user: str = Depends(require_user)):
     return {"flatten_pending": True}
 
 
+@app.get("/api/account")
+def api_account(user: str = Depends(require_user)):
+    return db.get_account_info()
+
+
 @app.get("/api/positions")
 def api_positions(user: str = Depends(require_user)):
     positions = db.get_open_positions()

@@ -42,6 +42,15 @@
   </div>
 
   <div class="row g-3 mb-3">
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header">Account (IBKR)</div>
+        <div class="card-body" id="account-summary">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3 mb-3">
     <div class="col-lg-6">
       <div class="card h-100">
         <div class="card-header">Today's Performance</div>
@@ -169,6 +178,22 @@ async function refreshStatus() {
   badge.className = "badge fs-6 " + (s.bot_enabled ? "bg-success" : "bg-warning text-dark");
   document.getElementById("last-cycle").textContent =
     s.last_cycle_timestamp ? `${s.last_cycle_timestamp} (${s.last_cycle_status})` : "no cycle data yet";
+}
+
+async function refreshAccount() {
+  const a = await api("/api/account");
+  const el = document.getElementById("account-summary");
+  if (!a.updated_at) {
+    el.innerHTML = '<p class="text-muted mb-0">No account data yet — the service refreshes this every 5 minutes.</p>';
+    return;
+  }
+  el.innerHTML = `
+    <div class="row">
+      <div class="col-md-4"><div class="text-muted small">Net Liquidation</div><div class="fs-5">${fmtMoney(a.net_liquidation)}</div></div>
+      <div class="col-md-4"><div class="text-muted small">Cash Balance</div><div class="fs-5">${fmtMoney(a.cash_balance)}</div></div>
+      <div class="col-md-4"><div class="text-muted small">Buying Power</div><div class="fs-5">${fmtMoney(a.buying_power)}</div></div>
+    </div>
+    <div class="text-muted small mt-2">Updated: ${a.updated_at}</div>`;
 }
 
 async function refreshPositions() {
@@ -303,7 +328,7 @@ document.getElementById("btn-flatten").addEventListener("click", async () => {
 });
 
 function refreshAll() {
-  refreshStatus(); refreshPositions(); refreshWatchlist();
+  refreshStatus(); refreshAccount(); refreshPositions(); refreshWatchlist();
   refreshTrades(); refreshLog(); refreshPerformance(); refreshStrategies();
 }
 

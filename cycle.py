@@ -451,6 +451,33 @@ def run_cycle():
             ibkr.disconnect()
 
 
+ACCOUNT_REFRESH_CLIENT_ID = 5  # dedicated id so this never collides with the cycle (2) or trade.py (3) connections
+
+
+def refresh_account_info():
+    """Pulls net liquidation / cash balance / buying power from IBKR and
+    stores it in the DB for the dashboard. Runs on its own IBKR client id,
+    independent of market hours, so the dashboard has something to show
+    even outside the trading window."""
+    env = _env()
+    ibkr = IBKRClient(
+        env.get("IBKR_HOST", "127.0.0.1"),
+        int(env.get("IBKR_PORT", 7497)),
+        ACCOUNT_REFRESH_CLIENT_ID,
+    )
+    try:
+        ib = ibkr.ib
+        ib.sleep(2)  # let account summary data populate after connecting
+        values = {row.tag: row.value for row in ib.accountSummary()}
+        db.update_account_info(
+            values.get("NetLiquidation", ""),
+            values.get("TotalCashValue", ""),
+            values.get("BuyingPower", ""),
+        )
+    finally:
+        ibkr.disconnect()
+
+
 def emergency_check():
     """Cheap poll for a pending dashboard flatten-all request. Only opens an
     IBKR connection when the flag is actually set, so this is safe to call
