@@ -89,6 +89,13 @@ def index(request: Request):
     return templates.TemplateResponse(request, "index.html", {})
 
 
+@app.get("/guide", response_class=HTMLResponse)
+def guide(request: Request):
+    if not read_session(request):
+        return RedirectResponse("/login", status_code=303)
+    return templates.TemplateResponse(request, "guide.html", {})
+
+
 # -------------------------------------------------------------------- API ---
 @app.get("/api/status")
 def api_status(mode: str = Depends(require_mode), user: str = Depends(require_user)):

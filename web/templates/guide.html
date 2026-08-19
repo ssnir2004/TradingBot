@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>מדריך למשתמש - TradingBot</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.rtl.min.css" rel="stylesheet">
+<style>
+  body { background:#f4f6f8; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; direction:ltr; display:inline-block; }
+  h5 { margin-top: 1.75rem; }
+  .card + .card { margin-top: 1rem; }
+  .badge-live { background:#dc3545; }
+  .badge-paper { background:#0dcaf0; color:#000; }
+</style>
+</head>
+<body>
+<nav class="navbar navbar-dark bg-dark mb-4">
+  <div class="container-fluid">
+    <span class="navbar-brand mb-0 h1">TradingBot - מדריך למשתמש</span>
+    <a href="/" class="btn btn-outline-light btn-sm">חזרה לדשבורד</a>
+  </div>
+</nav>
+
+<div class="container pb-5" style="max-width: 900px;">
+
+  <div class="card">
+    <div class="card-body">
+      <h4>מה הבוט עושה</h4>
+      <p class="mb-0">
+        הבוט סורק את מדד ה-S&amp;P 500 ומחפש מניות שעונות על אסטרטגיית
+        <strong>"Trend Join Long"</strong> - כניסה לפוזיציית לונג במניה שפורצת
+        למעלה ביום המסחר הנוכחי, על בסיס נרות של 5 דקות. הוא פועל
+        <strong>24/7 על השרת</strong>, עצמאי מהמחשב שלך, ומריץ בדיקה (cycle)
+        כל 5 דקות בשעות המסחר. הוא לעולם לא סוחר במניות שאינן ב-S&amp;P 500
+        ולעולם לא פותח פוזיציית שורט (רק קנייה, long_only).
+      </p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h4>PAPER מול LIVE</h4>
+      <p>
+        הבוט רץ פעמיים במקביל, כשני "עותקים" נפרדים לגמרי, כל אחד עם חיבור
+        משלו ל-IB Gateway וחשבון IBKR משלו:
+      </p>
+      <ul>
+        <li><span class="badge badge-paper">PAPER</span> - חשבון סימולציה. עסקאות "מזויפות", לצורך בדיקה של האסטרטגיה בלי סיכון כספי.</li>
+        <li><span class="badge badge-live">LIVE</span> - חשבון אמיתי. עסקאות אמיתיות בכסף אמיתי.</li>
+      </ul>
+      <p class="mb-0">
+        הם לגמרי בלתי תלויים: הפעלה/השהיה/Flatten בטאב אחד לא משפיעה על
+        השני, ולכל אחד יש רשימת פוזיציות, היסטוריית עסקאות ותקציב סיכון
+        (<span class="mono">PORTFOLIO_VALUE_USD</span>) נפרדים לגמרי בקובץ
+        ה-<span class="mono">.env</span> בשרת.
+      </p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h4>מתי הבוט פעיל (שעון ניו יורק - ET)</h4>
+      <table class="table table-sm mb-0">
+        <tbody>
+          <tr><td class="mono" style="width:160px;">לפני 10:00</td><td>לא פעיל - שוק "מתחמם", הבוט לא נוגע בכלום.</td></tr>
+          <tr><td class="mono">10:00 - 10:05</td><td>ניהול בלבד - סוגר/מגן על פוזיציות פתוחות, לא פותח חדשות.</td></tr>
+          <tr><td class="mono">10:05 - 15:30</td><td>פעיל במלואו - גם ניהול פוזיציות פתוחות וגם חיפוש כניסות חדשות.</td></tr>
+          <tr><td class="mono">15:30 - 15:51</td><td>ניהול בלבד - שוב, בלי כניסות חדשות, רק לקראת הסגירה.</td></tr>
+          <tr><td class="mono">15:51 - 16:00</td><td>סגירה כפויה (Force Close) - מוכר את כל הפוזיציות הפתוחות לפני סוף היום.</td></tr>
+          <tr><td class="mono">אחרי 16:00 / סופ"ש</td><td>שוק סגור, הבוט לא עושה כלום.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h4>איך נבחרת מניה לכניסה (הפילטרים)</h4>
+      <p>כל בוקר הבוט בונה רשימת מועמדים (Watchlist) ממדד ה-S&amp;P 500 שקפצו לפחות באחוז מסוים בפתיחה. לאורך היום הוא בודק כל מניה ברשימה מול 6 תנאים - <strong>כולם חייבים להתקיים יחד</strong> כדי להיכנס:</p>
+      <table class="table table-sm">
+        <thead><tr><th style="width:60px;">קוד</th><th>תנאי</th><th>למה זה מסמן</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">D1</td><td>המחיר מעל השיא של אתמול</td><td>שבירת התנגדות יומית</td></tr>
+          <tr><td class="mono">D2</td><td>סגירת אתמול מעל ממוצע נע 200 יום</td><td>מגמת עלייה ארוכת טווח</td></tr>
+          <tr><td class="mono">D3</td><td>פער (gap) של לפחות 3% מסגירת אתמול</td><td>יש מומנטום/חדשות</td></tr>
+          <tr><td class="mono">I1</td><td>המחיר מעל השיא של המסחר המוקדם (premarket)</td><td>הכוח נמשך גם אחרי הפתיחה</td></tr>
+          <tr><td class="mono">I2</td><td>המחיר מעל השיא של היום עד כה</td><td>שיא חדש תוך-יומי</td></tr>
+          <tr><td class="mono">I3</td><td>מחזור מסחר גבוה פי 2 מהממוצע (14 יום)</td><td>יש עניין אמיתי במניה, לא רעש</td></tr>
+        </tbody>
+      </table>
+      <p class="text-muted small mb-0">הערכים (3%, פי 2 וכו') ניתנים לשינוי בעריכת אסטרטגיה בדשבורד - ראה בהמשך.</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h4>גודל הפוזיציה וניהול סיכון</h4>
+      <ul>
+        <li><strong>Stop-loss התחלתי</strong>: 1% מתחת לשפל היום (Low of Day).</li>
+        <li><strong>גודל הפוזיציה</strong> מחושב כך שאם ה-stop ייפגע, ההפסד לא יעלה על <span class="mono">MAX_RISK_PER_TRADE_PCT</span> מהתקציב (ברירת מחדל 1%) - וגם לא יעלה על 10% מהתקציב לפוזיציה בודדת, לפי הנמוך מביניהם.</li>
+        <li>מקסימום <span class="mono">MAX_TRADES_PER_DAY</span> עסקאות כניסה ביום (ברירת מחדל 5), ומקסימום 5 פוזיציות פתוחות בו-זמנית.</li>
+        <li>הבוט לעולם לא יפתח פוזיציה שנייה באותה מניה שכבר יש לו בה החזקה - וגם לא נוגע במניות שאתה מחזיק בהן <strong>ידנית</strong> (מחוץ לבוט) - הוא רואה ומדלג עליהן, אבל לא מנהל אותן.</li>
+      </ul>
+      <h5>איך יוצאים מפוזיציה</h5>
+      <ol>
+        <li><strong>Stop-loss</strong> - נשלח מייד עם הכניסה, ל-IBKR עצמו (לא תלוי בבוט שרץ).</li>
+        <li><strong>Partial profit</strong> - ב-0.75R רווח (כלומר 75% מהסיכון ההתחלתי), מוכר כ-1/3 מהפוזיציה.</li>
+        <li><strong>Breakeven</strong> - ב-1R רווח, מזיז את ה-stop למחיר הכניסה (אי אפשר יותר להפסיד על הפוזיציה).</li>
+        <li><strong>Trailing stop</strong> - אחרי ה-breakeven, ה-stop עולה בהדרגה מתחת לכל "שפל תנודה" (swing low) חדש בנרות 5 דקות.</li>
+        <li><strong>Force close</strong> - כל מה שנשאר נסגר בשוק ב-15:51-16:00 ET, בלי יוצא מן הכלל.</li>
+      </ol>
+      <p class="mb-0"><em>R-Multiple</em> (בהיסטוגרמה בדשבורד) = הרווח/הפסד חלקי הסיכון ההתחלתי. R=1 אומר "הרווחתי בדיוק כמו שסיכנתי".</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h4>כפתורי השליטה בדשבורד</h4>
+      <table class="table table-sm mb-0">
+        <tbody>
+          <tr><td style="width:180px;"><span class="btn btn-success btn-sm disabled">Enable trading</span></td><td>מפעיל את הכניסות החדשות של אותו טאב (paper/live). ניהול פוזיציות פתוחות רץ תמיד, גם כשזה כבוי.</td></tr>
+          <tr><td><span class="btn btn-warning btn-sm disabled">Pause new entries</span></td><td>עוצר כניסות חדשות באותו טאב, אבל ממשיך לנהל (stop/breakeven/trail) כל מה שכבר פתוח.</td></tr>
+          <tr><td><span class="btn btn-danger btn-sm disabled">Flatten all now</span></td><td>כפתור חירום - מוכר <strong>מיידית</strong> את כל הפוזיציות הפתוחות באותו טאב (תוך כ-20 שניות), בלי קשר לשעה.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h4>מה מוצג בדשבורד</h4>
+      <ul>
+        <li><strong>Account</strong> - יתרת מזומן, שווי נטו (Net Liquidation) וכוח קנייה, ישירות מ-IBKR (מתעדכן כל 5 דקות).</li>
+        <li><strong>Today's Performance</strong> - כמה עסקאות היום, אחוז הצלחה, רווח/הפסד ברוטו.</li>
+        <li><strong>R-Multiple Histogram</strong> - התפלגות תוצאות העסקאות של היום לפי R (ירוק = רווח, אדום = הפסד).</li>
+        <li><strong>Open Positions</strong> - פוזיציות שהבוט עצמו פתח וכרגע מנהל.</li>
+        <li><strong>Watchlist</strong> - המניות שעברו את סינון הבוקר והבוט בודק עליהן כניסה היום.</li>
+        <li><strong>Recent Trades</strong> - יומן כל העסקאות שהבוט ביצע.</li>
+        <li><strong>Activity Log</strong> - יומן החלטות פנימי (כניסות, יציאות, החלטות "לא נכנס כי...").</li>
+        <li><strong>Strategies</strong> - משותף לשני הטאבים; ראה בהמשך.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h4>אסטרטגיות (Strategies)</h4>
+      <p class="mb-0">
+        אפשר לשמור כמה גרסאות של חוקי האסטרטגיה (למשל סף gap שונה, סף
+        רווח חלקי שונה) ולעבור ביניהן בלחיצת כפתור ("Activate"). האסטרטגיה
+        הפעילה משותפת ל-paper ול-live גם יחד - כלומר אם תחליף אסטרטגיה,
+        שני הטאבים יעברו להשתמש בה. "New strategy" יוצר גרסה חדשה שאפשר
+        לערוך את חוקי ה-JSON שלה (אותם שדות D1-D3, I1-I3, exit, risk
+        שמופיעים בטבלאות למעלה) ולהפעיל כשמוכנים.
+      </p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h4>רשת הביטחון של LIVE</h4>
+      <p class="mb-0">
+        בקובץ <span class="mono">.env</span> בשרת יש <span class="mono">LIVE_PORTFOLIO_VALUE_USD</span>
+        ו-<span class="mono">LIVE_MAX_TRADE_SIZE_USD</span>. כל עוד הם מוגדרים ל-0, חישוב גודל
+        הפוזיציה ב-live יוצא 0 מניות - כלומר <strong>הבוט פיזית לא יכול לפתוח
+        פוזיציה חדשה ב-live</strong>, גם אם "Enable trading" דלוק, עד שתעדכן את
+        הערכים האלה בכוונה תחילה בשרת.
+      </p>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
