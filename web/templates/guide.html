@@ -161,6 +161,29 @@
 
   <div class="card">
     <div class="card-body">
+      <h4>Gateway Connection - התחברות מקבילה ל-TWS/Mobile</h4>
+      <p>
+        IBKR לא מאפשר שני חיבורים פעילים בו-זמנית עם אותו username - אם
+        תתחבר ל-TWS או ל-IBKR Mobile עם אותם פרטי ההתחברות שהבוט משתמש
+        בהם בשרת, זה <strong>ינתק את הבוט</strong>. ה-widget הזה נותן דרך
+        מסודרת לעשות את זה מהדשבורד, בלי SSH:
+      </p>
+      <ol>
+        <li><strong>Disconnect</strong> - עוצר את מנוע המסחר ואת ה-Gateway של אותו טאב (paper/live), ומשחרר את ה-session כדי שתוכל להתחבר עם אותם פרטים ב-TWS/Mobile. <strong>חסום אם יש פוזיציה פתוחה</strong> באותו מצב (כי בזמן שה-Gateway מנותק, שום דבר לא מנהל אותה - בלי stop, בלי סגירה בסוף יום) - תצטרך לסגור אותה קודם. ב-LIVE נדרשת הקלדת אישור (<span class="mono">DISCONNECT LIVE</span>).</li>
+        <li>עכשיו תוכל להתחבר ל-TWS/Mobile עם פרטי החשבון הרגילים.</li>
+        <li>כשסיימת - תתנתק מ-TWS/Mobile (Logout).</li>
+        <li><strong>Reconnect Gateway</strong> - מעלה מחדש רק את ה-Gateway. ייתכן שתידרש לאשר 2FA בטלפון, בדיוק כמו בהתחברות הראשונה - התג למעלה יראה "Connecting..." עד שזה יאושר.</li>
+        <li><strong>Resume Trading</strong> - מופיע רק אחרי שה-Gateway התחבר בפועל (לא לפני) - מחזיר את מנוע המסחר לפעולה.</li>
+      </ol>
+      <p class="mb-0 text-muted small">
+        דורש הרשאת sudo מוגבלת מאוד בשרת (רק start/stop על 4 השירותים
+        האלה, כלום אחר) - ראה ב-DEPLOY.md אם הכפתורים מחזירים שגיאה.
+      </p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
       <h4>מה מוצג בדשבורד</h4>
       <ul>
         <li><strong>Account</strong> - יתרת מזומן, שווי נטו (Net Liquidation) וכוח קנייה, ישירות מ-IBKR (מתעדכן כל 5 דקות).</li>

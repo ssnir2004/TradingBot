@@ -162,6 +162,21 @@ sudo journalctl -u trading-bot-paper.service -f   # should show the scheduler st
 sudo journalctl -u dashboard.service -f           # should show uvicorn listening on 127.0.0.1:8000
 ```
 
+Optional: the dashboard's "Gateway Connection" control (Disconnect/Reconnect
+per mode, so you can log into TWS or IBKR Mobile with the bot's account
+without SSH) needs a narrowly-scoped sudo rule for the `tradingbot` user —
+it grants start/stop on exactly the 4 service units above, nothing else:
+
+```bash
+which systemctl   # confirm this matches the path in the file below; edit it first if not
+sudo cp /opt/tradingbot/deploy/sudoers-tradingbot /etc/sudoers.d/tradingbot
+sudo chmod 440 /etc/sudoers.d/tradingbot
+sudo visudo -c   # validates syntax
+```
+
+Skip this if you don't want that control — the dashboard works fine
+without it, that one feature just returns an error until installed.
+
 ## 7. Wire up Caddy
 
 ```bash

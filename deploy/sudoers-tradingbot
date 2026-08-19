@@ -1,0 +1,23 @@
+# Scoped sudo rule for the dashboard's Disconnect/Reconnect control (see
+# web/gateway_control.py). Lets the `tradingbot` user start/stop ONLY these
+# 4 systemd services, with no password and no other command access — this
+# lets you free up an IBKR session for a manual TWS/Mobile login without
+# needing SSH access every time. Nothing else is granted: no shell, no
+# other systemctl verbs, no other units.
+#
+# Install:
+#   sudo cp deploy/sudoers-tradingbot /etc/sudoers.d/tradingbot
+#   sudo chmod 440 /etc/sudoers.d/tradingbot
+#   sudo visudo -c   # validates syntax before it's trusted
+#
+# If `which systemctl` on your server prints a different path than
+# /usr/bin/systemctl, update the paths below to match before installing.
+
+tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl start ibgateway-paper.service
+tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl stop ibgateway-paper.service
+tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl start trading-bot-paper.service
+tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl stop trading-bot-paper.service
+tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl start ibgateway-live.service
+tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl stop ibgateway-live.service
+tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl start trading-bot-live.service
+tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl stop trading-bot-live.service

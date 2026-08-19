@@ -58,6 +58,29 @@
   <div class="row g-3 mb-3">
     <div class="col-12">
       <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span>Gateway Connection</span>
+          <span id="gw-status-badge" class="badge bg-secondary">...</span>
+        </div>
+        <div class="card-body">
+          <div class="small text-muted mb-2">
+            Temporarily disconnects this mode's IB Gateway + trading engine so you can log into TWS or IBKR Mobile with the same account, without SSH. Blocked while any position is open in this mode — see the guide.
+          </div>
+          <div id="gw-detail" class="small mono text-muted mb-2">-</div>
+          <div class="d-flex gap-2">
+            <button id="btn-gw-disconnect" class="btn btn-outline-danger btn-sm d-none">Disconnect</button>
+            <button id="btn-gw-reconnect" class="btn btn-outline-primary btn-sm d-none">Reconnect Gateway</button>
+            <button id="btn-gw-resume" class="btn btn-outline-success btn-sm d-none">Resume Trading</button>
+          </div>
+          <div id="gw-error" class="text-danger small mt-2"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3 mb-3">
+    <div class="col-12">
+      <div class="card">
         <div class="card-header">Account (IBKR)</div>
         <div class="card-body" id="account-summary">Loading…</div>
       </div>
@@ -300,6 +323,76 @@ async function refreshAccount() {
     <div class="text-muted small mt-2">Updated: ${a.updated_at}</div>`;
 }
 
+async function refreshGatewayStatus() {
+  const s = await modeApi("/api/gateway/status");
+  const badge = document.getElementById("gw-status-badge");
+  const detail = document.getElementById("gw-detail");
+
+  let label, cls;
+  if (s.gateway_active && s.port_listening && s.engine_active) {
+    label = "Connected"; cls = "bg-success";
+  } else if (s.gateway_active && !s.port_listening) {
+    label = "Connecting… check your phone for a 2FA approval"; cls = "bg-warning text-dark";
+  } else if (s.gateway_active && s.port_listening && !s.engine_active) {
+    label = "Gateway up, trading paused"; cls = "bg-info text-dark";
+  } else {
+    label = "Disconnected"; cls = "bg-secondary";
+  }
+  badge.textContent = label;
+  badge.className = "badge " + cls;
+  detail.textContent = `gateway=${s.gateway_active} port_listening=${s.port_listening} engine=${s.engine_active}`;
+
+  document.getElementById("btn-gw-disconnect").classList.toggle("d-none", !(s.gateway_active || s.engine_active));
+  document.getElementById("btn-gw-reconnect").classList.toggle("d-none", s.gateway_active);
+  document.getElementById("btn-gw-resume").classList.toggle("d-none", !(s.gateway_active && s.port_listening && !s.engine_active));
+}
+
+document.getElementById("btn-gw-disconnect").addEventListener("click", async () => {
+  const errorEl = document.getElementById("gw-error");
+  errorEl.textContent = "";
+  const payload = {};
+  if (currentMode === "live") {
+    const typed = prompt(
+      'This stops the LIVE Gateway AND trading engine so you can log into TWS/Mobile with the same account.\n' +
+      'Blocked while any LIVE position is open. Type exactly "DISCONNECT LIVE" to confirm:'
+    );
+    if (typed !== "DISCONNECT LIVE") { errorEl.textContent = "Not confirmed — nothing was disconnected."; return; }
+    payload.confirm = typed;
+  } else if (!confirm("Disconnect the PAPER Gateway and trading engine so you can log into TWS/Mobile?")) {
+    return;
+  }
+  try {
+    await modeApi("/api/gateway/disconnect", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    refreshGatewayStatus();
+  } catch (e) {
+    errorEl.textContent = "Disconnect failed: " + e.message;
+  }
+});
+
+document.getElementById("btn-gw-reconnect").addEventListener("click", async () => {
+  const errorEl = document.getElementById("gw-error");
+  errorEl.textContent = "";
+  try {
+    await modeApi("/api/gateway/reconnect", { method: "POST" });
+    refreshGatewayStatus();
+  } catch (e) {
+    errorEl.textContent = "Reconnect failed: " + e.message;
+  }
+});
+
+document.getElementById("btn-gw-resume").addEventListener("click", async () => {
+  const errorEl = document.getElementById("gw-error");
+  errorEl.textContent = "";
+  try {
+    await modeApi("/api/gateway/resume_engine", { method: "POST" });
+    refreshGatewayStatus();
+  } catch (e) {
+    errorEl.textContent = "Resume failed: " + e.message;
+  }
+});
+
 async function refreshRiskParams() {
   const r = await modeApi("/api/risk_params");
   document.getElementById("risk-mode-label").textContent = currentMode.toUpperCase();
@@ -528,7 +621,7 @@ document.getElementById("btn-flatten").addEventListener("click", async () => {
 });
 
 function refreshAll() {
-  refreshStatus(); refreshAccount(); refreshRiskParams(); refreshPositions(); refreshWatchlist();
+  refreshStatus(); refreshAccount(); refreshGatewayStatus(); refreshRiskParams(); refreshPositions(); refreshWatchlist();
   refreshTrades(); refreshLog(); refreshPerformance(); refreshStrategies();
 }
 

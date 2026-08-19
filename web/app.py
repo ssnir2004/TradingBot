@@ -15,6 +15,7 @@ from fastapi.templating import Jinja2Templates
 
 import cycle
 from src import db, mode_config, perf
+from web import gateway_control
 from web.auth import COOKIE_NAME, make_session_cookie, read_session, require_user
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -26,6 +27,11 @@ app = FastAPI(title="TradingBot Dashboard")
 # changed from the dashboard — a deliberate speed bump since these numbers
 # directly control how much real money a single live order can risk.
 LIVE_RISK_CONFIRM_PHRASE = "CHANGE LIVE RISK"
+
+# Typed into the confirmation modal before disconnecting LIVE's Gateway —
+# while disconnected, nothing manages open positions or force-closes at
+# end of day, so this is a deliberate, confirmed action too.
+DISCONNECT_LIVE_CONFIRM_PHRASE = "DISCONNECT LIVE"
 
 
 def _env() -> dict:
@@ -173,6 +179,61 @@ async def api_set_risk_params(request: Request, mode: str = Depends(require_mode
     db.log_decision(mode, "dashboard_control", user=user, action="update_risk_params",
                      **{k: str(v) for k, v in updates.items()})
     return mode_config.risk_params(_env(), mode)
+
+
+# --------------------------------------------------------- gateway control ---
+# Lets you free up an IBKR session for a manual TWS/IBKR Mobile login,
+# without SSH — see web/gateway_control.py for the systemd/sudo mechanics.
+@app.get("/api/gateway/status")
+def api_gateway_status(mode: str = Depends(require_mode), user: str = Depends(require_user)):
+    return gateway_control.status(mode, _env())
+
+
+@app.post("/api/gateway/disconnect")
+async def api_gateway_disconnect(request: Request, mode: str = Depends(require_mode), user: str = Depends(require_user)):
+    positions = db.get_open_positions(mode)
+    if positions:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot disconnect: {len(positions)} open {mode} position(s) would be left "
+                "completely unmanaged (no stop monitoring, no end-of-day close) while the "
+                "Gateway is down. Flatten them first."
+            ),
+        )
+    if mode == "live":
+        body = await request.json()
+        if body.get("confirm") != DISCONNECT_LIVE_CONFIRM_PHRASE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Type '{DISCONNECT_LIVE_CONFIRM_PHRASE}' to confirm disconnecting LIVE.",
+            )
+    try:
+        gateway_control.disconnect(mode)
+    except gateway_control.GatewayControlError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    db.log_decision(mode, "dashboard_control", user=user, action="gateway_disconnect")
+    return {"ok": True}
+
+
+@app.post("/api/gateway/reconnect")
+def api_gateway_reconnect(mode: str = Depends(require_mode), user: str = Depends(require_user)):
+    try:
+        gateway_control.reconnect_gateway(mode)
+    except gateway_control.GatewayControlError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    db.log_decision(mode, "dashboard_control", user=user, action="gateway_reconnect")
+    return {"ok": True}
+
+
+@app.post("/api/gateway/resume_engine")
+def api_gateway_resume_engine(mode: str = Depends(require_mode), user: str = Depends(require_user)):
+    try:
+        gateway_control.resume_engine(mode)
+    except gateway_control.GatewayControlError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    db.log_decision(mode, "dashboard_control", user=user, action="gateway_resume_engine")
+    return {"ok": True}
 
 
 @app.get("/api/positions")
