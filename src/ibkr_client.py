@@ -17,6 +17,12 @@ class IBKRClient:
 
         order = MarketOrder(side, quantity)
         order.outsideRth = True
+        # Market orders must be DAY (a market order can't stay open past the
+        # session). Left unset, IBKR fills the TIF from the account's Order
+        # Presets — on live that resolves to GTC, which is invalid for a
+        # market order and gets the whole order cancelled (error 10349:
+        # "Order TIF was set to GTC based on order preset").
+        order.tif = "DAY"
         trade = self.ib.placeOrder(qualified, order)
 
         # trade.isDone() (Filled/Cancelled/ApiCancelled/Inactive) is the
