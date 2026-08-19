@@ -1,0 +1,17 @@
+# Reverse proxy with automatic HTTPS (Let's Encrypt) in front of the
+# dashboard, which itself only listens on 127.0.0.1:8000 — this file is the
+# only thing that makes it reachable from the internet at all.
+#
+# Replace with your actual domain/subdomain (a free DuckDNS name works fine,
+# see DEPLOY.md). Caddy needs ports 80 and 443 open on the server for the
+# ACME HTTP challenge and HTTPS itself.
+
+your-subdomain.duckdns.org {
+    reverse_proxy 127.0.0.1:8000
+
+    header {
+        Strict-Transport-Security "max-age=31536000;"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+    }
+}

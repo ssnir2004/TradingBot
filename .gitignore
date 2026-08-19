@@ -2,9 +2,6 @@
 .venv/
 __pycache__/
 *.pyc
-trades.csv
 logs/
-open_positions.json
-safety-check-log.json
-watchlist.txt
-dashboard/
+data/
+deploy/ibc/config.ini

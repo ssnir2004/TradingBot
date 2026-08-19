@@ -1,0 +1,15 @@
+[Unit]
+Description=IB Gateway (headless, via IBC)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tradingbot
+WorkingDirectory=/opt/tradingbot
+ExecStart=/opt/tradingbot/deploy/ibc/start-gateway.sh
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

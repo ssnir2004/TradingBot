@@ -1,0 +1,51 @@
+# IBC (https://github.com/IbcAlpha/IBC) configuration for headless IB
+# Gateway login. Copy this to config.ini, fill in your real credentials, and
+# NEVER commit that file — it holds your IBKR password in plain text.
+# (deploy/ibc/config.ini is already in .gitignore for exactly this reason.)
+#
+# This covers the settings that matter for this project. IBC ships its own
+# reference config.ini with the full, authoritative list of every option —
+# read that one too before you rely on this in production; IBC's own
+# settings can change between releases.
+
+# ---- credentials ----
+IbLoginId=your_ibkr_username
+IbPassword=your_ibkr_password
+# paper or live. Keep this "paper" until you've read the main README's
+# "Going live" section — it exists for the same reason as the PAPER_TRADING
+# guard in .env.
+TradingMode=paper
+
+# ---- unattended operation ----
+# Accept the various one-time dialogs IBC would otherwise need a human to
+# click through.
+AcceptIncomingConnectionAction=accept
+AllowBlindTrading=no
+ReadOnlyLogin=no
+AcceptNonBrokerageAccountWarning=yes
+DismissPasswordExpiryWarning=yes
+DismissNSEComplianceNotice=yes
+
+# If a session is already open elsewhere (e.g. you logged into TWS on your
+# laptop to check something), take over rather than failing to start.
+ExistingSessionDetectedAction=primary
+
+# ---- the 2FA reality check ----
+# IBC can automate the username/password fields, but it CANNOT tap "Approve"
+# on your phone for an IBKR Mobile push challenge — only you can do that.
+# This just tells IBC how long to wait for you to do it, instead of giving
+# up immediately.
+SecondFactorAuthenticationTimeout=180
+
+# AutoRestartTime makes IBC restart the Gateway session gracefully once a
+# day (near IBKR's own server reset, ~11:45pm ET) WITHOUT a full logout, so
+# in practice this avoids needing 2FA every single day. It does not
+# guarantee IBKR will never ask again — expect to occasionally need to
+# approve the push notification yourself, especially right after you first
+# start the service. Don't design the rest of this deployment around "zero
+# touch forever"; design it around "rare enough that a Telegram alert with
+# no cycle data for a while is your signal to go check."
+AutoRestartTime=11:55 PM
+
+# ---- logging ----
+LogComponents=open

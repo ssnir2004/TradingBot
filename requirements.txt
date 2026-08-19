@@ -4,3 +4,10 @@ pandas
 numpy
 yfinance
 requests
+APScheduler
+fastapi
+uvicorn[standard]
+jinja2
+bcrypt
+itsdangerous
+python-multipart

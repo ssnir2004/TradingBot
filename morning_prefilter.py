@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 import yfinance as yf
 
+from src import db
 from src.notify import notify
 from src.sp500_tickers import SP500_TICKERS
 
@@ -123,6 +124,11 @@ def run_scan(min_gap: float, min_price: float, dry_run: bool) -> dict:
             )
         WATCHLIST_PATH.write_text("\n".join(lines) + "\n")
 
+        db.replace_watchlist([
+            {"symbol": s["ticker"], "gap_pct": s["gap_pct"], "open_price": s["open"], "prev_close": s["prev_close"]}
+            for s in survivors
+        ])
+
     top_20_survivors = [f"{s['ticker']} ({s['gap_pct']:+.2f}%)" for s in survivors]
 
     result = {
@@ -163,6 +169,7 @@ def run_scan(min_gap: float, min_price: float, dry_run: bool) -> dict:
 
 
 def main():
+    db.init_db(seed_rules_path=Path(__file__).resolve().parent / "rules.json")
     parser = argparse.ArgumentParser()
     parser.add_argument("--min-gap", type=float, default=DEFAULT_MIN_GAP_PCT)
     parser.add_argument("--min-price", type=float, default=DEFAULT_MIN_PRICE)

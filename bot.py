@@ -4,7 +4,6 @@ order. Use this to sanity-check a symbol by hand; cycle.py is what runs the
 whole watchlist autonomously on schedule.
 """
 import argparse
-import csv
 import subprocess
 import sys
 from datetime import datetime
@@ -14,11 +13,10 @@ from zoneinfo import ZoneInfo
 from dotenv import dotenv_values
 
 import strategy
+from src import db
 from src.ibkr_client import IBKRClient
 
 PROJECT_DIR = Path(__file__).resolve().parent
-TRADES_CSV = PROJECT_DIR / "trades.csv"
-TRADES_HEADER = ["timestamp_iso", "symbol", "side", "size", "fill_price", "order_id", "status"]
 ET = ZoneInfo("America/New_York")
 LIVE_PORTS = {7496, 4001}
 
@@ -28,24 +26,8 @@ def log(message: str):
     print(f"[{stamp} ET] {message}")
 
 
-def _ensure_trades_csv():
-    if not TRADES_CSV.exists():
-        with open(TRADES_CSV, "w", newline="") as f:
-            csv.writer(f).writerow(TRADES_HEADER)
-
-
-def _count_todays_buys() -> int:
-    _ensure_trades_csv()
-    today = datetime.now(ET).strftime("%Y-%m-%d")
-    count = 0
-    with open(TRADES_CSV, newline="") as f:
-        for row in csv.DictReader(f):
-            if row["side"] == "BUY" and row["timestamp_iso"].startswith(today):
-                count += 1
-    return count
-
-
 def main():
+    db.init_db(seed_rules_path=PROJECT_DIR / "rules.json")
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", required=True)
     parser.add_argument("--check-only", action="store_true")
@@ -62,7 +44,7 @@ def main():
         sys.exit("ABORT: live flag but paper port")
 
     max_trades_per_day = int(env.get("MAX_TRADES_PER_DAY", 5))
-    if _count_todays_buys() >= max_trades_per_day:
+    if db.count_todays_buys() >= max_trades_per_day:
         log(f"MAX_TRADES_PER_DAY ({max_trades_per_day}) reached for today, skipping")
         sys.exit(0)
 
@@ -109,14 +91,12 @@ def main():
         log("trade.py timed out after 30s")
         sys.exit(1)
 
-    _ensure_trades_csv()
-    with open(TRADES_CSV, newline="") as f:
-        rows = list(csv.DictReader(f))
+    rows = db.get_trades(limit=1)
     if not rows:
         log("no trade row written")
         sys.exit(1)
 
-    last = rows[-1]
+    last = rows[0]
     if last["status"] not in ("Cancelled", "ApiCancelled", "Inactive"):
         log(f"SUCCESS: {last}")
     else:

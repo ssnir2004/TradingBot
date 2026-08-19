@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TradingBot Dashboard</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>
+  body { background:#f4f6f8; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  textarea.rules-editor { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; min-height: 320px; }
+  .hist-bar-track { height: 18px; background:#e9ecef; border-radius:4px; overflow:hidden; }
+  .hist-bar { height:100%; }
+</style>
+</head>
+<body>
+<nav class="navbar navbar-dark bg-dark mb-4">
+  <div class="container-fluid">
+    <span class="navbar-brand mb-0 h1">TradingBot Dashboard</span>
+    <form method="post" action="/logout" class="d-flex">
+      <button class="btn btn-outline-light btn-sm" type="submit">Log out</button>
+    </form>
+  </div>
+</nav>
+
+<div class="container-fluid px-4 pb-5">
+
+  <div class="d-flex flex-wrap align-items-center justify-content-between mb-4 p-3 bg-white rounded shadow-sm gap-3">
+    <div class="d-flex align-items-center gap-3">
+      <span id="status-badge" class="badge bg-secondary fs-6">...</span>
+      <span class="text-muted small">Last cycle: <span id="last-cycle" class="mono">-</span></span>
+    </div>
+    <div class="d-flex gap-2">
+      <button id="btn-enable" class="btn btn-success btn-sm">Enable trading</button>
+      <button id="btn-disable" class="btn btn-warning btn-sm">Pause new entries</button>
+      <button id="btn-flatten" class="btn btn-danger btn-sm">Flatten all now</button>
+    </div>
+  </div>
+  <div class="small text-muted mb-4">
+    "Pause new entries" stops the bot from opening new positions but keeps managing stops/trailing on anything already open.
+    "Flatten all now" is the emergency button — it market-sells every open position immediately, on the next ~20s check.
+  </div>
+
+  <div class="row g-3 mb-3">
+    <div class="col-lg-6">
+      <div class="card h-100">
+        <div class="card-header">Today's Performance</div>
+        <div class="card-body" id="perf-summary">Loading…</div>
+      </div>
+    </div>
+    <div class="col-lg-6">
+      <div class="card h-100">
+        <div class="card-header">R-Multiple Histogram</div>
+        <div class="card-body" id="perf-histogram">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3 mb-3">
+    <div class="col-lg-7">
+      <div class="card h-100">
+        <div class="card-header">Open Positions</div>
+        <div class="card-body p-0">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Symbol</th><th>Qty</th><th>Entry</th><th>Current</th><th>Stop</th><th>State</th><th>Unrealized R</th></tr></thead>
+            <tbody id="positions-body"><tr><td colspan="7" class="text-center text-muted">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-5">
+      <div class="card h-100">
+        <div class="card-header">Watchlist (today)</div>
+        <div class="card-body p-0">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Symbol</th><th>Gap</th><th>Open</th></tr></thead>
+            <tbody id="watchlist-body"><tr><td colspan="3" class="text-center text-muted">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3 mb-3">
+    <div class="col-lg-7">
+      <div class="card h-100">
+        <div class="card-header">Recent Trades</div>
+        <div class="card-body p-0" style="max-height:340px; overflow-y:auto;">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Fill</th><th>Status</th></tr></thead>
+            <tbody id="trades-body"><tr><td colspan="6" class="text-center text-muted">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-5">
+      <div class="card h-100">
+        <div class="card-header">Activity Log</div>
+        <div class="card-body p-0" style="max-height:340px; overflow-y:auto;">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Time</th><th>Event</th></tr></thead>
+            <tbody id="log-body"><tr><td colspan="2" class="text-center text-muted">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span>Strategies</span>
+      <button id="btn-new-strategy" class="btn btn-sm btn-primary">+ New strategy</button>
+    </div>
+    <div class="card-body p-0">
+      <table class="table table-sm mb-0">
+        <thead><tr><th>Name</th><th>Active</th><th>Updated</th><th></th></tr></thead>
+        <tbody id="strategies-body"><tr><td colspan="4" class="text-center text-muted">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<!-- Strategy editor modal -->
+<div class="modal" id="strategy-modal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Strategy</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-2">
+          <label class="form-label">Name</label>
+          <input type="text" id="strategy-name" class="form-control">
+        </div>
+        <label class="form-label">Rules (JSON)</label>
+        <textarea id="strategy-rules" class="form-control rules-editor"></textarea>
+        <div id="strategy-error" class="text-danger small mt-2"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" id="btn-save-strategy" class="btn btn-primary">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+const POLL_MS = 5000;
+let editingStrategyId = null;
+let strategyModal;
+
+async function api(path, options) {
+  const res = await fetch(path, Object.assign({ credentials: "same-origin" }, options || {}));
+  if (res.status === 401) { window.location.href = "/login"; throw new Error("unauthenticated"); }
+  if (!res.ok) throw new Error(await res.text());
+  return res.status === 204 ? null : res.json();
+}
+
+function fmtMoney(v) { return (v === null || v === undefined) ? "-" : `$${Number(v).toFixed(2)}`; }
+function fmtR(v) { return (v === null || v === undefined) ? "-" : `${Number(v).toFixed(2)}R`; }
+
+async function refreshStatus() {
+  const s = await api("/api/status");
+  const badge = document.getElementById("status-badge");
+  badge.textContent = s.bot_enabled ? "ENABLED" : "PAUSED";
+  badge.className = "badge fs-6 " + (s.bot_enabled ? "bg-success" : "bg-warning text-dark");
+  document.getElementById("last-cycle").textContent =
+    s.last_cycle_timestamp ? `${s.last_cycle_timestamp} (${s.last_cycle_status})` : "no cycle data yet";
+}
+
+async function refreshPositions() {
+  const rows = await api("/api/positions");
+  const body = document.getElementById("positions-body");
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No open positions</td></tr>'; return; }
+  body.innerHTML = rows.map(p => `<tr>
+    <td>${p.symbol}</td><td>${p.qty}</td><td>${fmtMoney(p.entry_price)}</td>
+    <td>${fmtMoney(p.current_price)}</td><td>${fmtMoney(p.stop_price)}</td>
+    <td class="small">${p.state}</td><td>${fmtR(p.unrealized_r)}</td>
+  </tr>`).join("");
+}
+
+async function refreshWatchlist() {
+  const rows = await api("/api/watchlist");
+  const body = document.getElementById("watchlist-body");
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="3" class="text-center text-muted">Empty</td></tr>'; return; }
+  body.innerHTML = rows.map(r => `<tr><td>${r.symbol}</td><td>${Number(r.gap_pct).toFixed(2)}%</td><td>${fmtMoney(r.open_price)}</td></tr>`).join("");
+}
+
+async function refreshTrades() {
+  const rows = await api("/api/trades?limit=50");
+  const body = document.getElementById("trades-body");
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No trades yet</td></tr>'; return; }
+  body.innerHTML = rows.map(t => `<tr>
+    <td class="small">${t.timestamp_iso}</td><td>${t.symbol}</td><td>${t.side}</td>
+    <td>${t.size}</td><td>${fmtMoney(t.fill_price)}</td><td class="small">${t.status}</td>
+  </tr>`).join("");
+}
+
+async function refreshLog() {
+  const rows = await api("/api/decision_log?limit=50");
+  const body = document.getElementById("log-body");
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="2" class="text-center text-muted">Empty</td></tr>'; return; }
+  body.innerHTML = rows.map(r => `<tr><td class="small">${r.timestamp_iso}</td><td class="small">${r.event}</td></tr>`).join("");
+}
+
+async function refreshPerformance() {
+  const data = await api("/api/performance");
+  const a = data.aggregates;
+  document.getElementById("perf-summary").innerHTML = `
+    <p>Trades: <strong>${a.total_trades}</strong> (${a.wins}W / ${a.losses}L, ${a.win_rate_pct}%)</p>
+    <p>Gross P&amp;L: <strong>${fmtMoney(a.gross_pnl_usd)}</strong></p>
+    <p>Profit factor: <strong>${a.profit_factor}</strong></p>
+    <p>Avg winner: ${fmtMoney(a.avg_winner)} | Avg loser: ${fmtMoney(a.avg_loser)}</p>`;
+
+  const maxCount = Math.max(1, ...data.histogram.map(h => h.count));
+  document.getElementById("perf-histogram").innerHTML = data.histogram.map(h => `
+    <div class="d-flex align-items-center mb-1">
+      <div style="width:100px" class="small">${h.label}</div>
+      <div class="flex-grow-1 hist-bar-track">
+        <div class="hist-bar" style="width:${(h.count / maxCount) * 100}%; background:${h.is_loss ? "#dc3545" : "#28a745"};"></div>
+      </div>
+      <div class="small ms-2">${h.count}</div>
+    </div>`).join("") || '<p class="text-muted">No closed trades</p>';
+}
+
+async function refreshStrategies() {
+  const rows = await api("/api/strategies");
+  const body = document.getElementById("strategies-body");
+  body.innerHTML = rows.map(s => `<tr>
+    <td>${s.name}</td>
+    <td>${s.is_active ? '<span class="badge bg-success">active</span>' : ""}</td>
+    <td class="small">${s.updated_at}</td>
+    <td class="text-end">
+      ${s.is_active ? "" : `<button class="btn btn-sm btn-outline-success" onclick="activateStrategy(${s.id})">Activate</button>`}
+      <button class="btn btn-sm btn-outline-secondary" onclick="editStrategy(${s.id})">Edit</button>
+      ${s.is_active ? "" : `<button class="btn btn-sm btn-outline-danger" onclick="deleteStrategy(${s.id})">Delete</button>`}
+    </td>
+  </tr>`).join("");
+}
+
+async function activateStrategy(id) { await api(`/api/strategies/${id}/activate`, { method: "POST" }); refreshStrategies(); }
+async function deleteStrategy(id) {
+  if (!confirm("Delete this strategy?")) return;
+  try { await api(`/api/strategies/${id}`, { method: "DELETE" }); refreshStrategies(); }
+  catch (e) { alert("Could not delete: " + e.message); }
+}
+
+async function editStrategy(id) {
+  const s = await api(`/api/strategies/${id}`);
+  editingStrategyId = id;
+  document.getElementById("strategy-name").value = s.name;
+  document.getElementById("strategy-name").disabled = true;
+  document.getElementById("strategy-rules").value = JSON.stringify(s.rules, null, 2);
+  document.getElementById("strategy-error").textContent = "";
+  strategyModal.show();
+}
+
+document.getElementById("btn-new-strategy").addEventListener("click", async () => {
+  editingStrategyId = null;
+  document.getElementById("strategy-name").value = "";
+  document.getElementById("strategy-name").disabled = false;
+  const active = (await api("/api/strategies")).find(s => s.is_active);
+  const base = active ? await api(`/api/strategies/${active.id}`) : null;
+  document.getElementById("strategy-rules").value = base ? JSON.stringify(base.rules, null, 2) : "{}";
+  document.getElementById("strategy-error").textContent = "";
+  strategyModal.show();
+});
+
+document.getElementById("btn-save-strategy").addEventListener("click", async () => {
+  const errorEl = document.getElementById("strategy-error");
+  let rules;
+  try { rules = JSON.parse(document.getElementById("strategy-rules").value); }
+  catch (e) { errorEl.textContent = "Invalid JSON: " + e.message; return; }
+
+  try {
+    if (editingStrategyId) {
+      await api(`/api/strategies/${editingStrategyId}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rules }),
+      });
+    } else {
+      const name = document.getElementById("strategy-name").value.trim();
+      if (!name) { errorEl.textContent = "Name is required."; return; }
+      await api("/api/strategies", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, rules }),
+      });
+    }
+    strategyModal.hide();
+    refreshStrategies();
+  } catch (e) {
+    errorEl.textContent = "Save failed: " + e.message;
+  }
+});
+
+document.getElementById("btn-enable").addEventListener("click", async () => { await api("/api/control/enable", { method: "POST" }); refreshStatus(); });
+document.getElementById("btn-disable").addEventListener("click", async () => { await api("/api/control/disable", { method: "POST" }); refreshStatus(); });
+document.getElementById("btn-flatten").addEventListener("click", async () => {
+  if (!confirm("This will market-sell every open position immediately. Continue?")) return;
+  await api("/api/control/flatten", { method: "POST" });
+  refreshStatus();
+});
+
+function refreshAll() {
+  refreshStatus(); refreshPositions(); refreshWatchlist();
+  refreshTrades(); refreshLog(); refreshPerformance(); refreshStrategies();
+}
+
+window.addEventListener("DOMContentLoaded", () => {
+  strategyModal = new bootstrap.Modal(document.getElementById("strategy-modal"));
+  refreshAll();
+  setInterval(refreshAll, POLL_MS);
+});
+</script>
+</body>
+</html>

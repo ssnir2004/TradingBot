@@ -1,8 +1,11 @@
-"""The autonomous trading cycle. Runs every 5 minutes via Task Scheduler
-(see setup_schedule.py). On each tick: checks market hours, reconciles
+"""The autonomous trading cycle. Runs every 5 minutes from the always-on
+service (see run_service.py). On each tick: checks market hours, handles any
+pending emergency flatten-all request from the dashboard, reconciles
 stop-outs, manages open positions (breakeven flip, partial profit, swing-low
-trailing stop), scans the watchlist for new Trend Join Long entries, and
-force-closes everything before the close.
+trailing stop) — always, regardless of the enabled flag, so an open position
+never goes unmanaged — then, only if the bot is enabled from the dashboard,
+scans the watchlist for new Trend Join Long entries. Force-closes everything
+before the close.
 
 Time gate (America/New_York):
     Sat/Sun                        -> "weekend"   (exit <1s)
@@ -11,9 +14,7 @@ Time gate (America/New_York):
     15:51-16:00                    -> "force_close"
     10:05-15:30                    -> "ok" (full cycle: manage + scan)
 """
-import json
 import math
-import os
 import subprocess
 import sys
 import traceback
@@ -26,17 +27,11 @@ import yfinance as yf
 from dotenv import dotenv_values
 from ib_async import Stock, StopOrder
 
+from src import db
 from src.ibkr_client import IBKRClient
 from src.notify import notify
 
 PROJECT_DIR = Path(__file__).resolve().parent
-RULES_PATH = PROJECT_DIR / "rules.json"
-STATE_PATH = PROJECT_DIR / "open_positions.json"
-TRADES_CSV = PROJECT_DIR / "trades.csv"
-WATCHLIST_PATH = PROJECT_DIR / "watchlist.txt"
-SAFETY_LOG_PATH = PROJECT_DIR / "safety-check-log.json"
-CYCLE_ERRORS_LOG = PROJECT_DIR / "logs" / "cycle_errors.log"
-
 ET = ZoneInfo("America/New_York")
 SUBPROCESS_TIMEOUT = 30
 
@@ -64,33 +59,10 @@ def time_gate(now_et: datetime | None = None) -> str:
     return "ok"
 
 
-# ---------------------------------------------------------------- Step 2 ---
-def load_state() -> list[dict]:
-    if not STATE_PATH.exists():
-        return []
-    try:
-        return json.loads(STATE_PATH.read_text())
-    except json.JSONDecodeError:
-        return []
-
-
-# ---------------------------------------------------------------- Step 5 ---
-def save_state(positions: list[dict]):
-    tmp_path = STATE_PATH.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(positions, indent=2, default=bool))
-    os.replace(tmp_path, STATE_PATH)
-
-
 def log_decision(entry: dict):
-    SAFETY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    clean = {"timestamp_iso": datetime.now(ET).isoformat(timespec="seconds")}
-    clean.update({k: (bool(v) if isinstance(v, bool) else v) for k, v in entry.items()})
-    with open(SAFETY_LOG_PATH, "a") as f:
-        f.write(json.dumps(clean, default=str) + "\n")
-
-
-def _rules() -> dict:
-    return json.loads(RULES_PATH.read_text())
+    entry = dict(entry)
+    event = entry.pop("event")
+    db.log_decision(event, **entry)
 
 
 def _env() -> dict:
@@ -121,6 +93,7 @@ def check_stop_outs(ib, positions: list[dict]) -> list[dict]:
                 notify(f"STOP {pos['symbol']}", f"exit ${fill.execution.avgPrice:.2f}, P&L ${pnl:+.2f}", "default")
                 log_decision({"event": "stop_out", "symbol": pos["symbol"], "fill_price": fill.execution.avgPrice, "pnl": pnl})
                 stopped_symbols.add(pos["symbol"])
+                db.remove_position(pos["symbol"])
 
     return [p for p in positions if p["symbol"] not in stopped_symbols]
 
@@ -154,7 +127,7 @@ def _place_stop(ib, symbol: str, quantity: int, stop_price: float) -> int:
     return trade.order.orderId
 
 
-def _market_sell(ib, symbol: str, quantity: int) -> float:
+def _market_sell(ib, symbol: str, quantity: int) -> bool:
     proc = subprocess.run(
         [sys.executable, str(PROJECT_DIR / "trade.py"),
          "--symbol", symbol, "--side", "SELL", "--size", str(quantity)],
@@ -201,12 +174,13 @@ def manage_position(ib, pos: dict, rules: dict) -> dict:
     if initial_risk <= 0:
         return pos
     r_multiple = (price - entry) / initial_risk
-    pos["R"] = r_multiple
+    pos["r_multiple"] = r_multiple
 
     if pos["state"] == "pre_breakeven":
         if r_multiple >= exit_cfg["breakeven_trigger_R"]:
             _cancel_stop(ib, pos.get("stop_order_id"))
             pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], entry)
+            pos["stop_price"] = entry
             pos["state"] = "post_breakeven_no_partial"
             notify(f"BE {pos['symbol']}", f"stop -> ${entry:.2f}", "default")
             log_decision({"event": "breakeven_flip", "symbol": pos["symbol"], "new_stop": entry})
@@ -220,6 +194,7 @@ def manage_position(ib, pos: dict, rules: dict) -> dict:
                 pos["qty"] = remaining
                 if remaining > 0:
                     pos["stop_order_id"] = _place_stop(ib, pos["symbol"], remaining, new_stop_price)
+                    pos["stop_price"] = new_stop_price
                 pos["state"] = "post_breakeven_partial_done"
                 notify(f"PARTIAL {pos['symbol']}", f"sold {sell_qty}/{sell_qty + remaining} @ ${price:.2f}", "default")
                 log_decision({"event": "partial_profit", "symbol": pos["symbol"], "sold": sell_qty, "price": price})
@@ -239,13 +214,14 @@ def manage_position(ib, pos: dict, rules: dict) -> dict:
                     notify(f"TRAIL {pos['symbol']}", f"stop ${old_stop:.2f} -> ${candidate_stop:.2f}", "default")
                     log_decision({"event": "trail_stop", "symbol": pos["symbol"], "old": old_stop, "new": candidate_stop})
 
+    if pos["qty"] > 0:
+        db.upsert_position(pos)
     return pos
 
 
 # ---------------------------------------------------------------- Step 6 ---
 def force_close_all(ib, positions: list[dict]):
     if not positions:
-        save_state([])
         return
 
     notify("EOD Force Close", f"flattening {len(positions)} positions", "high")
@@ -253,40 +229,15 @@ def force_close_all(ib, positions: list[dict]):
         _cancel_stop(ib, pos.get("stop_order_id"))
         _market_sell(ib, pos["symbol"], pos["qty"])
         log_decision({"event": "force_close", "symbol": pos["symbol"], "qty": pos["qty"]})
-
-    save_state([])
+        db.remove_position(pos["symbol"])
 
 
 # ---------------------------------------------------------------- Step 8 ---
-def _todays_buy_count() -> int:
-    if not TRADES_CSV.exists():
-        return 0
-    today = datetime.now(ET).strftime("%Y-%m-%d")
-    count = 0
-    import csv
-    with open(TRADES_CSV, newline="") as f:
-        for row in csv.DictReader(f):
-            if row["side"] == "BUY" and row["timestamp_iso"].startswith(today):
-                count += 1
-    return count
-
-
-def _read_watchlist() -> list[str]:
-    if not WATCHLIST_PATH.exists():
-        return []
-    tickers = []
-    for line in WATCHLIST_PATH.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        tickers.append(line.split()[0])
-    return tickers
-
-
 def _evaluate_entry_filters(ticker: str, rules: dict) -> dict | None:
-    """Evaluate D1-D3 (daily) and I1-I3 (intraday) from rules.json for one
-    ticker. Returns {"price", "low_of_day"} on a full pass, else None.
-    Uses yfinance only (same free/keyless data source as morning_prefilter.py)."""
+    """Evaluate D1-D3 (daily) and I1-I3 (intraday) from the active strategy's
+    rules for one ticker. Returns {"price", "low_of_day"} on a full pass,
+    else None. Uses yfinance only (same free/keyless data source as
+    morning_prefilter.py)."""
     daily_filters = rules["daily_filters"]
     intraday_filters = rules["intraday_filters"]
     yahoo_symbol = ticker.replace(" ", "-")
@@ -355,14 +306,14 @@ def _evaluate_entry_filters(ticker: str, rules: dict) -> dict | None:
 
 def entry_scan(ib, positions: list[dict], rules: dict, env: dict) -> list[dict]:
     max_trades_per_day = int(env.get("MAX_TRADES_PER_DAY", 5))
-    if _todays_buy_count() >= max_trades_per_day:
+    if db.count_todays_buys() >= max_trades_per_day:
         return positions
 
     max_concurrent = rules["risk"]["max_concurrent_positions"]
     if len(positions) >= max_concurrent:
         return positions
 
-    watchlist = _read_watchlist()
+    watchlist = [row["symbol"] for row in db.get_watchlist()]
     if not watchlist:
         return positions
 
@@ -378,7 +329,7 @@ def entry_scan(ib, positions: list[dict], rules: dict, env: dict) -> list[dict]:
             break
         if ticker in held_symbols:
             continue
-        if _todays_buy_count() >= max_trades_per_day:
+        if db.count_todays_buys() >= max_trades_per_day:
             break
 
         signal = _evaluate_entry_filters(ticker, rules)
@@ -418,8 +369,9 @@ def entry_scan(ib, positions: list[dict], rules: dict, env: dict) -> list[dict]:
             "stop_price": initial_stop,
             "stop_order_id": stop_order_id,
             "state": "pre_breakeven",
-            "R": 0.0,
+            "r_multiple": 0.0,
         }
+        db.upsert_position(new_position)
         positions.append(new_position)
         held_symbols.add(ticker)
         notify(f"BUY {ticker}", f"@ ${price:.2f}, stop ${initial_stop:.2f}, qty {size}", "default")
@@ -429,15 +381,17 @@ def entry_scan(ib, positions: list[dict], rules: dict, env: dict) -> list[dict]:
 
 
 # -------------------------------------------------------------------- main
-def main():
+def run_cycle():
+    """Runs one tick of the trading cycle. Safe to call every 5 minutes
+    all day — it self-gates on market hours."""
     status = time_gate()
     if status in ("weekend", "too_early", "closed"):
-        return
+        return status
 
     ibkr = None
     try:
         env = _env()
-        rules = _rules()
+        rules = db.get_active_rules()
 
         try:
             ibkr = IBKRClient(
@@ -455,33 +409,77 @@ def main():
             )
 
         ib = ibkr.ib
+        positions = db.get_open_positions()
 
-        positions = load_state()  # Step 2
+        # Emergency "flatten everything now" request from the dashboard takes
+        # priority over the normal cycle, but position management always runs
+        # first regardless of the enabled flag, per Step 3/4 below.
+        if db.consume_flatten_request():
+            positions = check_stop_outs(ib, positions)
+            force_close_all(ib, positions)
+            db.record_cycle_run("flattened_on_request")
+            return "flattened_on_request"
+
         positions = check_stop_outs(ib, positions)  # Step 3
         positions = [manage_position(ib, p, rules) for p in positions]  # Step 4
-        save_state(positions)  # Step 5
 
         if status == "force_close":  # Step 6
             force_close_all(ib, positions)
-            return
+            db.record_cycle_run(status)
+            return status
 
         if status == "manage_only":  # Step 7
-            return
+            db.record_cycle_run(status)
+            return status
 
-        positions = entry_scan(ib, positions, rules, env)  # Step 8
-        save_state(positions)  # Step 9
+        if db.is_bot_enabled():
+            entry_scan(ib, positions, rules, env)  # Step 8
+        else:
+            log_decision({"event": "entries_paused", "reason": "bot_disabled"})
+
+        db.record_cycle_run(status)
+        return status
     except Exception as exc:  # noqa: BLE001
-        CYCLE_ERRORS_LOG.parent.mkdir(parents=True, exist_ok=True)
-        with open(CYCLE_ERRORS_LOG, "a") as f:
-            f.write(f"--- {datetime.now(ET).isoformat()} ---\n")
-            f.write(traceback.format_exc() + "\n")
+        db.log_cycle_error(traceback.format_exc())
         notify("Cycle CRASHED", str(exc)[:500], "high")
+        db.record_cycle_run("error")
         if ibkr is not None:
             ibkr.disconnect()
-        sys.exit(1)
+        raise
     finally:
         if ibkr is not None:
             ibkr.disconnect()
+
+
+def emergency_check():
+    """Cheap poll for a pending dashboard flatten-all request. Only opens an
+    IBKR connection when the flag is actually set, so this is safe to call
+    frequently (e.g. every 15-30s) from the service scheduler."""
+    if db.get_setting("flatten_now", "false") != "true":
+        return
+
+    env = _env()
+    ibkr = IBKRClient(
+        env.get("IBKR_HOST", "127.0.0.1"),
+        int(env.get("IBKR_PORT", 7497)),
+        int(env.get("IBKR_CLIENT_ID", 2)),
+    )
+    try:
+        if db.consume_flatten_request():
+            positions = db.get_open_positions()
+            positions = check_stop_outs(ibkr.ib, positions)
+            force_close_all(ibkr.ib, positions)
+            db.record_cycle_run("flattened_on_request")
+    finally:
+        ibkr.disconnect()
+
+
+def main():
+    db.init_db(seed_rules_path=PROJECT_DIR / "rules.json")
+    try:
+        run_cycle()
+    except Exception:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

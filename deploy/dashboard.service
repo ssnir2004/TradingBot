@@ -1,0 +1,17 @@
+[Unit]
+Description=TradingBot dashboard (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tradingbot
+WorkingDirectory=/opt/tradingbot
+Environment=DASHBOARD_HOST=127.0.0.1
+Environment=DASHBOARD_PORT=8000
+ExecStart=/opt/tradingbot/.venv/bin/python /opt/tradingbot/run_dashboard.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
