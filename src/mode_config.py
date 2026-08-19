@@ -13,7 +13,6 @@ GATEWAY_PORT_BY_MODE = {"paper": "4002", "live": "4001"}
 # key -> (.env suffix, cast, hardcoded fallback if neither DB nor .env has it)
 RISK_PARAM_SPECS = {
     "portfolio_value": ("PORTFOLIO_VALUE_USD", float, 25000),
-    "max_trade_size": ("MAX_TRADE_SIZE_USD", float, 2500),
     "max_trades_per_day": ("MAX_TRADES_PER_DAY", int, 5),
     "max_risk_pct": ("MAX_RISK_PER_TRADE_PCT", float, 1.0),
 }

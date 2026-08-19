@@ -60,7 +60,7 @@ def main():
             log(f"not trading {symbol}: {result['reasons']}")
             sys.exit(0)
 
-        budget = min(risk["max_trade_size"], risk["portfolio_value"] * 0.10)
+        budget = risk["portfolio_value"] * 0.10
         price = result["price"]
         quantity = int(budget / price) if price else 0
 

@@ -129,7 +129,7 @@ python -c "import secrets; print(secrets.token_hex(32))"   # paste into SESSION_
 
 `.env` is git-ignored — fill in `SESSION_SECRET` (required, the dashboard
 refuses to start without it), your Telegram token/chat id, and adjust
-`PORTFOLIO_VALUE_USD` / `MAX_TRADE_SIZE_USD` / `MAX_TRADES_PER_DAY` to taste.
+`PORTFOLIO_VALUE_USD` / `MAX_TRADES_PER_DAY` to taste.
 Leave `IBKR_PORT=7497` and `PAPER_TRADING=true` until you've read the
 "Going live" section below.
 
@@ -243,8 +243,7 @@ approval is the most common cause).
 2. Read `cycle.py` end-to-end — know exactly what it will do with real money.
 3. In `.env`, set `IBKR_PORT=7496` (TWS live) and `PAPER_TRADING=false`
    together — the guard refuses to start if they disagree, which is
-   intentional. Adjust `PORTFOLIO_VALUE_USD`/`MAX_TRADE_SIZE_USD` to your
-   real account.
+   intentional. Adjust `PORTFOLIO_VALUE_USD` to your real account.
 4. Prefer **IB Gateway** over TWS for unattended production runs — no GUI,
    less memory, more reliable for long-running automation. Same code, just
    change `IBKR_PORT` to `4001` (live) / `4002` (paper).

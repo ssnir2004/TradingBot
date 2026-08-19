@@ -96,26 +96,22 @@
         </div>
         <div class="card-body">
           <div class="row g-3">
-            <div class="col-6 col-md-3">
+            <div class="col-6 col-md-4">
               <label class="form-label small">Portfolio Value (USD)</label>
               <input type="number" step="0.01" min="0" id="risk-portfolio-value" class="form-control form-control-sm">
             </div>
-            <div class="col-6 col-md-3">
-              <label class="form-label small">Max Trade Size (USD)</label>
-              <input type="number" step="0.01" min="0" id="risk-max-trade-size" class="form-control form-control-sm">
-            </div>
-            <div class="col-6 col-md-3">
+            <div class="col-6 col-md-4">
               <label class="form-label small">Max Trades / Day</label>
               <input type="number" step="1" min="0" id="risk-max-trades-per-day" class="form-control form-control-sm">
             </div>
-            <div class="col-6 col-md-3">
+            <div class="col-6 col-md-4">
               <label class="form-label small">Max Risk % / Trade</label>
               <input type="number" step="0.01" min="0" id="risk-max-risk-pct" class="form-control form-control-sm">
             </div>
           </div>
           <div id="risk-error" class="text-danger small mt-2"></div>
           <div class="text-muted small mt-2">
-            Position size uses the lower of a risk-based size (Portfolio Value × Max Risk %, divided by the stop distance) and Max Trade Size.
+            Position size uses the lower of a risk-based size (Portfolio Value × Max Risk %, divided by the stop distance) and a cap of Max Position Size % of the active strategy.
             Saving on <strong>LIVE</strong> requires typing a confirmation phrase — it directly controls how much real money a single order can risk.
           </div>
         </div>
@@ -408,7 +404,7 @@ document.getElementById("btn-gw-resume").addEventListener("click", async () => {
   }
 });
 
-const RISK_INPUT_IDS = ["risk-portfolio-value", "risk-max-trade-size", "risk-max-trades-per-day", "risk-max-risk-pct"];
+const RISK_INPUT_IDS = ["risk-portfolio-value", "risk-max-trades-per-day", "risk-max-risk-pct"];
 
 async function refreshRiskParams() {
   // Skip while the user is actively editing one of these fields — the 5s
@@ -419,7 +415,6 @@ async function refreshRiskParams() {
   const r = await modeApi("/api/risk_params");
   document.getElementById("risk-mode-label").textContent = currentMode.toUpperCase();
   document.getElementById("risk-portfolio-value").value = r.portfolio_value;
-  document.getElementById("risk-max-trade-size").value = r.max_trade_size;
   document.getElementById("risk-max-trades-per-day").value = r.max_trades_per_day;
   document.getElementById("risk-max-risk-pct").value = r.max_risk_pct;
   document.getElementById("risk-error").textContent = "";
@@ -430,7 +425,6 @@ document.getElementById("btn-save-risk").addEventListener("click", async () => {
   errorEl.textContent = "";
   const payload = {
     portfolio_value: document.getElementById("risk-portfolio-value").value,
-    max_trade_size: document.getElementById("risk-max-trade-size").value,
     max_trades_per_day: document.getElementById("risk-max-trades-per-day").value,
     max_risk_pct: document.getElementById("risk-max-risk-pct").value,
   };
