@@ -13,7 +13,6 @@ from src import db, mode_config
 from src.ibkr_client import IBKRClient
 
 PROJECT_DIR = Path(__file__).resolve().parent
-FAILED_STATUSES = {"Cancelled", "ApiCancelled", "Inactive"}
 
 
 def main():
@@ -41,9 +40,19 @@ def main():
 
         db.record_trade(args.mode, args.symbol, args.side, args.size, fill_price, order_id, status)
 
-        if status in FAILED_STATUSES:
+        # Success is defined by what actually happened, not by absence from
+        # a denylist: only a real fill counts. Anything else (Cancelled,
+        # Inactive, a ValidationError that never resolved before the
+        # polling deadline, or even a live-but-unfilled Submitted) must
+        # fail loudly here — a caller (cycle.py's entry_scan) treats a
+        # non-zero exit as "no position was opened", and a false success
+        # here would have it record a phantom position for a share that
+        # was never actually bought.
+        if status != "Filled" or fill_price <= 0:
             for entry in trade.log:
                 print(f"trade.log: {entry}")
+            print(f"[{args.mode}] {args.side} {args.size} {args.symbol}: order_id={order_id} "
+                  f"fill_price={fill_price} status={status} (not filled)")
             sys.exit(1)
 
         print(f"[{args.mode}] {args.side} {args.size} {args.symbol}: order_id={order_id} "

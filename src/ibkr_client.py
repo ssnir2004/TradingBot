@@ -4,7 +4,6 @@ import time
 from ib_async import IB, MarketOrder, Stock, Trade
 
 SETTLED_STATUSES_TIMEOUT = 10
-PENDING_STATUSES = ("PendingSubmit", "PreSubmitted", "")
 
 
 class IBKRClient:
@@ -20,10 +19,16 @@ class IBKRClient:
         order.outsideRth = True
         trade = self.ib.placeOrder(qualified, order)
 
+        # trade.isDone() (Filled/Cancelled/ApiCancelled/Inactive) is the
+        # correct "stop polling" signal — unlike a plain "not pending"
+        # check, it correctly keeps waiting through "ValidationError",
+        # which ib_async can report as a transient, still-live state that
+        # often resolves to Submitted/Filled moments later (see
+        # OrderStatus.WorkingStates in ib_async's order.py).
         deadline = time.monotonic() + SETTLED_STATUSES_TIMEOUT
         while time.monotonic() < deadline:
             self.ib.sleep(0.5)
-            if trade.orderStatus.status not in PENDING_STATUSES:
+            if trade.isDone():
                 break
 
         return trade
