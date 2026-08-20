@@ -384,12 +384,21 @@ def _evaluate_entry_filters(account_id: int, mode: str, ticker: str, rules: dict
         else:
             stop_ref = float(regular_bars["High"].max()) if not regular_bars.empty else float(today_bars["High"].max())
             d1 = current_price < float(prior_day["Low"])  # below yesterday's low
-            d2 = float(prior_day["Close"]) < float(sma200)  # yesterday's close below the 200-day SMA
+            if "D2_prior_close_pct_above_sma50_min" in daily_filters:
+                sma50 = daily["Close"].iloc[-51:-1].mean()
+                ext_pct = (float(prior_day["Close"]) - float(sma50)) / float(sma50) * 100 if sma50 else 0.0
+                d2 = ext_pct >= daily_filters["D2_prior_close_pct_above_sma50_min"]  # overextended above the 50-day SMA
+            else:
+                d2 = float(prior_day["Close"]) < float(sma200)  # yesterday's close below the 200-day SMA
             d3 = gap_pct <= -daily_filters["D3_min_gap_pct_down_from_prior_close"]  # gap down >= threshold
             premarket_extreme = float(premarket_bars["Low"].min()) if not premarket_bars.empty else float("inf")
             i1 = current_price < premarket_extreme  # below today's premarket low
-            extreme_so_far = float(today_bars["Low"].iloc[:-1].min()) if len(today_bars) > 1 else float("inf")
-            i2 = current_price < extreme_so_far  # new low-of-day
+            if "I2_rsi_below" in intraday_filters:
+                rsi = _compute_rsi(intraday["Close"], intraday_filters.get("I2_rsi_period", 14))
+                i2 = rsi is not None and rsi < intraday_filters["I2_rsi_below"]  # RSI below threshold (rolled over)
+            else:
+                extreme_so_far = float(today_bars["Low"].iloc[:-1].min()) if len(today_bars) > 1 else float("inf")
+                i2 = current_price < extreme_so_far  # new low-of-day
 
         # I3: relative volume vs lookback-day average >= threshold (direction-agnostic)
         lookback = intraday_filters["I3_rvol_lookback_days"]

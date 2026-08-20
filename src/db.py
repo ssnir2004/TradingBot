@@ -300,6 +300,55 @@ EXTRA_STRATEGY_PRESETS = [
         "conservative",
         "short",
     ),
+    (
+        # Catches a parabolic blow-off top instead of an already-confirmed
+        # downtrend: "Short Breakdown Conservative"'s D2 (prior close below
+        # SMA200) can't fire near the top of a huge multi-week run-up, since
+        # price is still far ABOVE the 200-day SMA at that point — by the
+        # time D2 passes, most of the drop already happened. This preset
+        # swaps D2 for an extension filter (prior close far ABOVE the
+        # 50-day SMA = "overextended", the mirror-opposite condition) and
+        # swaps I2 for an RSI-rollover confirmation (RSI(14) dropping below
+        # 50 intraday = momentum has actually flipped), instead of waiting
+        # for a new low-of-day. D1/D3/I1/I3 are unchanged from the
+        # conservative short mirror. Rated aggressive: it's a counter-trend
+        # reversal entry, not a continuation of an already-established
+        # trend, so it's inherently more prone to false signals.
+        "Short Parabolic Reversal",
+        {
+            "strategy_name": "Short Parabolic Reversal",
+            "direction": "short_only",
+            "trade_timeframe": "5m",
+            "universe_filters": {"index": "S&P 500", "min_price_usd": 3.0},
+            "daily_filters": {
+                "D1_below_prior_day_low": True,
+                "D2_prior_close_pct_above_sma50_min": 40.0,
+                "D3_min_gap_pct_down_from_prior_close": 3.0,
+            },
+            "intraday_filters": {
+                "I1_below_premarket_low": True,
+                "I2_rsi_below": 50,
+                "I2_rsi_period": 14,
+                "I3_rvol_min": 2.0,
+                "I3_rvol_lookback_days": 14,
+            },
+            "time_filter": {"earliest_entry_et": "10:05", "latest_entry_et": "15:30", "force_close_et": "15:51"},
+            "exit": {
+                "initial_stop_rule": "hod_plus_1pct",
+                "partial_profit_trigger_R": 0.75,
+                "partial_profit_fraction": 0.3333,
+                "breakeven_trigger_R": 1.0,
+                "post_breakeven_trail": "swing_high_5m_2_2",
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+            },
+        },
+        "aggressive",
+        "short",
+    ),
 ]
 
 

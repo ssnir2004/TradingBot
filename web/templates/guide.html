@@ -301,6 +301,7 @@
           <tr><td>Long Breakout RSI Filter</td><td><span class="badge bg-primary">LONG</span></td><td>3.0%</td><td>x2.0</td><td>1.0%</td><td>10%</td><td>5</td></tr>
           <tr><td>Long Breakout Aggressive</td><td><span class="badge bg-primary">LONG</span></td><td>1.5%</td><td>x1.2</td><td>2.5%</td><td>20%</td><td>8</td></tr>
           <tr><td>Short Breakdown Conservative</td><td><span class="badge bg-danger">SHORT</span></td><td>3.0%</td><td>x2.0</td><td>1.0%</td><td>10%</td><td>5</td></tr>
+          <tr><td>Short Parabolic Reversal</td><td><span class="badge bg-danger">SHORT</span></td><td>3.0%</td><td>x2.0</td><td>1.0%</td><td>10%</td><td>5</td></tr>
         </tbody>
       </table>
       <p class="text-muted small">
@@ -308,6 +309,19 @@
         Breakout Conservative</strong> לגמרי - ההבדל היחיד הוא תנאי I2:
         במקום "שיא חדש תוך-יומי" הוא דורש RSI(14) מעל 50 על נרות 5 דקות
         (מומנטום חיובי לפי אינדיקטור, לא רק מחיר שיא).
+      </p>
+      <p class="text-muted small">
+        <strong>Short Parabolic Reversal</strong> נועדה לתפוס בדיוק את המקרה
+        שבו <strong>Short Breakdown Conservative</strong> מפספסת: מניה
+        שעלתה פרבולית ומתחילה להתהפך בשיא, כשהיא עדיין הרבה מעל ה-SMA200
+        (D2 של האסטרטגיה השמרנית לא יתמלא עד שהמניה כבר נפלה משמעותית).
+        שני שינויים ביחס לגרסה השמרנית: D2 דורש שהסגירה של אתמול תהיה
+        לפחות 40% מעל ה-SMA50 (סימן ל"מתיחת יתר" פרבולית, במקום "כבר
+        מתחת ל-SMA200"), ו-I2 דורש RSI(14) מתחת ל-50 תוך-יומי (אישור
+        שהמומנטום התהפך בפועל, במקום שפל יומי חדש). מדורגת
+        <span class="badge bg-danger">aggressive</span> - זו כניסה נגד
+        המגמה שהתקיימה עד כה (mean-reversion), לא המשך מגמה קיימת, ולכן
+        חשופה יותר לאיתותי שווא.
       </p>
       <p class="mb-0">
         הפעלת אסטרטגיה מדורגת <span class="badge bg-danger">aggressive</span>
