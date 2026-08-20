@@ -36,7 +36,7 @@ dashboard with login, live positions/trades, and a strategy switcher.
 ## Architecture
 
 ```
-rules.json                # the DEFAULT "Trend Join Long" strategy, seeded into
+rules.json                # the DEFAULT "Long Breakout Conservative" strategy, seeded into
                            # the DB on first run — after that, the DB (not this
                            # file) is the source of truth; edit strategies from
                            # the dashboard instead of this file post-setup
@@ -185,7 +185,7 @@ python cycle.py                          # run exactly one tick of the trading c
 python daily_summary.py                  # send the Telegram summary on demand
 ```
 
-## The strategy: "Trend Join Long"
+## The strategy: "Long Breakout Conservative"
 
 The default strategy (seeded from `rules.json` into the DB on first run) —
 long only, 5-minute chart, six filters split daily/intraday. All six must

@@ -1,7 +1,7 @@
 """Single-symbol dev/test evaluation used by bot.py.
 
 This only checks the time gate and position-dedupe — it is NOT the full
-Trend Join Long rule set. The six D1-D3 / I1-I3 filters from the active
+Long Breakout rule set. The six D1-D3 / I1-I3 filters from the active
 strategy are evaluated by cycle.py against the whole S&P 500 watchlist, not
 here.
 """

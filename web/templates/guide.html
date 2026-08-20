@@ -29,8 +29,8 @@
       <h4>מה הבוט עושה</h4>
       <p class="mb-0">
         הבוט סורק את מדד ה-S&amp;P 500 ומחפש מניות שעונות על אסטרטגיית
-        <strong>"Trend Join Long"</strong> (כניסה לפוזיציית לונג במניה
-        שפורצת למעלה) ו/או <strong>"Trend Break Short"</strong> (כניסה
+        <strong>"Long Breakout"</strong> (כניסה לפוזיציית לונג במניה
+        שפורצת למעלה) ו/או <strong>"Short Breakdown"</strong> (כניסה
         לפוזיציית שורט במניה שנשברת למטה) - שתיהן על בסיס נרות של 5 דקות,
         ויכולות לרוץ בו-זמנית (ראה בהמשך). הוא פועל <strong>24/7 על
         השרת</strong>, עצמאי מהמחשב שלך, ומריץ בדיקה (cycle) כל 5 דקות
@@ -92,8 +92,8 @@
       </table>
       <p class="text-muted small mb-0">
         הערכים (3%, פי 2 וכו') ניתנים לשינוי בעריכת אסטרטגיה בדשבורד - ראה
-        בהמשך. הטבלה כאן מתארת את הכיוון <strong>Long</strong> (Trend Join
-        Long); לאסטרטגיית ה-<strong>Short</strong> (Trend Break Short) יש
+        בהמשך. הטבלה כאן מתארת את הכיוון <strong>Long</strong> (Long
+        Breakout); לאסטרטגיית ה-<strong>Short</strong> (Short Breakdown) יש
         בדיוק אותם 6 תנאים, הפוכים - למשל D1 הופך ל"מתחת לשפל של אתמול",
         D3 הופך ל-gap כלפי מטה - ראה כרטיס "Long מול Short" בהמשך.
       </p>
@@ -259,8 +259,8 @@
     <div class="card-body">
       <h4>Long מול Short</h4>
       <p>
-        <strong>Trend Join Long</strong> קונה מניה שפורצת למעלה (breakout);
-        <strong>Trend Break Short</strong> מוכרת בשורט מניה שנשברת למטה
+        <strong>Long Breakout</strong> קונה מניה שפורצת למעלה (breakout);
+        <strong>Short Breakdown</strong> מוכרת בשורט מניה שנשברת למטה
         (breakdown). כל 6 הפילטרים (D1-I3) והלוגיקה של stop/breakeven/
         trailing זהים במבנה, רק הפוכים בכיוון - טבלת ה-D1-I3 למעלה מתארת
         את הכיוון Long; ב-Short הכל הפוך: מתחת לשפל של אתמול/ה-SMA200,
@@ -297,12 +297,18 @@
       <table class="table table-sm">
         <thead><tr><th>שם</th><th>כיוון</th><th>Gap מינימלי</th><th>RVOL מינימלי</th><th>סיכון/עסקה</th><th>גודל פוזיציה מקס'</th><th>פוזיציות בו-זמנית</th></tr></thead>
         <tbody>
-          <tr><td>Trend Join Long (default)</td><td><span class="badge bg-primary">LONG</span></td><td>3.0%</td><td>x2.0</td><td>1.0%</td><td>10%</td><td>5</td></tr>
-          <tr><td>Trend Join Long - Moderate</td><td><span class="badge bg-primary">LONG</span></td><td>2.0%</td><td>x1.5</td><td>1.5%</td><td>12%</td><td>6</td></tr>
-          <tr><td>Trend Join Long - Aggressive</td><td><span class="badge bg-primary">LONG</span></td><td>1.5%</td><td>x1.2</td><td>2.5%</td><td>20%</td><td>8</td></tr>
-          <tr><td>Trend Break Short (default)</td><td><span class="badge bg-danger">SHORT</span></td><td>3.0%</td><td>x2.0</td><td>1.0%</td><td>10%</td><td>5</td></tr>
+          <tr><td>Long Breakout Conservative</td><td><span class="badge bg-primary">LONG</span></td><td>3.0%</td><td>x2.0</td><td>1.0%</td><td>10%</td><td>5</td></tr>
+          <tr><td>Long Breakout RSI Filter</td><td><span class="badge bg-primary">LONG</span></td><td>3.0%</td><td>x2.0</td><td>1.0%</td><td>10%</td><td>5</td></tr>
+          <tr><td>Long Breakout Aggressive</td><td><span class="badge bg-primary">LONG</span></td><td>1.5%</td><td>x1.2</td><td>2.5%</td><td>20%</td><td>8</td></tr>
+          <tr><td>Short Breakdown Conservative</td><td><span class="badge bg-danger">SHORT</span></td><td>3.0%</td><td>x2.0</td><td>1.0%</td><td>10%</td><td>5</td></tr>
         </tbody>
       </table>
+      <p class="text-muted small">
+        <strong>Long Breakout RSI Filter</strong> זהה במספרים ל-<strong>Long
+        Breakout Conservative</strong> לגמרי - ההבדל היחיד הוא תנאי I2:
+        במקום "שיא חדש תוך-יומי" הוא דורש RSI(14) מעל 50 על נרות 5 דקות
+        (מומנטום חיובי לפי אינדיקטור, לא רק מחיר שיא).
+      </p>
       <p class="mb-0">
         הפעלת אסטרטגיה מדורגת <span class="badge bg-danger">aggressive</span>
         דורשת הקלדת אישור (<span class="mono">ok</span>)

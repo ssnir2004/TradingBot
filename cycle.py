@@ -217,6 +217,23 @@ def _current_price(symbol: str) -> float | None:
     return float(bars["Close"].iloc[-1])
 
 
+def _compute_rsi(closes: pd.Series, period: int) -> float | None:
+    """Wilder's RSI (the standard definition — smoothed via an EWMA with
+    alpha=1/period) over `closes`, evaluated as of the most recent bar.
+    None if there isn't enough history yet to have a meaningful value."""
+    if len(closes) < period + 1:
+        return None
+    delta = closes.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean().iloc[-1]
+    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean().iloc[-1]
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return float(100 - (100 / (1 + rs)))
+
+
 # ---------------------------------------------------------------- Step 4 ---
 def manage_position(account_id: int, mode: str, ib, pos: dict, rules: dict) -> dict:
     """rules must be the exit config for pos["side"] — see run_cycle, which
@@ -334,7 +351,7 @@ def _evaluate_entry_filters(account_id: int, mode: str, ticker: str, rules: dict
         prior_day = daily.iloc[-2]
         sma200 = daily["Close"].iloc[-201:-1].mean()
 
-        intraday = yf.Ticker(yahoo_symbol).history(period="1d", interval="5m", prepost=True)
+        intraday = yf.Ticker(yahoo_symbol).history(period="5d", interval="5m", prepost=True)
         if intraday.empty:
             return {"pass": False, "side": side, "error": "no intraday data"}
         intraday.index = intraday.index.tz_convert(ET)
@@ -358,8 +375,12 @@ def _evaluate_entry_filters(account_id: int, mode: str, ticker: str, rules: dict
             d3 = gap_pct >= daily_filters["D3_min_gap_pct_from_prior_close"]  # gap up >= threshold
             premarket_extreme = float(premarket_bars["High"].max()) if not premarket_bars.empty else float("-inf")
             i1 = current_price > premarket_extreme  # above today's premarket high
-            extreme_so_far = float(today_bars["High"].iloc[:-1].max()) if len(today_bars) > 1 else float("-inf")
-            i2 = current_price > extreme_so_far  # new high-of-day
+            if "I2_rsi_above" in intraday_filters:
+                rsi = _compute_rsi(intraday["Close"], intraday_filters.get("I2_rsi_period", 14))
+                i2 = rsi is not None and rsi > intraday_filters["I2_rsi_above"]  # RSI above threshold
+            else:
+                extreme_so_far = float(today_bars["High"].iloc[:-1].max()) if len(today_bars) > 1 else float("-inf")
+                i2 = current_price > extreme_so_far  # new high-of-day
         else:
             stop_ref = float(regular_bars["High"].max()) if not regular_bars.empty else float(today_bars["High"].max())
             d1 = current_price < float(prior_day["Low"])  # below yesterday's low

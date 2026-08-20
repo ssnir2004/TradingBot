@@ -1,5 +1,5 @@
 {
-  "strategy_name": "Trend Join Long",
+  "strategy_name": "Long Breakout Conservative",
   "direction": "long_only",
   "trade_timeframe": "5m",
 

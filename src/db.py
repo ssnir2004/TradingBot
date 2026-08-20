@@ -184,44 +184,50 @@ CREATE INDEX IF NOT EXISTS idx_decision_log_account_mode_timestamp ON decision_l
 # trading at once, independently per account.
 EXTRA_STRATEGY_PRESETS = [
     (
-        "Trend Join Long - Moderate",
+        # Exact match of rules.json's long default, except I2: instead of
+        # requiring a new high-of-day, it requires 5m-close RSI(14) > 50
+        # (see _compute_rsi / _evaluate_entry_filters in cycle.py). Every
+        # other filter/exit/risk number is identical to the default on
+        # purpose, so risk_rating mirrors the default's 'conservative'.
+        "Long Breakout RSI Filter",
         {
-            "strategy_name": "Trend Join Long - Moderate",
+            "strategy_name": "Long Breakout RSI Filter",
             "direction": "long_only",
             "trade_timeframe": "5m",
             "universe_filters": {"index": "S&P 500", "min_price_usd": 3.0},
             "daily_filters": {
                 "D1_above_prior_day_high": True,
                 "D2_prior_close_above_sma200": True,
-                "D3_min_gap_pct_from_prior_close": 2.0,
+                "D3_min_gap_pct_from_prior_close": 3.0,
             },
             "intraday_filters": {
                 "I1_above_premarket_high": True,
-                "I2_above_today_hod": True,
-                "I3_rvol_min": 1.5,
+                "I2_rsi_above": 50,
+                "I2_rsi_period": 14,
+                "I3_rvol_min": 2.0,
                 "I3_rvol_lookback_days": 14,
             },
             "time_filter": {"earliest_entry_et": "10:05", "latest_entry_et": "15:30", "force_close_et": "15:51"},
             "exit": {
                 "initial_stop_rule": "lod_minus_1pct",
-                "partial_profit_trigger_R": 1.0,
+                "partial_profit_trigger_R": 0.75,
                 "partial_profit_fraction": 0.3333,
-                "breakeven_trigger_R": 1.25,
+                "breakeven_trigger_R": 1.0,
                 "post_breakeven_trail": "swing_low_5m_2_2",
             },
             "risk": {
-                "max_risk_per_trade_pct": 1.5,
-                "max_position_size_pct_of_portfolio": 12,
-                "max_concurrent_positions": 6,
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
             },
         },
-        "moderate",
+        "conservative",
         "long",
     ),
     (
-        "Trend Join Long - Aggressive",
+        "Long Breakout Aggressive",
         {
-            "strategy_name": "Trend Join Long - Aggressive",
+            "strategy_name": "Long Breakout Aggressive",
             "direction": "long_only",
             "trade_timeframe": "5m",
             "universe_filters": {"index": "S&P 500", "min_price_usd": 3.0},
@@ -260,9 +266,9 @@ EXTRA_STRATEGY_PRESETS = [
         # of below the low, profit-taking/breakeven/trailing all trigger on
         # the price falling instead of rising. Same numeric thresholds as
         # the long default, so it's the "same conservatism," mirrored.
-        "Trend Break Short (default)",
+        "Short Breakdown Conservative",
         {
-            "strategy_name": "Trend Break Short",
+            "strategy_name": "Short Breakdown Conservative",
             "direction": "short_only",
             "trade_timeframe": "5m",
             "universe_filters": {"index": "S&P 500", "min_price_usd": 3.0},
@@ -436,6 +442,36 @@ def init_db(seed_rules_path: Path | None = None):
             "WHERE name = 'Trend Join Long (default)' AND risk_rating = 'moderate'"
         )
 
+        # One-time rename to clearer, ≤4-word strategy names (old installs
+        # only — INSERT OR IGNORE below is a no-op once a row already has
+        # the new name, so this only fires the first time each old name is
+        # still present).
+        _STRATEGY_RENAMES = {
+            "Trend Join Long (default)": "Long Breakout Conservative",
+            "Trend Join Long - Moderate": "Long Breakout RSI Filter",
+            "Trend Join Long - Aggressive": "Long Breakout Aggressive",
+            "Trend Break Short (default)": "Short Breakdown Conservative",
+        }
+        for old_name, new_name in _STRATEGY_RENAMES.items():
+            conn.execute("UPDATE strategies SET name = ? WHERE name = ?", (new_name, old_name))
+
+        # The renamed "Long Breakout RSI Filter" strategy also changed
+        # content (I2 swapped from new-high-of-day to RSI>50, and every
+        # other number brought in line with the default) — replace its
+        # rules_json/risk_rating too, but only while it still has the old
+        # I2 key, so a deliberate manual edit made after this migration
+        # already ran once isn't clobbered on a later restart.
+        row = conn.execute(
+            "SELECT id, rules_json FROM strategies WHERE name = 'Long Breakout RSI Filter'"
+        ).fetchone()
+        if row and "I2_above_today_hod" in row["rules_json"]:
+            rsi_preset = next(p for p in EXTRA_STRATEGY_PRESETS if p[0] == "Long Breakout RSI Filter")
+            conn.execute(
+                "UPDATE strategies SET rules_json = ?, risk_rating = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(rsi_preset[1], indent=2), rsi_preset[2],
+                 datetime.now(ET).isoformat(timespec="seconds"), row["id"]),
+            )
+
         # --- multi-account migration (runs once, no-ops after) ---
         _migrate_add_column(conn, "users", "is_admin", "INTEGER NOT NULL DEFAULT 0")
         admin_id = _resolve_or_create_admin(conn)
@@ -511,7 +547,7 @@ def init_db(seed_rules_path: Path | None = None):
             conn.execute(
                 "INSERT INTO strategies (name, direction, rules_json, risk_rating, created_at, updated_at) "
                 "VALUES (?, 'long', ?, 'conservative', ?, ?)",
-                ("Trend Join Long (default)", rules_json, now, now),
+                ("Long Breakout Conservative", rules_json, now, now),
             )
 
         for name, rules, risk_rating, direction in EXTRA_STRATEGY_PRESETS:
@@ -944,7 +980,7 @@ def create_user(username: str, password: str, is_admin: bool = False) -> int:
         )
         account_id = cur.lastrowid
         default_row = conn.execute(
-            "SELECT id FROM strategies WHERE name = 'Trend Join Long (default)'"
+            "SELECT id FROM strategies WHERE name = 'Long Breakout Conservative'"
         ).fetchone()
         if default_row:
             conn.execute(
