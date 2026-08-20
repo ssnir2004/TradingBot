@@ -93,10 +93,10 @@ def _env() -> dict:
     return dotenv_values(PROJECT_DIR / ".env")
 
 
-def _connect(env: dict, mode: str, client_id: int) -> IBKRClient:
+def _connect(env: dict, account_id: int, mode: str, client_id: int) -> IBKRClient:
     return IBKRClient(
         env.get("IBKR_HOST", "127.0.0.1"),
-        mode_config.ibkr_port(env, mode),
+        mode_config.ibkr_port(env, account_id, mode),
         client_id,
     )
 
@@ -525,11 +525,11 @@ def run_cycle(account_id: int, mode: str):
         client_id = int(env.get("IBKR_CLIENT_ID", 2))
 
         try:
-            ibkr = _connect(env, mode, client_id)
+            ibkr = _connect(env, account_id, mode, client_id)
         except Exception:
             import time as _time
             _time.sleep(5)
-            ibkr = _connect(env, mode, client_id)
+            ibkr = _connect(env, account_id, mode, client_id)
 
         ib = ibkr.ib
         positions = db.get_open_positions(account_id, mode)
@@ -587,7 +587,7 @@ def refresh_account_info(account_id: int, mode: str):
     independent of market hours, so the dashboard has something to show
     even outside the trading window."""
     env = _env()
-    ibkr = _connect(env, mode, ACCOUNT_REFRESH_CLIENT_ID)
+    ibkr = _connect(env, account_id, mode, ACCOUNT_REFRESH_CLIENT_ID)
     try:
         ib = ibkr.ib
         ib.sleep(2)  # let account summary data populate after connecting
@@ -620,7 +620,7 @@ def emergency_check(account_id: int, mode: str):
 
     env = _env()
     client_id = int(env.get("IBKR_CLIENT_ID", 2))
-    ibkr = _connect(env, mode, client_id)
+    ibkr = _connect(env, account_id, mode, client_id)
     try:
         if db.consume_flatten_request(account_id, mode):
             positions = db.get_open_positions(account_id, mode)

@@ -17,7 +17,7 @@ from fastapi.templating import Jinja2Templates
 
 import cycle
 import morning_prefilter
-from src import db, mode_config, perf
+from src import db, mode_config, perf, secrets_store
 from web import gateway_control
 from web.auth import COOKIE_NAME, make_session_cookie, read_session, require_user
 
@@ -212,6 +212,37 @@ async def api_set_risk_params(request: Request, mode: str = Depends(require_mode
     return mode_config.risk_params(_env(), account_id, mode)
 
 
+# ------------------------------------------------------- IBKR credentials ---
+# Self-service — every account enters and manages its OWN IBKR login here,
+# never through the admin. The password is Fernet-encrypted before it ever
+# touches the DB (see src/secrets_store.py) and this API never echoes it
+# back, only whether credentials are on file and for which username.
+@app.get("/api/ibkr_credentials")
+def api_get_ibkr_credentials(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    creds = db.get_ibkr_credentials(account_id)
+    if not creds:
+        return {"configured": False, "ibkr_username": None, "updated_at": None}
+    return {"configured": True, "ibkr_username": creds["ibkr_username"], "updated_at": creds["updated_at"]}
+
+
+@app.post("/api/ibkr_credentials")
+async def api_set_ibkr_credentials(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    body = await request.json()
+    ibkr_username = (body.get("ibkr_username") or "").strip()
+    ibkr_password = body.get("ibkr_password") or ""
+    if not ibkr_username or not ibkr_password:
+        raise HTTPException(status_code=400, detail="ibkr_username and ibkr_password are required")
+
+    try:
+        encrypted = secrets_store.encrypt(ibkr_password)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    db.set_ibkr_credentials(account_id, ibkr_username, encrypted)
+    _log_account_action(account_id, user, action="set_ibkr_credentials", ibkr_username=ibkr_username)
+    return {"ok": True}
+
+
 # --------------------------------------------------------- gateway control ---
 # Lets you free up an IBKR session for a manual TWS/IBKR Mobile login,
 # without SSH — see web/gateway_control.py for the systemd/sudo mechanics.
@@ -369,7 +400,7 @@ def api_run_prefilter(account_id: int = Depends(require_account), user: str = De
     result = morning_prefilter.run_scan(account_id, morning_prefilter.DEFAULT_MIN_GAP_PCT, morning_prefilter.DEFAULT_MIN_PRICE, False)
     if result.get("success"):
         cycle.scan_watchlist_filters(account_id)
-    _log_strategy_action(account_id, user, action="run_prefilter_now", success=result.get("success"),
+    _log_account_action(account_id, user, action="run_prefilter_now", success=result.get("success"),
                           up=result.get("up_survivors_count"), down=result.get("down_survivors_count"))
     return result
 
@@ -389,7 +420,7 @@ def api_decision_log(limit: int = 100, mode: str = Depends(require_mode), accoun
 # Strategy templates are shared across every account and both modes — no
 # `mode` param here. Actions are logged into both modes' activity logs
 # (for this account) so either tab shows them.
-def _log_strategy_action(account_id: int, user: str, **fields):
+def _log_account_action(account_id: int, user: str, **fields):
     for m in db.MODES:
         db.log_decision(account_id, m, "dashboard_control", user=user, **fields)
 
@@ -422,7 +453,7 @@ async def api_create_strategy(request: Request, account_id: int = Depends(requir
     if risk_rating not in db.RISK_RATINGS:
         raise HTTPException(status_code=400, detail=f"risk_rating must be one of {db.RISK_RATINGS}")
     strategy_id = db.create_strategy(name, rules, direction, risk_rating)
-    _log_strategy_action(account_id, user, action="create_strategy", name=name, direction=direction, risk_rating=risk_rating)
+    _log_account_action(account_id, user, action="create_strategy", name=name, direction=direction, risk_rating=risk_rating)
     return {"id": strategy_id}
 
 
@@ -438,7 +469,7 @@ async def api_update_strategy(strategy_id: int, request: Request, account_id: in
     if risk_rating is not None and risk_rating not in db.RISK_RATINGS:
         raise HTTPException(status_code=400, detail=f"risk_rating must be one of {db.RISK_RATINGS}")
     db.update_strategy(strategy_id, rules, risk_rating)
-    _log_strategy_action(account_id, user, action="update_strategy", strategy_id=strategy_id)
+    _log_account_action(account_id, user, action="update_strategy", strategy_id=strategy_id)
     return {"ok": True}
 
 
@@ -465,7 +496,7 @@ async def api_activate_strategy(strategy_id: int, request: Request, account_id: 
                 detail=f"Type '{ACTIVATE_AGGRESSIVE_CONFIRM_PHRASE}' to confirm activating an aggressive strategy.",
             )
     db.activate_strategy(account_id, strategy_id)
-    _log_strategy_action(account_id, user, action="activate_strategy", strategy_id=strategy_id, name=strategy["name"])
+    _log_account_action(account_id, user, action="activate_strategy", strategy_id=strategy_id, name=strategy["name"])
     return {"ok": True}
 
 
@@ -475,5 +506,5 @@ def api_delete_strategy(strategy_id: int, account_id: int = Depends(require_acco
         db.delete_strategy(strategy_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    _log_strategy_action(account_id, user, action="delete_strategy", strategy_id=strategy_id)
+    _log_account_action(account_id, user, action="delete_strategy", strategy_id=strategy_id)
     return {"ok": True}

@@ -13,7 +13,7 @@ don't need sudo — systemd allows any local user to read unit state.
 import socket
 import subprocess
 
-from src import mode_config
+from src import db, mode_config
 
 GATEWAY_UNIT = {"paper": "ibgateway-paper.service", "live": "ibgateway-live.service"}
 ENGINE_UNIT = {"paper": "trading-bot-paper.service", "live": "trading-bot-live.service"}
@@ -52,10 +52,14 @@ def _port_listening(port: int) -> bool:
 
 
 def status(mode: str, env: dict) -> dict:
+    # This module only controls the admin's fixed systemd units so far —
+    # real per-account Gateway processes are a separate, not-yet-built
+    # piece of infrastructure (dynamic systemd units + IBC config
+    # provisioning), so it always checks the admin's own Gateway.
     return {
         "gateway_active": _is_active(GATEWAY_UNIT[mode]),
         "engine_active": _is_active(ENGINE_UNIT[mode]),
-        "port_listening": _port_listening(mode_config.ibkr_port(env, mode)),
+        "port_listening": _port_listening(mode_config.ibkr_port(env, db.get_default_account_id(), mode)),
     }
 
 

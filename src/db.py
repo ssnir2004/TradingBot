@@ -134,6 +134,28 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     is_admin INTEGER NOT NULL DEFAULT 0
 );
+
+-- ibkr_password is Fernet-encrypted (see src/secrets_store.py) — this
+-- table never holds a plaintext password. One IBKR login per account
+-- serves both its paper and live Gateway (IBKR ties a paper account to
+-- its parent live account under the same credentials).
+CREATE TABLE IF NOT EXISTS account_ibkr_credentials (
+    account_id INTEGER PRIMARY KEY,
+    ibkr_username TEXT NOT NULL,
+    ibkr_password_encrypted BLOB NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Each account's own paper/live Gateway ports, assigned once (see
+-- get_or_assign_gateway_ports) so multiple accounts' Gateway processes
+-- never collide. The admin's row is seeded during migration with the
+-- ports the single-account deployment already used, so its running
+-- Gateway is never remapped.
+CREATE TABLE IF NOT EXISTS account_gateway_ports (
+    account_id INTEGER PRIMARY KEY,
+    paper_port INTEGER NOT NULL,
+    live_port INTEGER NOT NULL
+);
 """
 
 # Created after the mode-column migrations run below — an older DB's
@@ -417,6 +439,17 @@ def init_db(seed_rules_path: Path | None = None):
         # --- multi-account migration (runs once, no-ops after) ---
         _migrate_add_column(conn, "users", "is_admin", "INTEGER NOT NULL DEFAULT 0")
         admin_id = _resolve_or_create_admin(conn)
+
+        # The admin's Gateway is already running on the ports the
+        # single-account deployment has always used (env-driven — see
+        # mode_config.ibkr_port) — seed that as their row so
+        # get_or_assign_gateway_ports never hands them out to anyone else,
+        # without actually remapping the admin's already-running Gateway.
+        if admin_id is not None:
+            conn.execute(
+                "INSERT OR IGNORE INTO account_gateway_ports (account_id, paper_port, live_port) VALUES (?, ?, ?)",
+                (admin_id, 4002, 4001),
+            )
 
         if "is_active" in _table_columns(conn, "strategies"):
             if admin_id is not None:
@@ -956,3 +989,69 @@ def get_default_account_id() -> int:
             "No admin account exists yet — complete initial setup (create the first dashboard user) first."
         )
     return row["id"]
+
+
+# ----------------------------------------------------------- IBKR creds ---
+# Values here are opaque to db.py — ibkr_password_encrypted is a
+# Fernet-encrypted blob (see src/secrets_store.py), never a plaintext
+# password. db.py only stores/retrieves it; it never decrypts it.
+def set_ibkr_credentials(account_id: int, ibkr_username: str, ibkr_password_encrypted: bytes):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO account_ibkr_credentials (account_id, ibkr_username, ibkr_password_encrypted, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(account_id) DO UPDATE SET "
+            "ibkr_username = excluded.ibkr_username, "
+            "ibkr_password_encrypted = excluded.ibkr_password_encrypted, "
+            "updated_at = excluded.updated_at",
+            (account_id, ibkr_username, ibkr_password_encrypted, datetime.now(ET).isoformat(timespec="seconds")),
+        )
+
+
+def get_ibkr_credentials(account_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM account_ibkr_credentials WHERE account_id = ?", (account_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def has_ibkr_credentials(account_id: int) -> bool:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM account_ibkr_credentials WHERE account_id = ?", (account_id,)
+        ).fetchone()
+        return row is not None
+
+
+# ------------------------------------------------------------- gateways ---
+# Base/step for assigning fresh port pairs to accounts beyond the admin
+# (whose row is seeded during migration with the ports it already runs
+# on — see init_db). Chosen well clear of 4001/4002 so a handful of
+# accounts can never collide with the admin's Gateway.
+_GATEWAY_PORT_BASE = 4101
+_GATEWAY_PORT_STEP = 10
+
+
+def get_or_assign_gateway_ports(account_id: int) -> dict:
+    """Returns this account's {paper_port, live_port}, assigning a fresh,
+    unused pair on first call. Ports are permanent once assigned — an
+    account's Gateway config always points at the same ports."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT paper_port, live_port FROM account_gateway_ports WHERE account_id = ?", (account_id,)
+        ).fetchone()
+        if row:
+            return dict(row)
+
+        taken = {r["live_port"] for r in conn.execute("SELECT live_port FROM account_gateway_ports")}
+        live_port = _GATEWAY_PORT_BASE
+        while live_port in taken:
+            live_port += _GATEWAY_PORT_STEP
+        paper_port = live_port + 1
+
+        conn.execute(
+            "INSERT INTO account_gateway_ports (account_id, paper_port, live_port) VALUES (?, ?, ?)",
+            (account_id, paper_port, live_port),
+        )
+        return {"paper_port": paper_port, "live_port": live_port}

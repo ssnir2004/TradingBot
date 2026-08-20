@@ -113,9 +113,10 @@ python3.12 -m venv .venv
 
 cp .env.example .env
 python3 -c "import secrets; print(secrets.token_hex(32))"   # paste into SESSION_SECRET in .env
-nano .env   # fill in Telegram token/chat id, SESSION_SECRET; leave LIVE_PORTFOLIO_VALUE_USD
-            # at 0 until you've read "Going live" in README.md — at 0 the live engine can
-            # only ever size a position to zero shares, so live orders are physically
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"   # paste into CREDENTIALS_ENCRYPTION_KEY
+nano .env   # fill in Telegram token/chat id, SESSION_SECRET, CREDENTIALS_ENCRYPTION_KEY; leave
+            # LIVE_PORTFOLIO_VALUE_USD at 0 until you've read "Going live" in README.md — at 0
+            # the live engine can only ever size a position to zero shares, so live orders are physically
             # impossible until you deliberately set a real number there.
 
 cp deploy/ibc/config-paper.ini.example deploy/ibc/config-paper.ini

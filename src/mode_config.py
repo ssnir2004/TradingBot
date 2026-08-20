@@ -18,9 +18,17 @@ RISK_PARAM_SPECS = {
 }
 
 
-def ibkr_port(env: dict, mode: str) -> int:
-    key = f"{mode.upper()}_IBKR_PORT"
-    return int(env.get(key, GATEWAY_PORT_BY_MODE[mode]))
+def ibkr_port(env: dict, account_id: int, mode: str) -> int:
+    """The admin keeps the exact .env-driven behavior the single-account
+    deployment has always had (so their already-running Gateway is never
+    remapped just because multi-account support landed) — everyone else
+    gets a permanent, auto-assigned port pair (see
+    db.get_or_assign_gateway_ports)."""
+    if account_id == db.get_default_account_id():
+        key = f"{mode.upper()}_IBKR_PORT"
+        return int(env.get(key, GATEWAY_PORT_BY_MODE[mode]))
+    ports = db.get_or_assign_gateway_ports(account_id)
+    return ports["paper_port"] if mode == "paper" else ports["live_port"]
 
 
 def risk_params(env: dict, account_id: int, mode: str) -> dict:

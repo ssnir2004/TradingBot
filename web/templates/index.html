@@ -31,6 +31,36 @@
 
 <div class="container-fluid px-4 pb-5">
 
+  <div class="row g-3 mb-3">
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span>My IBKR Login <span class="badge bg-secondary fw-normal">not tied to Paper/Live below — one login covers both</span></span>
+          <span id="ibkr-creds-badge" class="badge bg-secondary">...</span>
+        </div>
+        <div class="card-body">
+          <div class="small text-muted mb-2">
+            Your own IBKR username/password — only you enter it, no one else (including the admin) sees it. Stored encrypted. IBKR ties every paper account to its parent live account under the same login, so one entry here covers both tabs above.
+          </div>
+          <div class="row g-2 align-items-end">
+            <div class="col-6 col-md-4">
+              <label class="form-label small">IBKR Username</label>
+              <input type="text" id="ibkr-username" class="form-control form-control-sm" autocomplete="off">
+            </div>
+            <div class="col-6 col-md-4">
+              <label class="form-label small">IBKR Password</label>
+              <input type="password" id="ibkr-password" class="form-control form-control-sm" autocomplete="new-password" placeholder="••••••••">
+            </div>
+            <div class="col-6 col-md-2">
+              <button id="btn-save-ibkr-creds" class="btn btn-primary btn-sm w-100">Save</button>
+            </div>
+          </div>
+          <div id="ibkr-creds-error" class="text-danger small mt-2"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Paper/Live tabs: both engines always run; this only selects which one's data you're viewing/controlling. -->
   <div class="d-flex gap-2 mb-3">
     <button id="tab-paper" class="btn btn-outline-info mode-tab fw-bold">PAPER</button>
@@ -355,6 +385,45 @@ async function refreshAccount() {
     </div>
     <div class="text-muted small mt-2">Updated: ${a.updated_at}</div>`;
 }
+
+const IBKR_CREDS_INPUT_IDS = ["ibkr-username", "ibkr-password"];
+
+async function refreshIbkrCredentials() {
+  // Same focus-guard as Risk Settings — don't clobber what's being typed.
+  if (IBKR_CREDS_INPUT_IDS.includes(document.activeElement && document.activeElement.id)) return;
+
+  const c = await api("/api/ibkr_credentials");
+  const badge = document.getElementById("ibkr-creds-badge");
+  if (c.configured) {
+    badge.textContent = `Connected: ${c.ibkr_username}`;
+    badge.className = "badge bg-success";
+    document.getElementById("ibkr-username").value = c.ibkr_username;
+  } else {
+    badge.textContent = "Not configured";
+    badge.className = "badge bg-secondary";
+  }
+}
+
+document.getElementById("btn-save-ibkr-creds").addEventListener("click", async () => {
+  const errorEl = document.getElementById("ibkr-creds-error");
+  errorEl.textContent = "";
+  const ibkr_username = document.getElementById("ibkr-username").value.trim();
+  const ibkr_password = document.getElementById("ibkr-password").value;
+  if (!ibkr_username || !ibkr_password) {
+    errorEl.textContent = "Both username and password are required to save.";
+    return;
+  }
+  try {
+    await api("/api/ibkr_credentials", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ibkr_username, ibkr_password }),
+    });
+    document.getElementById("ibkr-password").value = "";
+    refreshIbkrCredentials();
+  } catch (e) {
+    errorEl.textContent = "Save failed: " + e.message;
+  }
+});
 
 async function refreshGatewayStatus() {
   const s = await modeApi("/api/gateway/status");
@@ -767,7 +836,7 @@ document.getElementById("btn-flatten").addEventListener("click", async () => {
 
 function refreshAll() {
   refreshStatus(); refreshAccount(); refreshGatewayStatus(); refreshRiskParams(); refreshPositions(); refreshBrokerPositions();
-  refreshWatchlist(); refreshTrades(); refreshLog(); refreshPerformance(); refreshStrategies();
+  refreshWatchlist(); refreshTrades(); refreshLog(); refreshPerformance(); refreshStrategies(); refreshIbkrCredentials();
 }
 
 window.addEventListener("DOMContentLoaded", () => {
