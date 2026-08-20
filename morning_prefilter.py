@@ -35,7 +35,7 @@ def _yahoo_to_ibkr(ticker: str) -> str:
     return ticker.replace("-", " ")
 
 
-def run_scan(account_id: int, min_gap: float, min_price: float, dry_run: bool) -> dict:
+def run_scan(min_gap: float, min_price: float, dry_run: bool) -> dict:
     started = time.monotonic()
     yahoo_tickers = [_ibkr_to_yahoo(t) for t in SP500_TICKERS]
 
@@ -142,18 +142,21 @@ def run_scan(account_id: int, min_gap: float, min_price: float, dry_run: bool) -
         WATCHLIST_PATH.write_text("\n".join(lines) + "\n")
 
         # The scan itself is market data, not account-specific — the same
-        # survivors feed both the paper and live engines, so one scan
-        # writes the watchlist for every mode rather than running it twice.
-        for mode in db.MODES:
-            db.replace_watchlist(account_id, mode, [
-                {"symbol": s["ticker"], "direction": "long", "gap_pct": s["gap_pct"],
-                 "open_price": s["open"], "prev_close": s["prev_close"]}
-                for s in up_survivors
-            ] + [
-                {"symbol": s["ticker"], "direction": "short", "gap_pct": s["gap_pct"],
-                 "open_price": s["open"], "prev_close": s["prev_close"]}
-                for s in down_survivors
-            ])
+        # survivors feed both the paper and live engines AND every account
+        # (one yfinance scan, run once, fanned out to everyone's own
+        # watchlist rows) rather than re-running it per account.
+        watchlist_entries = [
+            {"symbol": s["ticker"], "direction": "long", "gap_pct": s["gap_pct"],
+             "open_price": s["open"], "prev_close": s["prev_close"]}
+            for s in up_survivors
+        ] + [
+            {"symbol": s["ticker"], "direction": "short", "gap_pct": s["gap_pct"],
+             "open_price": s["open"], "prev_close": s["prev_close"]}
+            for s in down_survivors
+        ]
+        for account_id in db.list_account_ids():
+            for mode in db.MODES:
+                db.replace_watchlist(account_id, mode, watchlist_entries)
 
     top_up_survivors = [f"{s['ticker']} ({s['gap_pct']:+.2f}%)" for s in up_survivors]
     top_down_survivors = [f"{s['ticker']} ({s['gap_pct']:+.2f}%)" for s in down_survivors]
@@ -204,15 +207,12 @@ def run_scan(account_id: int, min_gap: float, min_price: float, dry_run: bool) -
 def main():
     db.init_db(seed_rules_path=Path(__file__).resolve().parent / "rules.json")
     parser = argparse.ArgumentParser()
-    parser.add_argument("--account-id", type=int, default=None,
-                         help="Defaults to the admin account when omitted (manual/dev use).")
     parser.add_argument("--min-gap", type=float, default=DEFAULT_MIN_GAP_PCT)
     parser.add_argument("--min-price", type=float, default=DEFAULT_MIN_PRICE)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-    account_id = args.account_id if args.account_id is not None else db.get_default_account_id()
 
-    result = run_scan(account_id, args.min_gap, args.min_price, args.dry_run)
+    result = run_scan(args.min_gap, args.min_price, args.dry_run)
     sys.exit(0 if result.get("success") else 1)
 
 

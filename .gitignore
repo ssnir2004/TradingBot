@@ -6,3 +6,7 @@ logs/
 data/
 deploy/ibc/config-paper.ini
 deploy/ibc/config-live.ini
+# Per-account IBC configs (see src/gateway_provisioning.py) — each one
+# holds that account's IBKR password in plaintext, same as the two above.
+deploy/ibc/config-*-paper.ini
+deploy/ibc/config-*-live.ini

@@ -1,9 +1,7 @@
-# Scoped sudo rule for the dashboard's Disconnect/Reconnect control (see
-# web/gateway_control.py). Lets the `tradingbot` user start/stop ONLY these
-# 4 systemd services, with no password and no other command access — this
-# lets you free up an IBKR session for a manual TWS/Mobile login without
-# needing SSH access every time. Nothing else is granted: no shell, no
-# other systemctl verbs, no other units.
+# Scoped sudo rules for the dashboard's Gateway controls. Lets the
+# `tradingbot` user start/stop ONLY these specific systemd services, with
+# no password and no other command access. Nothing else is granted: no
+# shell, no other systemctl verbs, no other units.
 #
 # Install:
 #   sudo cp deploy/sudoers-tradingbot /etc/sudoers.d/tradingbot
@@ -13,6 +11,9 @@
 # If `which systemctl` on your server prints a different path than
 # /usr/bin/systemctl, update the paths below to match before installing.
 
+# The admin's own fixed Gateway/engine (see web/gateway_control.py) — lets
+# you free up your IBKR session for a manual TWS/Mobile login without
+# needing SSH access every time.
 tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl start ibgateway-paper.service
 tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl stop ibgateway-paper.service
 tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl start trading-bot-paper.service
@@ -21,3 +22,16 @@ tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl start ibgateway-live.service
 tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl stop ibgateway-live.service
 tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl start trading-bot-live.service
 tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl stop trading-bot-live.service
+
+# Every other account's own Gateway/engine — instantiated units, one per
+# account_id (%i), started/stopped from the dashboard's "Connect" button
+# (see src/gateway_provisioning.py). The account_id in the unit name is a
+# plain integer (this account's own users.id) — never user-supplied text.
+tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl start ibgateway-paper@*.service
+tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl stop ibgateway-paper@*.service
+tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl start trading-bot-paper@*.service
+tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl stop trading-bot-paper@*.service
+tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl start ibgateway-live@*.service
+tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl stop ibgateway-live@*.service
+tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl start trading-bot-live@*.service
+tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl stop trading-bot-live@*.service

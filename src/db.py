@@ -976,6 +976,14 @@ def any_users_exist() -> bool:
         return row["c"] > 0
 
 
+def list_account_ids() -> list[int]:
+    """Every account that exists — used by morning_prefilter's gap scan
+    (shared market data, run once, but written into every account's own
+    watchlist rows) to know who to write to."""
+    with get_conn() as conn:
+        return [r["id"] for r in conn.execute("SELECT id FROM users ORDER BY id")]
+
+
 def get_default_account_id() -> int:
     """The account cycle.py/trade.py/bot.py/morning_prefilter.py operate as
     until real per-account trading engines exist (see the multi-account

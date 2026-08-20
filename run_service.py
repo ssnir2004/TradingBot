@@ -105,9 +105,23 @@ def main():
     )
 
     if mode == "paper":
-        # Shared/mode-agnostic jobs — only one instance needs to run these.
+        # watchlist_filters reflects THIS account's own active strategy
+        # rules against the shared candidate list, so every account's own
+        # paper instance runs it for itself.
         scheduler.add_job(
-            lambda: _guarded(mode, "prefilter", account_id, morning_prefilter.run_scan, account_id,
+            lambda: _guarded(mode, "watchlist_filters", account_id, cycle.scan_watchlist_filters, account_id),
+            IntervalTrigger(minutes=5),
+            id="watchlist_filters", misfire_grace_time=60,
+        )
+
+    if mode == "paper" and account_id == db.get_default_account_id():
+        # True shared/account-agnostic jobs — the gap scan is plain market
+        # data (fanned out to every account's own watchlist by
+        # morning_prefilter itself) and maintenance is account-agnostic
+        # housekeeping, so only the admin's paper instance runs these, not
+        # every account's, to avoid re-scanning yfinance N times over.
+        scheduler.add_job(
+            lambda: _guarded(mode, "prefilter", account_id, morning_prefilter.run_scan,
                               morning_prefilter.DEFAULT_MIN_GAP_PCT, morning_prefilter.DEFAULT_MIN_PRICE, False),
             CronTrigger(day_of_week="mon-fri", hour="9-12", minute="25,55", timezone=ET),
             id="prefilter", misfire_grace_time=120,
@@ -116,11 +130,6 @@ def main():
             lambda: _guarded(mode, "maintenance", account_id, db.trim_old_rows),
             CronTrigger(day_of_week="mon-fri", hour=9, minute=25, timezone=ET),
             id="maintenance", misfire_grace_time=300,
-        )
-        scheduler.add_job(
-            lambda: _guarded(mode, "watchlist_filters", account_id, cycle.scan_watchlist_filters, account_id),
-            IntervalTrigger(minutes=5),
-            id="watchlist_filters", misfire_grace_time=60,
         )
 
     logger.info("[%s] Trading service starting. Jobs: %s", mode, [j.id for j in scheduler.get_jobs()])

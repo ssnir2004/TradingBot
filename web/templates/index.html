@@ -61,6 +61,29 @@
     </div>
   </div>
 
+  <div class="row g-3 mb-3 d-none" id="my-gateway-row">
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span>My Gateway</span>
+          <span id="my-gw-badge" class="badge bg-secondary">...</span>
+        </div>
+        <div class="card-body">
+          <div class="small text-muted mb-2">
+            Starts your own IB Gateway processes (paper + live) using the IBKR login saved above. After clicking Connect, approve the 2FA push on your own phone — can take a minute. Once connected, click "Resume Trading" to actually let the bot trade on your account.
+          </div>
+          <div id="my-gw-detail" class="small mono text-muted mb-2">-</div>
+          <div class="d-flex gap-2">
+            <button id="btn-my-gw-connect" class="btn btn-primary btn-sm">Connect</button>
+            <button id="btn-my-gw-resume" class="btn btn-success btn-sm">Resume Trading</button>
+            <button id="btn-my-gw-disconnect" class="btn btn-outline-danger btn-sm">Disconnect</button>
+          </div>
+          <div id="my-gw-error" class="text-danger small mt-2"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Paper/Live tabs: both engines always run; this only selects which one's data you're viewing/controlling. -->
   <div class="d-flex gap-2 mb-3">
     <button id="tab-paper" class="btn btn-outline-info mode-tab fw-bold">PAPER</button>
@@ -422,6 +445,75 @@ document.getElementById("btn-save-ibkr-creds").addEventListener("click", async (
     refreshIbkrCredentials();
   } catch (e) {
     errorEl.textContent = "Save failed: " + e.message;
+  }
+});
+
+let isAdmin = false;
+
+async function refreshMe() {
+  const me = await api("/api/me");
+  isAdmin = me.is_admin;
+  document.getElementById("my-gateway-row").classList.toggle("d-none", isAdmin);
+}
+
+function fmtGwLine(label, s) {
+  return `${label}: gateway=${s.gateway_active} port=${s.port_listening} engine=${s.engine_active}`;
+}
+
+async function refreshMyGateway() {
+  if (isAdmin) return;
+  const errorEl = document.getElementById("my-gw-error");
+  try {
+    const s = await api("/api/my_gateway/status");
+    const badge = document.getElementById("my-gw-badge");
+    const bothTrading = s.paper.engine_active && s.live.engine_active;
+    const bothConnected = s.paper.port_listening && s.live.port_listening;
+    const anyStarting = s.paper.gateway_active || s.live.gateway_active;
+    let label, cls;
+    if (bothTrading) { label = "Trading"; cls = "bg-success"; }
+    else if (bothConnected) { label = "Connected — click Resume Trading"; cls = "bg-info text-dark"; }
+    else if (anyStarting) { label = "Connecting… check your phone for a 2FA approval"; cls = "bg-warning text-dark"; }
+    else { label = "Not connected"; cls = "bg-secondary"; }
+    badge.textContent = label;
+    badge.className = "badge " + cls;
+    document.getElementById("my-gw-detail").textContent =
+      fmtGwLine("paper", s.paper) + " | " + fmtGwLine("live", s.live);
+  } catch (e) {
+    errorEl.textContent = "";  // stay quiet on transient poll errors, only show action-triggered ones
+  }
+}
+
+document.getElementById("btn-my-gw-connect").addEventListener("click", async () => {
+  const errorEl = document.getElementById("my-gw-error");
+  errorEl.textContent = "";
+  try {
+    await api("/api/my_gateway/connect", { method: "POST" });
+    refreshMyGateway();
+  } catch (e) {
+    errorEl.textContent = "Connect failed: " + e.message;
+  }
+});
+
+document.getElementById("btn-my-gw-resume").addEventListener("click", async () => {
+  const errorEl = document.getElementById("my-gw-error");
+  errorEl.textContent = "";
+  try {
+    await api("/api/my_gateway/resume", { method: "POST" });
+    refreshMyGateway();
+  } catch (e) {
+    errorEl.textContent = "Resume failed: " + e.message;
+  }
+});
+
+document.getElementById("btn-my-gw-disconnect").addEventListener("click", async () => {
+  const errorEl = document.getElementById("my-gw-error");
+  errorEl.textContent = "";
+  if (!confirm("Stop your Gateway and trading engine?")) return;
+  try {
+    await api("/api/my_gateway/disconnect", { method: "POST" });
+    refreshMyGateway();
+  } catch (e) {
+    errorEl.textContent = "Disconnect failed: " + e.message;
   }
 });
 
@@ -837,10 +929,12 @@ document.getElementById("btn-flatten").addEventListener("click", async () => {
 function refreshAll() {
   refreshStatus(); refreshAccount(); refreshGatewayStatus(); refreshRiskParams(); refreshPositions(); refreshBrokerPositions();
   refreshWatchlist(); refreshTrades(); refreshLog(); refreshPerformance(); refreshStrategies(); refreshIbkrCredentials();
+  refreshMyGateway();
 }
 
-window.addEventListener("DOMContentLoaded", () => {
+window.addEventListener("DOMContentLoaded", async () => {
   strategyModal = new bootstrap.Modal(document.getElementById("strategy-modal"));
+  await refreshMe();
   setMode("paper");
   setInterval(refreshAll, POLL_MS);
   setInterval(updateCountdown, 1000);

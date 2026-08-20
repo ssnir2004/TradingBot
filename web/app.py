@@ -17,7 +17,7 @@ from fastapi.templating import Jinja2Templates
 
 import cycle
 import morning_prefilter
-from src import db, mode_config, perf, secrets_store
+from src import db, gateway_provisioning, mode_config, perf, secrets_store
 from web import gateway_control
 from web.auth import COOKIE_NAME, make_session_cookie, read_session, require_user
 
@@ -144,6 +144,12 @@ def guide(request: Request):
 
 
 # -------------------------------------------------------------------- API ---
+@app.get("/api/me")
+def api_me(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    account = db.get_user_by_username(user)
+    return {"username": user, "is_admin": bool(account["is_admin"])}
+
+
 @app.get("/api/status")
 def api_status(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
     return db.get_cycle_status(account_id, mode)
@@ -240,6 +246,57 @@ async def api_set_ibkr_credentials(request: Request, account_id: int = Depends(r
 
     db.set_ibkr_credentials(account_id, ibkr_username, encrypted)
     _log_account_action(account_id, user, action="set_ibkr_credentials", ibkr_username=ibkr_username)
+    return {"ok": True}
+
+
+# --------------------------------------------------- my gateway (non-admin) ---
+# Self-service Gateway control for every account EXCEPT the admin, who
+# already has a working Gateway on the fixed units below (Gateway
+# control section) — gateway_provisioning guards against the admin
+# accidentally starting a second, conflicting session on their own login.
+def _provisioning_error_response(exc: Exception) -> HTTPException:
+    if isinstance(exc, gateway_provisioning.AdminNotAllowedError):
+        return HTTPException(status_code=403, detail=str(exc))
+    if isinstance(exc, gateway_provisioning.CredentialsNotSetError):
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/my_gateway/status")
+def api_my_gateway_status(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    try:
+        return gateway_provisioning.status(account_id)
+    except Exception as exc:
+        raise _provisioning_error_response(exc)
+
+
+@app.post("/api/my_gateway/connect")
+def api_my_gateway_connect(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    try:
+        gateway_provisioning.provision_and_connect(account_id)
+    except Exception as exc:
+        raise _provisioning_error_response(exc)
+    _log_account_action(account_id, user, action="my_gateway_connect")
+    return {"ok": True}
+
+
+@app.post("/api/my_gateway/resume")
+def api_my_gateway_resume(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    try:
+        gateway_provisioning.resume_engines(account_id)
+    except Exception as exc:
+        raise _provisioning_error_response(exc)
+    _log_account_action(account_id, user, action="my_gateway_resume")
+    return {"ok": True}
+
+
+@app.post("/api/my_gateway/disconnect")
+def api_my_gateway_disconnect(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    try:
+        gateway_provisioning.disconnect(account_id)
+    except Exception as exc:
+        raise _provisioning_error_response(exc)
+    _log_account_action(account_id, user, action="my_gateway_disconnect")
     return {"ok": True}
 
 
@@ -397,7 +454,7 @@ def api_run_prefilter(account_id: int = Depends(require_account), user: str = De
     the next scheduled slot. Mode-agnostic like the scan itself: writes the
     same watchlist to both paper and live. Takes a while (scans the whole
     S&P 500 via yfinance) — the request blocks until it's done."""
-    result = morning_prefilter.run_scan(account_id, morning_prefilter.DEFAULT_MIN_GAP_PCT, morning_prefilter.DEFAULT_MIN_PRICE, False)
+    result = morning_prefilter.run_scan(morning_prefilter.DEFAULT_MIN_GAP_PCT, morning_prefilter.DEFAULT_MIN_PRICE, False)
     if result.get("success"):
         cycle.scan_watchlist_filters(account_id)
     _log_account_action(account_id, user, action="run_prefilter_now", success=result.get("success"),
