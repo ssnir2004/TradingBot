@@ -283,8 +283,8 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 const POLL_MS = 5000;
-const LIVE_RISK_CONFIRM_PHRASE = "CHANGE LIVE RISK";
-const CLOSE_LIVE_CONFIRM_PHRASE = "CLOSE LIVE POSITION";
+const LIVE_RISK_CONFIRM_PHRASE = "ok";
+const CLOSE_LIVE_CONFIRM_PHRASE = "ok";
 let editingStrategyId = null;
 let strategyModal;
 let currentMode = "paper";
@@ -387,9 +387,9 @@ document.getElementById("btn-gw-disconnect").addEventListener("click", async () 
   if (currentMode === "live") {
     const typed = prompt(
       'This stops the LIVE Gateway AND trading engine so you can log into TWS/Mobile with the same account.\n' +
-      'Blocked while any LIVE position is open. Type exactly "DISCONNECT LIVE" to confirm:'
+      'Blocked while any LIVE position is open. Type "ok" to confirm:'
     );
-    if (typed !== "DISCONNECT LIVE") { errorEl.textContent = "Not confirmed — nothing was disconnected."; return; }
+    if (typed !== "ok") { errorEl.textContent = "Not confirmed — nothing was disconnected."; return; }
     payload.confirm = typed;
   } else if (!confirm("Disconnect the PAPER Gateway and trading engine so you can log into TWS/Mobile?")) {
     return;
@@ -452,7 +452,7 @@ document.getElementById("btn-save-risk").addEventListener("click", async () => {
   };
   if (currentMode === "live") {
     const typed = prompt(
-      `This changes how much REAL MONEY the live bot can risk per trade.\nType exactly "${LIVE_RISK_CONFIRM_PHRASE}" to confirm:`
+      `This changes how much REAL MONEY the live bot can risk per trade.\nType "${LIVE_RISK_CONFIRM_PHRASE}" to confirm:`
     );
     if (typed !== LIVE_RISK_CONFIRM_PHRASE) {
       errorEl.textContent = "Not confirmed — no changes were saved.";
@@ -527,7 +527,7 @@ document.getElementById("broker-positions-body").addEventListener("click", async
   if (currentMode === "live") {
     const typed = prompt(
       `This immediately market-closes ${qty} share(s) of ${symbol} in your LIVE account — for profit or loss, ` +
-      `regardless of who opened it or when. Type exactly "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
+      `regardless of who opened it or when. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
     );
     if (typed !== CLOSE_LIVE_CONFIRM_PHRASE) { errorEl.textContent = "Not confirmed — nothing was closed."; return; }
     payload.confirm = typed;
@@ -672,9 +672,9 @@ async function activateStrategy(id, riskRating) {
   if (riskRating === "aggressive") {
     const typed = prompt(
       'This strategy takes effect on LIVE immediately too (strategies are shared across paper/live).\n' +
-      'Type exactly "ACTIVATE AGGRESSIVE" to confirm:'
+      'Type "ok" to confirm:'
     );
-    if (typed !== "ACTIVATE AGGRESSIVE") { alert("Not confirmed — strategy was not activated."); return; }
+    if (typed !== "ok") { alert("Not confirmed — strategy was not activated."); return; }
     payload.confirm = typed;
   }
   try {

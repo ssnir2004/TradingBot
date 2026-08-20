@@ -186,7 +186,7 @@
         מסודרת לעשות את זה מהדשבורד, בלי SSH:
       </p>
       <ol>
-        <li><strong>Disconnect</strong> - עוצר את מנוע המסחר ואת ה-Gateway של אותו טאב (paper/live), ומשחרר את ה-session כדי שתוכל להתחבר עם אותם פרטים ב-TWS/Mobile. <strong>חסום אם יש פוזיציה פתוחה</strong> באותו מצב (כי בזמן שה-Gateway מנותק, שום דבר לא מנהל אותה - בלי stop, בלי סגירה בסוף יום) - תצטרך לסגור אותה קודם. ב-LIVE נדרשת הקלדת אישור (<span class="mono">DISCONNECT LIVE</span>).</li>
+        <li><strong>Disconnect</strong> - עוצר את מנוע המסחר ואת ה-Gateway של אותו טאב (paper/live), ומשחרר את ה-session כדי שתוכל להתחבר עם אותם פרטים ב-TWS/Mobile. <strong>חסום אם יש פוזיציה פתוחה</strong> באותו מצב (כי בזמן שה-Gateway מנותק, שום דבר לא מנהל אותה - בלי stop, בלי סגירה בסוף יום) - תצטרך לסגור אותה קודם. ב-LIVE נדרשת הקלדת אישור (<span class="mono">ok</span>).</li>
         <li>עכשיו תוכל להתחבר ל-TWS/Mobile עם פרטי החשבון הרגילים.</li>
         <li>כשסיימת - תתנתק מ-TWS/Mobile (Logout).</li>
         <li><strong>Reconnect Gateway</strong> - מעלה מחדש רק את ה-Gateway. ייתכן שתידרש לאשר 2FA בטלפון, בדיוק כמו בהתחברות הראשונה - התג למעלה יראה "Connecting..." עד שזה יאושר.</li>
@@ -290,7 +290,7 @@
       </table>
       <p class="mb-0">
         הפעלת אסטרטגיה מדורגת <span class="badge bg-danger">aggressive</span>
-        דורשת הקלדת משפט אישור (<span class="mono">ACTIVATE AGGRESSIVE</span>)
+        דורשת הקלדת אישור (<span class="mono">ok</span>)
         - כי היא חלה על live באופן מיידי, ממש כמו עריכת Risk Settings.
         <strong>הביצועים של האסטרטגיות האלה לא נבדקו היסטורית</strong> - "פחות
         שמרן" אומר סף כניסה רופף יותר וסיכון גבוה יותר לעסקה, לא בהכרח
@@ -316,8 +316,8 @@
       </ul>
       <p>
         עריכה בטאב <span class="badge badge-paper">PAPER</span> נשמרת מיד. עריכה
-        בטאב <span class="badge badge-live">LIVE</span> דורשת הקלדת משפט אישור
-        מדויק (<span class="mono">CHANGE LIVE RISK</span>) בחלון שנפתח - זו הגנה
+        בטאב <span class="badge badge-live">LIVE</span> דורשת הקלדת אישור
+        (<span class="mono">ok</span>) בחלון שנפתח - זו הגנה
         מכוונת, כי אלה בדיוק הערכים ששולטים כמה כסף אמיתי יסתכן בעסקה בודדת.
         האישור נבדק גם בשרת עצמו, לא רק בדפדפן.
       </p>
@@ -345,7 +345,7 @@
         כפתור <strong>Close</strong> בכל שורה סוגר מיידית בשוק את הכמות
         שהוזנה בשדה לידו (ברירת מחדל: כל הפוזיציה) - ברווח או בהפסד, בלי
         קשר למי שפתח אותה. סגירה ב-<span class="badge badge-live">LIVE</span>
-        דורשת הקלדת משפט אישור (<span class="mono">CLOSE LIVE POSITION</span>).
+        דורשת הקלדת אישור (<span class="mono">ok</span>).
         אם הפוזיציה שנסגרת הייתה בכל זאת במעקב של הבוט (כלומר גם ב-Open
         Positions למעלה), הסטופ שהיה לה מבוטל אוטומטית והיא מוסרת ממעקב
         הבוט - כדי שלא יישאר סטופ יתום בלי מניות מאחוריו.

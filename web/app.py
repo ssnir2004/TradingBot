@@ -29,17 +29,17 @@ app = FastAPI(title="TradingBot Dashboard")
 # Typed into the confirmation modal before any LIVE risk-sizing value can be
 # changed from the dashboard — a deliberate speed bump since these numbers
 # directly control how much real money a single live order can risk.
-LIVE_RISK_CONFIRM_PHRASE = "CHANGE LIVE RISK"
+LIVE_RISK_CONFIRM_PHRASE = "ok"
 
 # Typed into the confirmation modal before disconnecting LIVE's Gateway —
 # while disconnected, nothing manages open positions or force-closes at
 # end of day, so this is a deliberate, confirmed action too.
-DISCONNECT_LIVE_CONFIRM_PHRASE = "DISCONNECT LIVE"
+DISCONNECT_LIVE_CONFIRM_PHRASE = "ok"
 
 # Typed into the confirmation modal before closing a LIVE position from the
 # Account Holdings panel — this fires a real market order against a real
 # account holding, independent of anything the bot itself is tracking.
-CLOSE_LIVE_CONFIRM_PHRASE = "CLOSE LIVE POSITION"
+CLOSE_LIVE_CONFIRM_PHRASE = "ok"
 
 SUBPROCESS_TIMEOUT = 30
 
@@ -423,7 +423,7 @@ async def api_update_strategy(strategy_id: int, request: Request, user: str = De
 # on the live engine immediately too. A typed confirmation is required only
 # for the highest tier (aggressive), matching the same speed-bump pattern
 # used for editing LIVE risk sizing.
-ACTIVATE_AGGRESSIVE_CONFIRM_PHRASE = "ACTIVATE AGGRESSIVE"
+ACTIVATE_AGGRESSIVE_CONFIRM_PHRASE = "ok"
 
 
 @app.post("/api/strategies/{strategy_id}/activate")
