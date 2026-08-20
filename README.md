@@ -48,6 +48,9 @@ src/perf.py                  # trade pairing / win-rate / R-multiple math
 
 test_connect.py                # manual sanity check: can Python talk to TWS?
 buy_one.py / close_one.py       # one-off manual test: buy/sell 1 share of MU
+backtest_short_parabolic.py     # dev tool: yfinance backtest of the "Short
+                                 # Parabolic Reversal" preset (or any short
+                                 # preset) against real historical data
 src/ibkr_client.py               # IBKRClient: connect, place_order, disconnect
 strategy.py                       # single-symbol dev tool: time-gate + dedupe only
 bot.py                              # CLI: evaluate one symbol, hand off to trade.py
