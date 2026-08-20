@@ -15,12 +15,12 @@ from src import db
 ET = ZoneInfo("America/New_York")
 
 
-def evaluate(mode: str, symbol: str, ib) -> dict:
+def evaluate(account_id: int, mode: str, symbol: str, ib) -> dict:
     # bot.py (this function's only caller) is a long-only dev tool.
-    rules = db.get_active_rules("long")
+    rules = db.get_active_rules(account_id, "long")
     if rules is None:
         result = {"pass": bool(False), "reasons": ["no active long strategy"], "price": 0.0}
-        db.log_decision(mode, "dev_tool_evaluate", symbol=symbol, **result)
+        db.log_decision(account_id, mode, "dev_tool_evaluate", symbol=symbol, **result)
         return result
     time_filter = rules["time_filter"]
     earliest = time_filter["earliest_entry_et"]
@@ -30,7 +30,7 @@ def evaluate(mode: str, symbol: str, ib) -> dict:
     for position in ib.positions():
         if position.contract.symbol == symbol and position.position > 0:
             result = {"pass": bool(False), "reasons": ["already in position"], "price": 0.0}
-            db.log_decision(mode, "dev_tool_evaluate", symbol=symbol, **result)
+            db.log_decision(account_id, mode, "dev_tool_evaluate", symbol=symbol, **result)
             return result
 
     # b) time window
@@ -42,7 +42,7 @@ def evaluate(mode: str, symbol: str, ib) -> dict:
             "reasons": [f"outside entry window {earliest}-{latest}"],
             "price": 0.0,
         }
-        db.log_decision(mode, "dev_tool_evaluate", symbol=symbol, **result)
+        db.log_decision(account_id, mode, "dev_tool_evaluate", symbol=symbol, **result)
         return result
 
     # c) time gate ok, no existing position -> fetch current price
@@ -58,5 +58,5 @@ def evaluate(mode: str, symbol: str, ib) -> dict:
         "reasons": ["time gate ok", "no existing position"],
         "price": float(price),
     }
-    db.log_decision(mode, "dev_tool_evaluate", symbol=symbol, **result)
+    db.log_decision(account_id, mode, "dev_tool_evaluate", symbol=symbol, **result)
     return result

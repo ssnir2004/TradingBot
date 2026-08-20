@@ -4,6 +4,7 @@ via the API, so this script's only job is the Telegram push.
 """
 import argparse
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from src import db, perf
@@ -12,8 +13,8 @@ from src.notify import notify
 ET = ZoneInfo("America/New_York")
 
 
-def run(mode: str):
-    aggregates = perf.today_summary(mode)
+def run(account_id: int, mode: str):
+    aggregates = perf.today_summary(account_id, mode)
 
     if aggregates["total_trades"] == 0:
         body = "No closed trades today."
@@ -31,7 +32,11 @@ def run(mode: str):
 
 
 if __name__ == "__main__":
+    db.init_db(seed_rules_path=Path(__file__).resolve().parent / "rules.json")
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=db.MODES, default="paper")
+    parser.add_argument("--account-id", type=int, default=None,
+                         help="Defaults to the admin account when omitted (manual/dev use).")
     args = parser.parse_args()
-    print(run(args.mode))
+    account_id = args.account_id if args.account_id is not None else db.get_default_account_id()
+    print(run(account_id, args.mode))

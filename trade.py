@@ -19,10 +19,13 @@ def main():
     db.init_db(seed_rules_path=PROJECT_DIR / "rules.json")
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=db.MODES, default="paper")
+    parser.add_argument("--account-id", type=int, default=None,
+                         help="Defaults to the admin account when omitted (manual/dev use).")
     parser.add_argument("--symbol", required=True)
     parser.add_argument("--side", required=True, choices=["BUY", "SELL"])
     parser.add_argument("--size", required=True, type=int)
     args = parser.parse_args()
+    account_id = args.account_id if args.account_id is not None else db.get_default_account_id()
 
     env = dotenv_values(PROJECT_DIR / ".env")
 
@@ -38,7 +41,7 @@ def main():
         fill_price = trade.orderStatus.avgFillPrice or 0
         order_id = trade.order.orderId
 
-        db.record_trade(args.mode, args.symbol, args.side, args.size, fill_price, order_id, status)
+        db.record_trade(account_id, args.mode, args.symbol, args.side, args.size, fill_price, order_id, status)
 
         # Success is defined by what actually happened, not by absence from
         # a denylist: only a real fill counts. Anything else (Cancelled,

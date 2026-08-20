@@ -21,10 +21,13 @@ def main():
     db.init_db(seed_rules_path=PROJECT_DIR / "rules.json")
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=db.MODES, default="paper")
+    parser.add_argument("--account-id", type=int, default=None,
+                         help="Defaults to the admin account when omitted (manual/dev use).")
     parser.add_argument("--symbol", required=True)
     parser.add_argument("--qty", type=int, default=None, help="Shares to close; omit to close the full position.")
     args = parser.parse_args()
     symbol = args.symbol.upper()
+    account_id = args.account_id if args.account_id is not None else db.get_default_account_id()
 
     env = dotenv_values(PROJECT_DIR / ".env")
 
@@ -53,7 +56,7 @@ def main():
         fill_price = trade.orderStatus.avgFillPrice or 0
         order_id = trade.order.orderId
 
-        db.record_trade(args.mode, symbol, action, close_qty, fill_price, order_id, status)
+        db.record_trade(account_id, args.mode, symbol, action, close_qty, fill_price, order_id, status)
 
         if status != "Filled" or fill_price <= 0:
             for entry in trade.log:
@@ -67,7 +70,7 @@ def main():
         # orphaned stop and drop the row so the bot doesn't keep "managing"
         # a position that no longer exists.
         closed_side = "long" if action == "SELL" else "short"
-        for pos in db.get_open_positions(args.mode):
+        for pos in db.get_open_positions(account_id, args.mode):
             if pos["symbol"] != symbol or pos["side"] != closed_side:
                 continue
             stop_order_id = pos.get("stop_order_id")
@@ -75,7 +78,7 @@ def main():
                 for t in ib.trades():
                     if t.order.orderId == stop_order_id:
                         ib.cancelOrder(t.order)
-            db.remove_position(args.mode, symbol)
+            db.remove_position(account_id, args.mode, symbol)
 
         print(f"[{args.mode}] {action} {close_qty} {symbol}: order_id={order_id} "
               f"fill_price={fill_price} status={status}")

@@ -128,7 +128,7 @@ def histogram(r_values: list[float]) -> list[tuple]:
             for label, predicate, is_loss in R_BUCKETS]
 
 
-def today_summary(mode: str) -> dict:
-    rows = db.get_trades(mode, limit=5000, today_only=True)
+def today_summary(account_id: int, mode: str) -> dict:
+    rows = db.get_trades(account_id, mode, limit=5000, today_only=True)
     pairs = pair_trades(rows)
     return aggregate(pairs)

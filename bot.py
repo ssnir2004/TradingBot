@@ -31,15 +31,18 @@ def main():
     db.init_db(seed_rules_path=PROJECT_DIR / "rules.json")
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=db.MODES, default="paper")
+    parser.add_argument("--account-id", type=int, default=None,
+                         help="Defaults to the admin account when omitted (manual/dev use).")
     parser.add_argument("--symbol", required=True)
     parser.add_argument("--check-only", action="store_true")
     args = parser.parse_args()
     symbol = args.symbol.upper()
+    account_id = args.account_id if args.account_id is not None else db.get_default_account_id()
 
     env = dotenv_values(PROJECT_DIR / ".env")
-    risk = mode_config.risk_params(env, args.mode)
+    risk = mode_config.risk_params(env, account_id, args.mode)
 
-    if db.count_todays_entries(args.mode, "long") >= risk["max_trades_per_day"]:
+    if db.count_todays_entries(account_id, args.mode, "long") >= risk["max_trades_per_day"]:
         log(f"MAX_TRADES_PER_DAY ({risk['max_trades_per_day']}) reached for today, skipping")
         sys.exit(0)
 
@@ -50,7 +53,7 @@ def main():
     )
 
     try:
-        result = strategy.evaluate(args.mode, symbol, ibkr.ib)
+        result = strategy.evaluate(account_id, args.mode, symbol, ibkr.ib)
         log(f"evaluate({symbol}) -> {result}")
 
         if args.check_only:
@@ -74,7 +77,7 @@ def main():
     try:
         proc = subprocess.run(
             [sys.executable, str(PROJECT_DIR / "trade.py"), "--mode", args.mode,
-             "--symbol", symbol, "--side", "BUY", "--size", str(quantity)],
+             "--account-id", str(account_id), "--symbol", symbol, "--side", "BUY", "--size", str(quantity)],
             capture_output=True, text=True, timeout=30,
         )
         print(proc.stdout)
@@ -84,7 +87,7 @@ def main():
         log("trade.py timed out after 30s")
         sys.exit(1)
 
-    rows = db.get_trades(args.mode, limit=1)
+    rows = db.get_trades(account_id, args.mode, limit=1)
     if not rows:
         log("no trade row written")
         sys.exit(1)

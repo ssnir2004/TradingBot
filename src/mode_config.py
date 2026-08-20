@@ -23,7 +23,7 @@ def ibkr_port(env: dict, mode: str) -> int:
     return int(env.get(key, GATEWAY_PORT_BY_MODE[mode]))
 
 
-def risk_params(env: dict, mode: str) -> dict:
+def risk_params(env: dict, account_id: int, mode: str) -> dict:
     """Per-param precedence: a value saved from the dashboard (DB) wins;
     otherwise falls back to .env; otherwise the hardcoded default. This way
     a fresh deploy behaves exactly as before (.env-driven) until someone
@@ -31,7 +31,7 @@ def risk_params(env: dict, mode: str) -> dict:
     prefix = mode.upper()
     result = {}
     for key, (env_suffix, cast, default) in RISK_PARAM_SPECS.items():
-        override = db.get_setting(f"{mode}:risk:{key}", "")
+        override = db.get_setting(f"{account_id}:{mode}:risk:{key}", "")
         if override != "":
             result[key] = cast(override)
         else:

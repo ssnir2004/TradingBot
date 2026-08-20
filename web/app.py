@@ -59,6 +59,27 @@ def require_mode(mode: str = Query(...)) -> str:
     return mode
 
 
+def require_account(user: str = Depends(require_user)) -> int:
+    """Resolves the logged-in session's account_id fresh on every request
+    (rather than baking it into the cookie) — every account-scoped read/
+    write in this file goes through this, so one account's data never
+    leaks into another's."""
+    account = db.get_user_by_username(user)
+    if account is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return account["id"]
+
+
+def require_admin(user: str = Depends(require_user)) -> str:
+    """Strategy *templates* are curated by one admin; every account can
+    only choose which template to activate (api_activate_strategy), not
+    create/edit/delete the shared catalog."""
+    account = db.get_user_by_username(user)
+    if account is None or not account.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin only")
+    return user
+
+
 # ------------------------------------------------------------------ pages ---
 @app.get("/setup", response_class=HTMLResponse)
 def setup_page(request: Request):
@@ -75,7 +96,7 @@ def setup_submit(request: Request, username: str = Form(...), password: str = Fo
         return templates.TemplateResponse(
             request, "setup.html", {"error": "Password must be at least 8 characters."}
         )
-    db.create_user(username, password)
+    db.create_user(username, password, is_admin=True)
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(COOKIE_NAME, make_session_cookie(username), httponly=True, samesite="lax")
     return response
@@ -124,43 +145,43 @@ def guide(request: Request):
 
 # -------------------------------------------------------------------- API ---
 @app.get("/api/status")
-def api_status(mode: str = Depends(require_mode), user: str = Depends(require_user)):
-    return db.get_cycle_status(mode)
+def api_status(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    return db.get_cycle_status(account_id, mode)
 
 
 @app.post("/api/control/enable")
-def api_enable(mode: str = Depends(require_mode), user: str = Depends(require_user)):
-    db.set_bot_enabled(mode, True)
-    db.log_decision(mode, "dashboard_control", action="enable", user=user)
+def api_enable(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    db.set_bot_enabled(account_id, mode, True)
+    db.log_decision(account_id, mode, "dashboard_control", action="enable", user=user)
     return {"bot_enabled": True}
 
 
 @app.post("/api/control/disable")
-def api_disable(mode: str = Depends(require_mode), user: str = Depends(require_user)):
-    db.set_bot_enabled(mode, False)
-    db.log_decision(mode, "dashboard_control", action="disable", user=user)
+def api_disable(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    db.set_bot_enabled(account_id, mode, False)
+    db.log_decision(account_id, mode, "dashboard_control", action="disable", user=user)
     return {"bot_enabled": False}
 
 
 @app.post("/api/control/flatten")
-def api_flatten(mode: str = Depends(require_mode), user: str = Depends(require_user)):
-    db.request_flatten_now(mode)
-    db.log_decision(mode, "dashboard_control", action="flatten_now", user=user)
+def api_flatten(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    db.request_flatten_now(account_id, mode)
+    db.log_decision(account_id, mode, "dashboard_control", action="flatten_now", user=user)
     return {"flatten_pending": True}
 
 
 @app.get("/api/account")
-def api_account(mode: str = Depends(require_mode), user: str = Depends(require_user)):
-    return db.get_account_info(mode)
+def api_account(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    return db.get_account_info(account_id, mode)
 
 
 @app.get("/api/risk_params")
-def api_get_risk_params(mode: str = Depends(require_mode), user: str = Depends(require_user)):
-    return mode_config.risk_params(_env(), mode)
+def api_get_risk_params(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    return mode_config.risk_params(_env(), account_id, mode)
 
 
 @app.post("/api/risk_params")
-async def api_set_risk_params(request: Request, mode: str = Depends(require_mode), user: str = Depends(require_user)):
+async def api_set_risk_params(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
     body = await request.json()
 
     if mode == "live" and body.get("confirm") != LIVE_RISK_CONFIRM_PHRASE:
@@ -185,10 +206,10 @@ async def api_set_risk_params(request: Request, mode: str = Depends(require_mode
         raise HTTPException(status_code=400, detail="No values provided")
 
     for key, value in updates.items():
-        db.set_setting(f"{mode}:risk:{key}", str(value))
-    db.log_decision(mode, "dashboard_control", user=user, action="update_risk_params",
+        db.set_setting(f"{account_id}:{mode}:risk:{key}", str(value))
+    db.log_decision(account_id, mode, "dashboard_control", user=user, action="update_risk_params",
                      **{k: str(v) for k, v in updates.items()})
-    return mode_config.risk_params(_env(), mode)
+    return mode_config.risk_params(_env(), account_id, mode)
 
 
 # --------------------------------------------------------- gateway control ---
@@ -200,8 +221,8 @@ def api_gateway_status(mode: str = Depends(require_mode), user: str = Depends(re
 
 
 @app.post("/api/gateway/disconnect")
-async def api_gateway_disconnect(request: Request, mode: str = Depends(require_mode), user: str = Depends(require_user)):
-    positions = db.get_open_positions(mode)
+async def api_gateway_disconnect(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    positions = db.get_open_positions(account_id, mode)
     if positions:
         raise HTTPException(
             status_code=400,
@@ -222,33 +243,33 @@ async def api_gateway_disconnect(request: Request, mode: str = Depends(require_m
         gateway_control.disconnect(mode)
     except gateway_control.GatewayControlError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    db.log_decision(mode, "dashboard_control", user=user, action="gateway_disconnect")
+    db.log_decision(account_id, mode, "dashboard_control", user=user, action="gateway_disconnect")
     return {"ok": True}
 
 
 @app.post("/api/gateway/reconnect")
-def api_gateway_reconnect(mode: str = Depends(require_mode), user: str = Depends(require_user)):
+def api_gateway_reconnect(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
     try:
         gateway_control.reconnect_gateway(mode)
     except gateway_control.GatewayControlError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    db.log_decision(mode, "dashboard_control", user=user, action="gateway_reconnect")
+    db.log_decision(account_id, mode, "dashboard_control", user=user, action="gateway_reconnect")
     return {"ok": True}
 
 
 @app.post("/api/gateway/resume_engine")
-def api_gateway_resume_engine(mode: str = Depends(require_mode), user: str = Depends(require_user)):
+def api_gateway_resume_engine(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
     try:
         gateway_control.resume_engine(mode)
     except gateway_control.GatewayControlError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    db.log_decision(mode, "dashboard_control", user=user, action="gateway_resume_engine")
+    db.log_decision(account_id, mode, "dashboard_control", user=user, action="gateway_resume_engine")
     return {"ok": True}
 
 
 @app.get("/api/positions")
-def api_positions(mode: str = Depends(require_mode), user: str = Depends(require_user)):
-    positions = db.get_open_positions(mode)
+def api_positions(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    positions = db.get_open_positions(account_id, mode)
     for pos in positions:
         price = None
         try:
@@ -268,11 +289,11 @@ def api_positions(mode: str = Depends(require_mode), user: str = Depends(require
 
 
 @app.get("/api/broker_positions")
-def api_broker_positions(mode: str = Depends(require_mode), user: str = Depends(require_user)):
+def api_broker_positions(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
     """Every real IBKR holding in this mode's account, independent of
     whether the bot opened it or is tracking it — refreshed every 5 minutes
     by cycle.refresh_account_info alongside the account summary."""
-    data = db.get_broker_positions(mode)
+    data = db.get_broker_positions(account_id, mode)
     for pos in data["positions"]:
         price = None
         try:
@@ -285,7 +306,7 @@ def api_broker_positions(mode: str = Depends(require_mode), user: str = Depends(
 
 
 @app.post("/api/broker_positions/close")
-async def api_broker_positions_close(request: Request, mode: str = Depends(require_mode), user: str = Depends(require_user)):
+async def api_broker_positions_close(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
     body = await request.json()
     symbol = (body.get("symbol") or "").strip().upper()
     if not symbol:
@@ -298,12 +319,13 @@ async def api_broker_positions_close(request: Request, mode: str = Depends(requi
         )
 
     qty = body.get("qty")
-    cmd = [sys.executable, str(PROJECT_DIR / "close_position.py"), "--mode", mode, "--symbol", symbol]
+    cmd = [sys.executable, str(PROJECT_DIR / "close_position.py"), "--mode", mode,
+           "--account-id", str(account_id), "--symbol", symbol]
     if qty:
         cmd += ["--qty", str(int(qty))]
 
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT)
-    db.log_decision(mode, "dashboard_control", user=user, action="close_broker_position",
+    db.log_decision(account_id, mode, "dashboard_control", user=user, action="close_broker_position",
                      symbol=symbol, qty=qty, stdout=proc.stdout, returncode=proc.returncode)
     if proc.returncode != 0:
         raise HTTPException(status_code=400, detail=proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "Close failed")
@@ -311,13 +333,13 @@ async def api_broker_positions_close(request: Request, mode: str = Depends(requi
 
 
 @app.get("/api/trades")
-def api_trades(limit: int = 100, mode: str = Depends(require_mode), user: str = Depends(require_user)):
-    return db.get_trades(mode, limit=limit)
+def api_trades(limit: int = 100, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    return db.get_trades(account_id, mode, limit=limit)
 
 
 @app.get("/api/performance")
-def api_performance(mode: str = Depends(require_mode), user: str = Depends(require_user)):
-    rows = db.get_trades(mode, limit=5000, today_only=True)
+def api_performance(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    rows = db.get_trades(account_id, mode, limit=5000, today_only=True)
     pairs = perf.pair_trades(rows)
     aggregates = perf.aggregate(pairs)
     r_values = perf.compute_r_multiples(pairs)
@@ -328,33 +350,33 @@ def api_performance(mode: str = Depends(require_mode), user: str = Depends(requi
 
 
 @app.get("/api/watchlist")
-def api_watchlist(mode: str = Depends(require_mode), user: str = Depends(require_user)):
-    return db.get_watchlist(mode)
+def api_watchlist(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    return db.get_watchlist(account_id, mode)
 
 
 @app.get("/api/watchlist_filters")
-def api_watchlist_filters(mode: str = Depends(require_mode), user: str = Depends(require_user)):
-    return db.get_watchlist_filters(mode)
+def api_watchlist_filters(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    return db.get_watchlist_filters(account_id, mode)
 
 
 @app.post("/api/prefilter/run")
-def api_run_prefilter(user: str = Depends(require_user)):
+def api_run_prefilter(account_id: int = Depends(require_account), user: str = Depends(require_user)):
     """On-demand gap scan — the same scan the scheduler runs at :25/:55 past
     the hour (9:25-12:55 ET), triggered right now instead of waiting for
     the next scheduled slot. Mode-agnostic like the scan itself: writes the
     same watchlist to both paper and live. Takes a while (scans the whole
     S&P 500 via yfinance) — the request blocks until it's done."""
-    result = morning_prefilter.run_scan(morning_prefilter.DEFAULT_MIN_GAP_PCT, morning_prefilter.DEFAULT_MIN_PRICE, False)
+    result = morning_prefilter.run_scan(account_id, morning_prefilter.DEFAULT_MIN_GAP_PCT, morning_prefilter.DEFAULT_MIN_PRICE, False)
     if result.get("success"):
-        cycle.scan_watchlist_filters()
-    _log_strategy_action(user, action="run_prefilter_now", success=result.get("success"),
+        cycle.scan_watchlist_filters(account_id)
+    _log_strategy_action(account_id, user, action="run_prefilter_now", success=result.get("success"),
                           up=result.get("up_survivors_count"), down=result.get("down_survivors_count"))
     return result
 
 
 @app.get("/api/decision_log")
-def api_decision_log(limit: int = 100, mode: str = Depends(require_mode), user: str = Depends(require_user)):
-    rows = db.get_decision_log(mode, limit=limit)
+def api_decision_log(limit: int = 100, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    rows = db.get_decision_log(account_id, mode, limit=limit)
     for r in rows:
         try:
             r["payload"] = json.loads(r["payload_json"])
@@ -364,16 +386,17 @@ def api_decision_log(limit: int = 100, mode: str = Depends(require_mode), user: 
 
 
 # ------------------------------------------------------------- strategies ---
-# Strategies are shared across both modes — no `mode` param here. Actions
-# are logged into both modes' activity logs so either tab shows them.
-def _log_strategy_action(user: str, **fields):
+# Strategy templates are shared across every account and both modes — no
+# `mode` param here. Actions are logged into both modes' activity logs
+# (for this account) so either tab shows them.
+def _log_strategy_action(account_id: int, user: str, **fields):
     for m in db.MODES:
-        db.log_decision(m, "dashboard_control", user=user, **fields)
+        db.log_decision(account_id, m, "dashboard_control", user=user, **fields)
 
 
 @app.get("/api/strategies")
-def api_list_strategies(user: str = Depends(require_user)):
-    return db.list_strategies()
+def api_list_strategies(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    return db.list_strategies(account_id)
 
 
 @app.get("/api/strategies/{strategy_id}")
@@ -386,7 +409,7 @@ def api_get_strategy(strategy_id: int, user: str = Depends(require_user)):
 
 
 @app.post("/api/strategies")
-async def api_create_strategy(request: Request, user: str = Depends(require_user)):
+async def api_create_strategy(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_admin)):
     body = await request.json()
     name = body.get("name")
     rules = body.get("rules")
@@ -399,12 +422,12 @@ async def api_create_strategy(request: Request, user: str = Depends(require_user
     if risk_rating not in db.RISK_RATINGS:
         raise HTTPException(status_code=400, detail=f"risk_rating must be one of {db.RISK_RATINGS}")
     strategy_id = db.create_strategy(name, rules, direction, risk_rating)
-    _log_strategy_action(user, action="create_strategy", name=name, direction=direction, risk_rating=risk_rating)
+    _log_strategy_action(account_id, user, action="create_strategy", name=name, direction=direction, risk_rating=risk_rating)
     return {"id": strategy_id}
 
 
 @app.put("/api/strategies/{strategy_id}")
-async def api_update_strategy(strategy_id: int, request: Request, user: str = Depends(require_user)):
+async def api_update_strategy(strategy_id: int, request: Request, account_id: int = Depends(require_account), user: str = Depends(require_admin)):
     if not db.get_strategy(strategy_id):
         raise HTTPException(status_code=404, detail="Strategy not found")
     body = await request.json()
@@ -415,7 +438,7 @@ async def api_update_strategy(strategy_id: int, request: Request, user: str = De
     if risk_rating is not None and risk_rating not in db.RISK_RATINGS:
         raise HTTPException(status_code=400, detail=f"risk_rating must be one of {db.RISK_RATINGS}")
     db.update_strategy(strategy_id, rules, risk_rating)
-    _log_strategy_action(user, action="update_strategy", strategy_id=strategy_id)
+    _log_strategy_action(account_id, user, action="update_strategy", strategy_id=strategy_id)
     return {"ok": True}
 
 
@@ -427,7 +450,7 @@ ACTIVATE_AGGRESSIVE_CONFIRM_PHRASE = "ok"
 
 
 @app.post("/api/strategies/{strategy_id}/activate")
-async def api_activate_strategy(strategy_id: int, request: Request, user: str = Depends(require_user)):
+async def api_activate_strategy(strategy_id: int, request: Request, account_id: int = Depends(require_account), user: str = Depends(require_user)):
     strategy = db.get_strategy(strategy_id)
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
@@ -441,16 +464,16 @@ async def api_activate_strategy(strategy_id: int, request: Request, user: str = 
                 status_code=400,
                 detail=f"Type '{ACTIVATE_AGGRESSIVE_CONFIRM_PHRASE}' to confirm activating an aggressive strategy.",
             )
-    db.activate_strategy(strategy_id)
-    _log_strategy_action(user, action="activate_strategy", strategy_id=strategy_id, name=strategy["name"])
+    db.activate_strategy(account_id, strategy_id)
+    _log_strategy_action(account_id, user, action="activate_strategy", strategy_id=strategy_id, name=strategy["name"])
     return {"ok": True}
 
 
 @app.delete("/api/strategies/{strategy_id}")
-def api_delete_strategy(strategy_id: int, user: str = Depends(require_user)):
+def api_delete_strategy(strategy_id: int, account_id: int = Depends(require_account), user: str = Depends(require_admin)):
     try:
         db.delete_strategy(strategy_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    _log_strategy_action(user, action="delete_strategy", strategy_id=strategy_id)
+    _log_strategy_action(account_id, user, action="delete_strategy", strategy_id=strategy_id)
     return {"ok": True}
