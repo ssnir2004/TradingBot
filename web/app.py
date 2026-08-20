@@ -6,6 +6,8 @@ SQLite DB the two trading services (run_service.py --mode paper/live) use;
 it never talks to IBKR directly, so it can safely run as a separate process.
 """
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -33,6 +35,13 @@ LIVE_RISK_CONFIRM_PHRASE = "CHANGE LIVE RISK"
 # while disconnected, nothing manages open positions or force-closes at
 # end of day, so this is a deliberate, confirmed action too.
 DISCONNECT_LIVE_CONFIRM_PHRASE = "DISCONNECT LIVE"
+
+# Typed into the confirmation modal before closing a LIVE position from the
+# Account Holdings panel — this fires a real market order against a real
+# account holding, independent of anything the bot itself is tracking.
+CLOSE_LIVE_CONFIRM_PHRASE = "CLOSE LIVE POSITION"
+
+SUBPROCESS_TIMEOUT = 30
 
 
 def _env() -> dict:
@@ -256,6 +265,49 @@ def api_positions(mode: str = Depends(require_mode), user: str = Depends(require
         pos["current_price"] = price
         pos["unrealized_r"] = (move / risk_per_share) if move is not None and risk_per_share > 0 else None
     return positions
+
+
+@app.get("/api/broker_positions")
+def api_broker_positions(mode: str = Depends(require_mode), user: str = Depends(require_user)):
+    """Every real IBKR holding in this mode's account, independent of
+    whether the bot opened it or is tracking it — refreshed every 5 minutes
+    by cycle.refresh_account_info alongside the account summary."""
+    data = db.get_broker_positions(mode)
+    for pos in data["positions"]:
+        price = None
+        try:
+            price = cycle._current_price(pos["symbol"])
+        except Exception:
+            pass
+        pos["current_price"] = price
+        pos["unrealized_pnl"] = ((price - pos["avg_cost"]) * pos["qty"]) if price is not None else None
+    return data
+
+
+@app.post("/api/broker_positions/close")
+async def api_broker_positions_close(request: Request, mode: str = Depends(require_mode), user: str = Depends(require_user)):
+    body = await request.json()
+    symbol = (body.get("symbol") or "").strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    if mode == "live" and body.get("confirm") != CLOSE_LIVE_CONFIRM_PHRASE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Type '{CLOSE_LIVE_CONFIRM_PHRASE}' to confirm closing a LIVE position.",
+        )
+
+    qty = body.get("qty")
+    cmd = [sys.executable, str(PROJECT_DIR / "close_position.py"), "--mode", mode, "--symbol", symbol]
+    if qty:
+        cmd += ["--qty", str(int(qty))]
+
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT)
+    db.log_decision(mode, "dashboard_control", user=user, action="close_broker_position",
+                     symbol=symbol, qty=qty, stdout=proc.stdout, returncode=proc.returncode)
+    if proc.returncode != 0:
+        raise HTTPException(status_code=400, detail=proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "Close failed")
+    return {"ok": True, "stdout": proc.stdout}
 
 
 @app.get("/api/trades")

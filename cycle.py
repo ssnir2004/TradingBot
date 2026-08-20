@@ -598,6 +598,15 @@ def refresh_account_info(mode: str):
             values.get("TotalCashValue", ""),
             values.get("BuyingPower", ""),
         )
+
+        # Every real holding in the account, independent of whether the bot
+        # opened it or is tracking it in the positions table — lets the
+        # dashboard show (and close) things the bot doesn't know about.
+        broker_positions = [
+            {"symbol": p.contract.symbol, "qty": p.position, "avg_cost": p.avgCost}
+            for p in ib.positions() if p.position != 0
+        ]
+        db.update_broker_positions(mode, broker_positions)
     finally:
         ibkr.disconnect()
 

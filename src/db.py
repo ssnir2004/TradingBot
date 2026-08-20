@@ -604,6 +604,27 @@ def get_watchlist_filters(mode: str) -> dict:
         return {"updated_at": "", "results": []}
 
 
+def update_broker_positions(mode: str, positions: list[dict]):
+    """Stores the latest raw IBKR account holdings (see
+    cycle.refresh_account_info) for the dashboard's Account Holdings view —
+    every real position in the account, independent of whether the bot
+    opened it or is tracking it in the `positions` table."""
+    _check_mode(mode)
+    payload = {"updated_at": datetime.now(ET).isoformat(timespec="seconds"), "positions": positions}
+    set_setting(_mode_key(mode, "broker_positions_json"), json.dumps(payload))
+
+
+def get_broker_positions(mode: str) -> dict:
+    _check_mode(mode)
+    raw = get_setting(_mode_key(mode, "broker_positions_json"), "")
+    if not raw:
+        return {"updated_at": "", "positions": []}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {"updated_at": "", "positions": []}
+
+
 # -------------------------------------------------------------- logging ---
 def log_decision(mode: str, event: str, **fields):
     _check_mode(mode)

@@ -152,6 +152,27 @@
     <div class="col-12">
       <div class="card">
         <div class="card-header d-flex justify-content-between align-items-center">
+          <span>Account Holdings <span class="badge bg-secondary fw-normal">every real IBKR position, not just the bot's</span></span>
+          <span class="text-muted small">Updated: <span id="broker-positions-updated" class="mono">-</span></span>
+        </div>
+        <div class="small text-muted px-3 pt-2">
+          Reads straight from the IBKR account — includes positions the bot didn't open (e.g. opened manually via TWS/Mobile) and older positions from any day, not just today. Refreshes every 5 minutes alongside the Account summary above. "Close" fires an immediate market order for the amount entered — for profit or loss, regardless of who opened it.
+        </div>
+        <div id="broker-positions-error" class="text-danger small px-3"></div>
+        <div class="card-body p-0">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Current</th><th>Unrealized P&amp;L</th><th>Close</th></tr></thead>
+            <tbody id="broker-positions-body"><tr><td colspan="6" class="text-center text-muted">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3 mb-3">
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
           <span>Watchlist (today) — live filter check</span>
           <div class="d-flex align-items-center gap-2">
             <span class="text-muted small">Checked: <span id="watchlist-checked" class="mono">-</span></span>
@@ -263,6 +284,7 @@
 <script>
 const POLL_MS = 5000;
 const LIVE_RISK_CONFIRM_PHRASE = "CHANGE LIVE RISK";
+const CLOSE_LIVE_CONFIRM_PHRASE = "CLOSE LIVE POSITION";
 let editingStrategyId = null;
 let strategyModal;
 let currentMode = "paper";
@@ -464,6 +486,68 @@ async function refreshPositions() {
     <td class="small">${p.state}</td><td>${fmtR(p.unrealized_r)}</td>
   </tr>`).join("");
 }
+
+function fmtPnl(v) {
+  if (v === null || v === undefined) return "-";
+  const cls = v > 0 ? "text-success" : (v < 0 ? "text-danger" : "");
+  return `<span class="${cls}">${fmtMoney(v)}</span>`;
+}
+
+async function refreshBrokerPositions() {
+  const data = await modeApi("/api/broker_positions");
+  document.getElementById("broker-positions-updated").textContent = data.updated_at || "not refreshed yet";
+  const rows = data.positions || [];
+  const body = document.getElementById("broker-positions-body");
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No holdings</td></tr>'; return; }
+  body.innerHTML = rows.map(p => {
+    const full = Math.abs(p.qty);
+    return `<tr>
+      <td>${p.symbol}</td><td>${p.qty}</td><td>${fmtMoney(p.avg_cost)}</td>
+      <td>${fmtMoney(p.current_price)}</td><td>${fmtPnl(p.unrealized_pnl)}</td>
+      <td>
+        <div class="input-group input-group-sm" style="width:170px;">
+          <input type="number" min="1" max="${full}" value="${full}" class="form-control form-control-sm broker-close-qty" data-symbol="${p.symbol}">
+          <button class="btn btn-outline-danger btn-sm broker-close-btn" data-symbol="${p.symbol}">Close</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+document.getElementById("broker-positions-body").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".broker-close-btn");
+  if (!btn) return;
+  const symbol = btn.dataset.symbol;
+  const qtyInput = document.querySelector(`.broker-close-qty[data-symbol="${symbol}"]`);
+  const qty = parseInt(qtyInput.value, 10);
+  const errorEl = document.getElementById("broker-positions-error");
+  errorEl.textContent = "";
+
+  const payload = { symbol, qty };
+  if (currentMode === "live") {
+    const typed = prompt(
+      `This immediately market-closes ${qty} share(s) of ${symbol} in your LIVE account — for profit or loss, ` +
+      `regardless of who opened it or when. Type exactly "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
+    );
+    if (typed !== CLOSE_LIVE_CONFIRM_PHRASE) { errorEl.textContent = "Not confirmed — nothing was closed."; return; }
+    payload.confirm = typed;
+  } else if (!confirm(`Market-close ${qty} share(s) of ${symbol} (PAPER)?`)) {
+    return;
+  }
+
+  btn.disabled = true;
+  try {
+    await modeApi("/api/broker_positions/close", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    refreshBrokerPositions();
+    refreshPositions();
+  } catch (err) {
+    errorEl.textContent = "Close failed: " + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 const FILTER_KEYS = ["D1", "D2", "D3", "I1", "I2", "I3"];
 
@@ -682,8 +766,8 @@ document.getElementById("btn-flatten").addEventListener("click", async () => {
 });
 
 function refreshAll() {
-  refreshStatus(); refreshAccount(); refreshGatewayStatus(); refreshRiskParams(); refreshPositions(); refreshWatchlist();
-  refreshTrades(); refreshLog(); refreshPerformance(); refreshStrategies();
+  refreshStatus(); refreshAccount(); refreshGatewayStatus(); refreshRiskParams(); refreshPositions(); refreshBrokerPositions();
+  refreshWatchlist(); refreshTrades(); refreshLog(); refreshPerformance(); refreshStrategies();
 }
 
 window.addEventListener("DOMContentLoaded", () => {
