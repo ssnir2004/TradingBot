@@ -836,12 +836,15 @@ function fmtPnl(v) {
   return `<span class="${cls}">${fmtMoney(v)}</span>`;
 }
 
-function orderCell(symbol, order, orderType) {
+function ordersCell(symbol, orders, orderType, remaining) {
   const label = orderType === "stop" ? "stop" : "take-profit";
-  if (order) {
-    return `${fmtMoney(order.price)} <button class="btn btn-sm btn-outline-secondary broker-order-btn" data-symbol="${symbol}" data-order-type="${orderType}" data-current="${order.price}" title="Edit ${label}">&#9998;</button>`;
-  }
-  return `<button class="btn btn-sm btn-outline-secondary broker-order-btn" data-symbol="${symbol}" data-order-type="${orderType}" data-current="" title="Add ${label}">+ Add</button>`;
+  const rows = (orders || []).map(o => `
+    <div class="d-flex align-items-center gap-1 mb-1">
+      <span class="small">${fmtMoney(o.price)} &times;${o.qty}</span>
+      <button class="btn btn-sm btn-outline-danger py-0 px-1 broker-order-cancel-btn" data-symbol="${symbol}" data-order-id="${o.order_id}" title="Cancel this ${label}">&times;</button>
+    </div>`).join("");
+  const addBtn = `<button class="btn btn-sm btn-outline-secondary broker-order-add-btn" data-symbol="${symbol}" data-order-type="${orderType}" data-remaining="${remaining}" title="Add another ${label}">+ Add</button>`;
+  return rows + addBtn;
 }
 
 async function refreshBrokerPositions() {
@@ -852,11 +855,13 @@ async function refreshBrokerPositions() {
   if (!rows.length) { body.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No holdings</td></tr>'; return; }
   body.innerHTML = rows.map(p => {
     const full = Math.abs(p.qty);
+    const allocated = (p.stop_orders || []).reduce((s, o) => s + o.qty, 0) + (p.take_profit_orders || []).reduce((s, o) => s + o.qty, 0);
+    const remaining = Math.max(0, full - allocated);
     return `<tr>
       <td>${symbolLink(p.symbol)}</td><td>${p.qty}</td><td>${fmtMoney(p.avg_cost)}</td>
       <td>${fmtMoney(p.current_price)}</td><td>${fmtPnl(p.daily_pnl)}</td><td>${fmtPnl(p.unrealized_pnl)}</td>
-      <td>${orderCell(p.symbol, p.stop_order, "stop")}</td>
-      <td>${orderCell(p.symbol, p.take_profit_order, "take_profit")}</td>
+      <td>${ordersCell(p.symbol, p.stop_orders, "stop", remaining)}</td>
+      <td>${ordersCell(p.symbol, p.take_profit_orders, "take_profit", remaining)}</td>
       <td>
         <div class="input-group input-group-sm" style="width:170px;">
           <input type="number" min="1" max="${full}" value="${full}" class="form-control form-control-sm broker-close-qty" data-symbol="${p.symbol}">
@@ -868,33 +873,62 @@ async function refreshBrokerPositions() {
 }
 
 document.getElementById("broker-positions-body").addEventListener("click", async (e) => {
-  const orderBtn = e.target.closest(".broker-order-btn");
-  if (orderBtn) {
-    const symbol = orderBtn.dataset.symbol;
-    const orderType = orderBtn.dataset.orderType;
+  const addBtn = e.target.closest(".broker-order-add-btn");
+  if (addBtn) {
+    const symbol = addBtn.dataset.symbol;
+    const orderType = addBtn.dataset.orderType;
+    const remaining = addBtn.dataset.remaining;
     const label = orderType === "stop" ? "stop" : "take-profit";
-    const current = orderBtn.dataset.current;
-    const typed = prompt(`${label[0].toUpperCase()}${label.slice(1)} price for ${symbol}:`, current || "");
-    if (typed === null) return;
-    const price = Number(typed);
+
+    const priceTyped = prompt(`${label[0].toUpperCase()}${label.slice(1)} price for ${symbol}:`);
+    if (priceTyped === null) return;
+    const price = Number(priceTyped);
     if (!Number.isFinite(price) || price <= 0) { alert("Enter a valid positive price."); return; }
-    const payload = { order_type: orderType, price };
+
+    const qtyTyped = prompt(`Quantity for this ${label} (${remaining} share(s) not yet covered by an existing stop/take-profit order):`, remaining);
+    if (qtyTyped === null) return;
+    const qty = parseInt(qtyTyped, 10);
+    if (!Number.isFinite(qty) || qty <= 0) { alert("Enter a valid positive quantity."); return; }
+
+    const payload = { order_type: orderType, price, qty };
     if (currentMode === "live") {
       const confirmTyped = prompt(
-        `This cancels any existing ${label} order and places a new one at $${price.toFixed(2)} for ${symbol} in your LIVE account. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
+        `This adds a new ${label} order for ${qty} share(s) @ $${price.toFixed(2)} for ${symbol} in your LIVE account. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
       );
       if (confirmTyped !== CLOSE_LIVE_CONFIRM_PHRASE) return;
       payload.confirm = confirmTyped;
     }
-    orderBtn.disabled = true;
+    addBtn.disabled = true;
     try {
       await modeApi(`/api/broker_positions/${symbol}/order`, {
-        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
       });
       refreshBrokerPositions();
     } catch (err) {
       alert("Failed: " + err.message);
-      orderBtn.disabled = false;
+      addBtn.disabled = false;
+    }
+    return;
+  }
+
+  const cancelBtn = e.target.closest(".broker-order-cancel-btn");
+  if (cancelBtn) {
+    const symbol = cancelBtn.dataset.symbol;
+    const orderId = cancelBtn.dataset.orderId;
+    if (!confirm(`Cancel order ${orderId} for ${symbol}?`)) return;
+    let url = `/api/broker_positions/${symbol}/order/${orderId}`;
+    if (currentMode === "live") {
+      const confirmTyped = prompt(`Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm cancelling this LIVE order:`);
+      if (confirmTyped !== CLOSE_LIVE_CONFIRM_PHRASE) return;
+      url += `?confirm=${encodeURIComponent(confirmTyped)}`;
+    }
+    cancelBtn.disabled = true;
+    try {
+      await modeApi(url, { method: "DELETE" });
+      refreshBrokerPositions();
+    } catch (err) {
+      alert("Failed: " + err.message);
+      cancelBtn.disabled = false;
     }
     return;
   }

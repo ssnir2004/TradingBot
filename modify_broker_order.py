@@ -1,17 +1,22 @@
-"""Places or moves a protective stop or take-profit (limit) order for ANY
+"""Adds or cancels a protective stop or take-profit (limit) order for ANY
 real IBKR holding — independent of whether the bot itself opened it or is
 tracking it in its own `positions` table — spawned as a subprocess by the
-dashboard (web/app.py's PUT /api/broker_positions/{symbol}/order). Runs on
-its own IBKR client ID so it never collides with the orchestrator's
+dashboard (web/app.py's POST/DELETE /api/broker_positions/{symbol}/order*).
+Runs on its own IBKR client ID so it never collides with the orchestrator's
 connection or any of the other dashboard-spawned scripts (trade.py,
 close_position.py, modify_stop.py). --mode selects which IB Gateway
 process (paper on 4002, live on 4001) it connects to.
 
+A symbol can carry several stop and/or take-profit orders at once, each
+covering its own slice of the position (scaling out) — this script only
+ever adds a brand-new order or cancels one specific existing order by ID;
+"moving" an order is the dashboard doing a cancel followed by an add.
+
 Deliberately does NOT touch this bot's own `positions` table even when the
-symbol happens to also be a bot-tracked position: this endpoint edits the
-account's real resting orders directly (matching Account Holdings' own
-"independent of the bot" model), not the bot's internal tracking — see
-modify_stop.py instead for editing a bot-tracked position's own stop.
+symbol happens to also be a bot-tracked position: this edits the account's
+real resting orders directly (matching Account Holdings' own "independent
+of the bot" model), not the bot's internal tracking — see modify_stop.py
+instead for editing a bot-tracked position's own single stop.
 """
 import argparse
 import sys
@@ -33,8 +38,11 @@ def main():
     parser.add_argument("--account-id", type=int, default=None,
                          help="Defaults to the admin account when omitted (manual/dev use).")
     parser.add_argument("--symbol", required=True)
-    parser.add_argument("--order-type", required=True, choices=["stop", "take_profit"])
-    parser.add_argument("--price", required=True, type=float)
+    parser.add_argument("--action", required=True, choices=["add", "cancel"])
+    parser.add_argument("--order-type", choices=["stop", "take_profit"], help="Required for --action add.")
+    parser.add_argument("--price", type=float, help="Required for --action add.")
+    parser.add_argument("--qty", type=int, help="Required for --action add.")
+    parser.add_argument("--order-id", type=int, help="Required for --action cancel.")
     args = parser.parse_args()
     symbol = args.symbol.upper()
     account_id = args.account_id if args.account_id is not None else db.get_default_account_id()
@@ -47,39 +55,63 @@ def main():
     )
     try:
         ib = ibkr.ib
-        ib.sleep(1)  # let positions populate after connecting
+        ib.sleep(1)  # let positions/orders populate after connecting
+
+        if args.action == "cancel":
+            if args.order_id is None:
+                print(f"[{args.mode}] --order-id is required for --action cancel")
+                sys.exit(1)
+            ib.reqAllOpenOrders()
+            ib.sleep(1)
+            match = next((t for t in ib.openTrades() if t.order.orderId == args.order_id), None)
+            if match is None:
+                print(f"[{args.mode}] {symbol}: order {args.order_id} not found among open orders "
+                      f"(already filled or cancelled?)")
+                sys.exit(1)
+            ib.cancelOrder(match.order)
+            print(f"[{args.mode}] {symbol}: order {args.order_id} cancelled")
+            return
+
+        # action == "add"
+        if args.order_type is None or args.price is None or args.qty is None:
+            print(f"[{args.mode}] --order-type, --price, and --qty are all required for --action add")
+            sys.exit(1)
+
         held = next((p for p in ib.positions() if p.contract.symbol == symbol and p.position != 0), None)
         if held is None:
             print(f"[{args.mode}] {symbol}: no open position in this account")
             sys.exit(1)
+        held_qty = int(abs(held.position))
 
-        qty = int(abs(held.position))
+        # A stop and a take-profit for the same shares are both exit-side
+        # orders - together they must not cover more shares than are
+        # actually held, or a fill on one leg leaves the other trying to
+        # sell/buy-to-cover shares that no longer exist.
+        ib.reqAllOpenOrders()
+        ib.sleep(1)
+        allocated = sum(
+            int(t.order.totalQuantity) for t in ib.openTrades()
+            if t.contract.symbol == symbol and t.order.orderType in ("STP", "LMT")
+        )
+        if allocated + args.qty > held_qty:
+            print(f"[{args.mode}] {symbol}: {allocated} share(s) already allocated across existing "
+                  f"stop/take-profit orders - adding {args.qty} more would exceed the {held_qty} actually held")
+            sys.exit(1)
+
         # A stop/take-profit protects/exits a long with a SELL, a short
         # with a BUY - same convention as cycle._place_stop.
         action = "SELL" if held.position > 0 else "BUY"
-
-        # Cancel any existing order of the SAME type for this symbol before
-        # placing the new one (cancel-then-replace, same as modify_stop.py)
-        # - reqAllOpenOrders pulls in orders from other client IDs too, so
-        # this also catches one the bot's own cycle placed.
-        ib.reqAllOpenOrders()
-        ib.sleep(1)
-        target_type = "STP" if args.order_type == "stop" else "LMT"
-        for t in ib.openTrades():
-            if t.contract.symbol == symbol and t.order.orderType == target_type:
-                ib.cancelOrder(t.order)
-        ib.sleep(1)
-
         contract = Stock(symbol, "SMART", "USD")
         (qualified,) = ib.qualifyContracts(contract)
         order = (
-            StopOrder(action, qty, round(args.price, 2)) if args.order_type == "stop"
-            else LimitOrder(action, qty, round(args.price, 2))
+            StopOrder(action, args.qty, round(args.price, 2)) if args.order_type == "stop"
+            else LimitOrder(action, args.qty, round(args.price, 2))
         )
         trade = ib.placeOrder(qualified, order)
         ib.sleep(1)
 
-        print(f"[{args.mode}] {symbol}: {args.order_type} set to ${args.price:.2f} x{qty} (order_id={trade.order.orderId})")
+        print(f"[{args.mode}] {symbol}: {args.order_type} added: {args.qty} @ ${args.price:.2f} "
+              f"(order_id={trade.order.orderId})")
     finally:
         ibkr.disconnect()
 

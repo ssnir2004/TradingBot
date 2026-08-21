@@ -490,47 +490,95 @@ def api_broker_positions(mode: str = Depends(require_mode), account_id: int = De
         pos["daily_pnl"] = ((price - prior_close) * pos["qty"]) if price is not None and prior_close is not None else None
 
         symbol_orders = orders_by_symbol.get(pos["symbol"], [])
-        pos["stop_order"] = next((o for o in symbol_orders if o["order_type"] == "STP"), None)
-        pos["take_profit_order"] = next((o for o in symbol_orders if o["order_type"] == "LMT"), None)
+        pos["stop_orders"] = [o for o in symbol_orders if o["order_type"] == "STP"]
+        pos["take_profit_orders"] = [o for o in symbol_orders if o["order_type"] == "LMT"]
     return data
 
 
-# Placing/moving a LIVE stop or take-profit for a real holding cancels
-# whatever order of that type is currently resting (if any) and replaces
-# it, so it gets the same speed bump as every other LIVE-affecting action.
+# Placing/cancelling a LIVE stop or take-profit for a real holding is a
+# real, immediate change to what protects/exits that position, so it gets
+# the same speed bump as every other LIVE-affecting action.
 MODIFY_BROKER_ORDER_LIVE_CONFIRM_PHRASE = "ok"
 
 
-@app.put("/api/broker_positions/{symbol}/order")
-async def api_modify_broker_order(symbol: str, request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+@app.post("/api/broker_positions/{symbol}/order")
+async def api_add_broker_order(symbol: str, request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    """Adds a NEW stop or take-profit order for `symbol` — a position can
+    carry several of each at once, each covering its own slice (scaling
+    out); this never touches an existing order. See the DELETE endpoint
+    below to cancel one."""
     body = await request.json()
     order_type = body.get("order_type")
     if order_type not in ("stop", "take_profit"):
         raise HTTPException(status_code=400, detail="order_type must be 'stop' or 'take_profit'")
     try:
         price = float(body.get("price"))
+        qty = int(body.get("qty"))
     except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="price must be a number")
-    if price <= 0:
-        raise HTTPException(status_code=400, detail="price must be positive")
+        raise HTTPException(status_code=400, detail="price and qty must be numbers")
+    if price <= 0 or qty <= 0:
+        raise HTTPException(status_code=400, detail="price and qty must be positive")
 
     if mode == "live" and body.get("confirm") != MODIFY_BROKER_ORDER_LIVE_CONFIRM_PHRASE:
         label = "stop" if order_type == "stop" else "take-profit"
         raise HTTPException(
             status_code=400,
-            detail=f"Type '{MODIFY_BROKER_ORDER_LIVE_CONFIRM_PHRASE}' to confirm setting a LIVE {label} order.",
+            detail=f"Type '{MODIFY_BROKER_ORDER_LIVE_CONFIRM_PHRASE}' to confirm adding a LIVE {label} order.",
+        )
+
+    symbol = symbol.strip().upper()
+
+    # Fail fast against the last-refreshed cache (up to ~5 min stale)
+    # before spawning a subprocess — modify_broker_order.py itself
+    # re-checks against a live connection right before placing, so this is
+    # just an early, clear error for the obvious case.
+    positions = {p["symbol"]: p for p in db.get_broker_positions(account_id, mode)["positions"]}
+    pos = positions.get(symbol)
+    if pos is None:
+        raise HTTPException(status_code=404, detail="No open position for that symbol")
+    held_qty = abs(pos["qty"])
+    allocated = sum(
+        o["qty"] for o in db.get_broker_orders(account_id, mode)["orders"]
+        if o["symbol"] == symbol and o["order_type"] in ("STP", "LMT")
+    )
+    if allocated + qty > held_qty:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{allocated} share(s) already allocated across existing stop/take-profit orders for {symbol} — "
+                   f"adding {qty} more would exceed the {held_qty} actually held.",
+        )
+
+    proc = subprocess.run(
+        [sys.executable, str(PROJECT_DIR / "modify_broker_order.py"), "--mode", mode,
+         "--account-id", str(account_id), "--symbol", symbol, "--action", "add",
+         "--order-type", order_type, "--price", str(price), "--qty", str(qty)],
+        capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
+    )
+    db.log_decision(account_id, mode, "dashboard_control", user=user, action="add_broker_order",
+                     symbol=symbol, order_type=order_type, price=price, qty=qty, stdout=proc.stdout, returncode=proc.returncode)
+    if proc.returncode != 0:
+        raise HTTPException(status_code=400, detail=proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "Add failed")
+    return {"ok": True, "stdout": proc.stdout}
+
+
+@app.delete("/api/broker_positions/{symbol}/order/{order_id}")
+def api_cancel_broker_order(symbol: str, order_id: int, confirm: str | None = None, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    if mode == "live" and confirm != MODIFY_BROKER_ORDER_LIVE_CONFIRM_PHRASE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Pass ?confirm={MODIFY_BROKER_ORDER_LIVE_CONFIRM_PHRASE} to confirm cancelling a LIVE order.",
         )
 
     symbol = symbol.strip().upper()
     proc = subprocess.run(
         [sys.executable, str(PROJECT_DIR / "modify_broker_order.py"), "--mode", mode,
-         "--account-id", str(account_id), "--symbol", symbol, "--order-type", order_type, "--price", str(price)],
+         "--account-id", str(account_id), "--symbol", symbol, "--action", "cancel", "--order-id", str(order_id)],
         capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
     )
-    db.log_decision(account_id, mode, "dashboard_control", user=user, action="modify_broker_order",
-                     symbol=symbol, order_type=order_type, price=price, stdout=proc.stdout, returncode=proc.returncode)
+    db.log_decision(account_id, mode, "dashboard_control", user=user, action="cancel_broker_order",
+                     symbol=symbol, order_id=order_id, stdout=proc.stdout, returncode=proc.returncode)
     if proc.returncode != 0:
-        raise HTTPException(status_code=400, detail=proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "Modify failed")
+        raise HTTPException(status_code=400, detail=proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "Cancel failed")
     return {"ok": True, "stdout": proc.stdout}
 
 
