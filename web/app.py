@@ -470,6 +470,10 @@ def api_broker_positions(mode: str = Depends(require_mode), account_id: int = De
     whether the bot opened it or is tracking it — refreshed every 5 minutes
     by cycle.refresh_account_info alongside the account summary."""
     data = db.get_broker_positions(account_id, mode)
+    orders_by_symbol = {}
+    for o in db.get_broker_orders(account_id, mode)["orders"]:
+        orders_by_symbol.setdefault(o["symbol"], []).append(o)
+
     for pos in data["positions"]:
         price = None
         prior_close = None
@@ -484,7 +488,50 @@ def api_broker_positions(mode: str = Depends(require_mode), account_id: int = De
         pos["current_price"] = price
         pos["unrealized_pnl"] = ((price - pos["avg_cost"]) * pos["qty"]) if price is not None else None
         pos["daily_pnl"] = ((price - prior_close) * pos["qty"]) if price is not None and prior_close is not None else None
+
+        symbol_orders = orders_by_symbol.get(pos["symbol"], [])
+        pos["stop_order"] = next((o for o in symbol_orders if o["order_type"] == "STP"), None)
+        pos["take_profit_order"] = next((o for o in symbol_orders if o["order_type"] == "LMT"), None)
     return data
+
+
+# Placing/moving a LIVE stop or take-profit for a real holding cancels
+# whatever order of that type is currently resting (if any) and replaces
+# it, so it gets the same speed bump as every other LIVE-affecting action.
+MODIFY_BROKER_ORDER_LIVE_CONFIRM_PHRASE = "ok"
+
+
+@app.put("/api/broker_positions/{symbol}/order")
+async def api_modify_broker_order(symbol: str, request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    body = await request.json()
+    order_type = body.get("order_type")
+    if order_type not in ("stop", "take_profit"):
+        raise HTTPException(status_code=400, detail="order_type must be 'stop' or 'take_profit'")
+    try:
+        price = float(body.get("price"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="price must be a number")
+    if price <= 0:
+        raise HTTPException(status_code=400, detail="price must be positive")
+
+    if mode == "live" and body.get("confirm") != MODIFY_BROKER_ORDER_LIVE_CONFIRM_PHRASE:
+        label = "stop" if order_type == "stop" else "take-profit"
+        raise HTTPException(
+            status_code=400,
+            detail=f"Type '{MODIFY_BROKER_ORDER_LIVE_CONFIRM_PHRASE}' to confirm setting a LIVE {label} order.",
+        )
+
+    symbol = symbol.strip().upper()
+    proc = subprocess.run(
+        [sys.executable, str(PROJECT_DIR / "modify_broker_order.py"), "--mode", mode,
+         "--account-id", str(account_id), "--symbol", symbol, "--order-type", order_type, "--price", str(price)],
+        capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
+    )
+    db.log_decision(account_id, mode, "dashboard_control", user=user, action="modify_broker_order",
+                     symbol=symbol, order_type=order_type, price=price, stdout=proc.stdout, returncode=proc.returncode)
+    if proc.returncode != 0:
+        raise HTTPException(status_code=400, detail=proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "Modify failed")
+    return {"ok": True, "stdout": proc.stdout}
 
 
 @app.post("/api/broker_positions/close")

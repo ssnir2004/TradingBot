@@ -216,8 +216,8 @@
         <div id="broker-positions-error" class="text-danger small px-3"></div>
         <div class="card-body p-0">
           <table class="table table-sm mb-0">
-            <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Current</th><th data-bs-toggle="tooltip" title="שינוי ערך מאז סגירת אתמול">Daily P&amp;L</th><th>Unrealized P&amp;L</th><th>Close</th></tr></thead>
-            <tbody id="broker-positions-body"><tr><td colspan="7" class="text-center text-muted">Loading…</td></tr></tbody>
+            <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Current</th><th data-bs-toggle="tooltip" title="שינוי ערך מאז סגירת אתמול">Daily P&amp;L</th><th>Unrealized P&amp;L</th><th data-bs-toggle="tooltip" title="הזמנת Stop אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש">Stop</th><th data-bs-toggle="tooltip" title="הזמנת Limit (Take Profit) אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש">Take Profit</th><th>Close</th></tr></thead>
+            <tbody id="broker-positions-body"><tr><td colspan="9" class="text-center text-muted">Loading…</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -836,17 +836,27 @@ function fmtPnl(v) {
   return `<span class="${cls}">${fmtMoney(v)}</span>`;
 }
 
+function orderCell(symbol, order, orderType) {
+  const label = orderType === "stop" ? "stop" : "take-profit";
+  if (order) {
+    return `${fmtMoney(order.price)} <button class="btn btn-sm btn-outline-secondary broker-order-btn" data-symbol="${symbol}" data-order-type="${orderType}" data-current="${order.price}" title="Edit ${label}">&#9998;</button>`;
+  }
+  return `<button class="btn btn-sm btn-outline-secondary broker-order-btn" data-symbol="${symbol}" data-order-type="${orderType}" data-current="" title="Add ${label}">+ Add</button>`;
+}
+
 async function refreshBrokerPositions() {
   const data = await modeApi("/api/broker_positions");
   document.getElementById("broker-positions-updated").textContent = data.updated_at || "not refreshed yet";
   const rows = data.positions || [];
   const body = document.getElementById("broker-positions-body");
-  if (!rows.length) { body.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No holdings</td></tr>'; return; }
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No holdings</td></tr>'; return; }
   body.innerHTML = rows.map(p => {
     const full = Math.abs(p.qty);
     return `<tr>
       <td>${symbolLink(p.symbol)}</td><td>${p.qty}</td><td>${fmtMoney(p.avg_cost)}</td>
       <td>${fmtMoney(p.current_price)}</td><td>${fmtPnl(p.daily_pnl)}</td><td>${fmtPnl(p.unrealized_pnl)}</td>
+      <td>${orderCell(p.symbol, p.stop_order, "stop")}</td>
+      <td>${orderCell(p.symbol, p.take_profit_order, "take_profit")}</td>
       <td>
         <div class="input-group input-group-sm" style="width:170px;">
           <input type="number" min="1" max="${full}" value="${full}" class="form-control form-control-sm broker-close-qty" data-symbol="${p.symbol}">
@@ -858,6 +868,37 @@ async function refreshBrokerPositions() {
 }
 
 document.getElementById("broker-positions-body").addEventListener("click", async (e) => {
+  const orderBtn = e.target.closest(".broker-order-btn");
+  if (orderBtn) {
+    const symbol = orderBtn.dataset.symbol;
+    const orderType = orderBtn.dataset.orderType;
+    const label = orderType === "stop" ? "stop" : "take-profit";
+    const current = orderBtn.dataset.current;
+    const typed = prompt(`${label[0].toUpperCase()}${label.slice(1)} price for ${symbol}:`, current || "");
+    if (typed === null) return;
+    const price = Number(typed);
+    if (!Number.isFinite(price) || price <= 0) { alert("Enter a valid positive price."); return; }
+    const payload = { order_type: orderType, price };
+    if (currentMode === "live") {
+      const confirmTyped = prompt(
+        `This cancels any existing ${label} order and places a new one at $${price.toFixed(2)} for ${symbol} in your LIVE account. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
+      );
+      if (confirmTyped !== CLOSE_LIVE_CONFIRM_PHRASE) return;
+      payload.confirm = confirmTyped;
+    }
+    orderBtn.disabled = true;
+    try {
+      await modeApi(`/api/broker_positions/${symbol}/order`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      });
+      refreshBrokerPositions();
+    } catch (err) {
+      alert("Failed: " + err.message);
+      orderBtn.disabled = false;
+    }
+    return;
+  }
+
   const btn = e.target.closest(".broker-close-btn");
   if (!btn) return;
   const symbol = btn.dataset.symbol;

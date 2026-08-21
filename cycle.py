@@ -794,6 +794,29 @@ def refresh_account_info(account_id: int, mode: str):
             for p in ib.positions() if p.position != 0
         ]
         db.update_broker_positions(account_id, mode, broker_positions)
+
+        # Every resting stop/limit order in the account, independent of
+        # which client ID placed it — reqAllOpenOrders (unlike openTrades
+        # alone) pulls in orders from other sessions too: the bot's own
+        # cycle connection, a manual TWS/Mobile order, etc. Lets the
+        # dashboard show a holding's real protective orders even for a
+        # symbol the bot never touched.
+        ib.reqAllOpenOrders()
+        ib.sleep(1)
+        broker_orders = [
+            {
+                "symbol": t.contract.symbol,
+                "order_type": t.order.orderType,
+                "action": t.order.action,
+                "qty": t.order.totalQuantity,
+                "price": t.order.auxPrice if t.order.orderType == "STP" else t.order.lmtPrice,
+                "order_id": t.order.orderId,
+                "status": t.orderStatus.status,
+            }
+            for t in ib.openTrades()
+            if t.orderStatus.status not in ("Cancelled", "ApiCancelled", "Filled", "Inactive")
+        ]
+        db.update_broker_orders(account_id, mode, broker_orders)
     finally:
         ibkr.disconnect()
 

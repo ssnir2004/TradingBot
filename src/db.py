@@ -886,6 +886,29 @@ def get_broker_positions(account_id: int, mode: str) -> dict:
         return {"updated_at": "", "positions": []}
 
 
+def update_broker_orders(account_id: int, mode: str, orders: list[dict]):
+    """Stores the latest raw IBKR open orders (see
+    cycle.refresh_account_info) for the dashboard's Account Holdings view —
+    every resting stop/limit order in the account, independent of which
+    client ID placed it (the bot's own cycle, a manual TWS/Mobile order,
+    etc.), so a holding's real protective orders are visible even when the
+    bot itself never touched that symbol."""
+    _check_mode(mode)
+    payload = {"updated_at": datetime.now(ET).isoformat(timespec="seconds"), "orders": orders}
+    set_setting(_scope_key(account_id, mode, "broker_orders_json"), json.dumps(payload))
+
+
+def get_broker_orders(account_id: int, mode: str) -> dict:
+    _check_mode(mode)
+    raw = get_setting(_scope_key(account_id, mode, "broker_orders_json"), "")
+    if not raw:
+        return {"updated_at": "", "orders": []}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {"updated_at": "", "orders": []}
+
+
 # -------------------------------------------------------------- logging ---
 def log_decision(account_id: int, mode: str, event: str, **fields):
     _check_mode(mode)
