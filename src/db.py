@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS positions (
     stop_order_id INTEGER,
     state TEXT NOT NULL,
     r_multiple REAL DEFAULT 0.0,
+    hold_overnight INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (account_id, mode, symbol)
 );
 
@@ -480,6 +481,7 @@ def init_db(seed_rules_path: Path | None = None):
         _migrate_add_column(conn, "strategies", "risk_rating", "TEXT NOT NULL DEFAULT 'moderate'")
         _migrate_add_column(conn, "strategies", "direction", "TEXT NOT NULL DEFAULT 'long'")
         _migrate_add_column(conn, "positions", "side", "TEXT NOT NULL DEFAULT 'long'")
+        _migrate_add_column(conn, "positions", "hold_overnight", "INTEGER NOT NULL DEFAULT 0")
         _migrate_add_column(conn, "watchlist", "direction", "TEXT NOT NULL DEFAULT 'long'")
         # The shipped default strategy predates risk_rating and got the
         # generic 'moderate' default from the ALTER TABLE above — it's
@@ -780,6 +782,19 @@ def remove_position(account_id: int, mode: str, symbol: str):
     with get_conn() as conn:
         conn.execute(
             "DELETE FROM positions WHERE account_id = ? AND mode = ? AND symbol = ?", (account_id, mode, symbol)
+        )
+
+
+def set_hold_overnight(account_id: int, mode: str, symbol: str, value: bool):
+    """One-shot opt-out of today's EOD force-close for a single position —
+    cycle.py's force_close_all resets this back to False the moment it
+    skips the position, so it only ever applies to the next close, never
+    silently forever."""
+    _check_mode(mode)
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE positions SET hold_overnight = ? WHERE account_id = ? AND mode = ? AND symbol = ?",
+            (int(value), account_id, mode, symbol),
         )
 
 

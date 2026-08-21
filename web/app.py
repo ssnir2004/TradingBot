@@ -376,6 +376,32 @@ def api_positions(mode: str = Depends(require_mode), account_id: int = Depends(r
     return positions
 
 
+# Opting a LIVE position out of today's automatic EOD close is real overnight
+# gap risk taken on deliberately, so it gets the same speed bump as other
+# LIVE-affecting actions; turning it back off just restores the normal safe
+# behavior, so that direction needs no confirmation.
+HOLD_OVERNIGHT_LIVE_CONFIRM_PHRASE = "ok"
+
+
+@app.put("/api/positions/{symbol}/hold_overnight")
+async def api_set_hold_overnight(symbol: str, request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    body = await request.json()
+    hold = bool(body.get("hold_overnight"))
+    if mode == "live" and hold and body.get("confirm") != HOLD_OVERNIGHT_LIVE_CONFIRM_PHRASE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Type '{HOLD_OVERNIGHT_LIVE_CONFIRM_PHRASE}' to confirm holding a LIVE position past today's close.",
+        )
+
+    symbol = symbol.strip().upper()
+    if not any(p["symbol"] == symbol for p in db.get_open_positions(account_id, mode)):
+        raise HTTPException(status_code=404, detail="No open position for that symbol")
+
+    db.set_hold_overnight(account_id, mode, symbol, hold)
+    db.log_decision(account_id, mode, "dashboard_control", user=user, action="hold_overnight", symbol=symbol, value=hold)
+    return {"ok": True}
+
+
 @app.get("/api/broker_positions")
 def api_broker_positions(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
     """Every real IBKR holding in this mode's account, independent of

@@ -328,8 +328,30 @@ def force_close_all(account_id: int, mode: str, ib, positions: list[dict]):
     if not positions:
         return
 
-    notify(f"[{mode.upper()}] EOD Force Close", f"flattening {len(positions)} positions", "high")
-    for pos in positions:
+    held = [p for p in positions if p.get("hold_overnight")]
+    to_close = [p for p in positions if not p.get("hold_overnight")]
+    for pos in held:
+        # One-shot opt-out (see db.set_hold_overnight) - reset it now so it
+        # only ever skips today's close, never silently forever, and leave
+        # the position's stop and DB tracking completely untouched so it
+        # carries into tomorrow exactly as it stands now.
+        db.set_hold_overnight(account_id, mode, pos["symbol"], False)
+        log_decision(account_id, mode, {"event": "force_close_skipped", "symbol": pos["symbol"], "side": pos.get("side", "long"), "qty": pos["qty"], "reason": "hold_overnight"})
+        notify(
+            f"[{mode.upper()}] Held overnight: {pos['symbol']}",
+            "EOD force-close skipped by request - stop stays active, will force-close normally tomorrow unless held again",
+            "default",
+        )
+
+    if not to_close:
+        return
+
+    notify(
+        f"[{mode.upper()}] EOD Force Close",
+        f"flattening {len(to_close)} position(s)" + (f" ({len(held)} held overnight by request)" if held else ""),
+        "high",
+    )
+    for pos in to_close:
         side = pos.get("side", "long")
         _cancel_stop(ib, pos.get("stop_order_id"))
         closed = _market_close(account_id, mode, ib, pos["symbol"], pos["qty"], side)

@@ -194,8 +194,8 @@
         <div class="card-header">Open Positions</div>
         <div class="card-body p-0">
           <table class="table table-sm mb-0">
-            <thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>Stop</th><th>State</th><th>Unrealized R</th></tr></thead>
-            <tbody id="positions-body"><tr><td colspan="8" class="text-center text-muted">Loading…</td></tr></tbody>
+            <thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>Stop</th><th>State</th><th>Unrealized R</th><th data-bs-toggle="tooltip" title="דלג פעם אחת על הסגירה הכפויה בסוף היום">EOD</th></tr></thead>
+            <tbody id="positions-body"><tr><td colspan="9" class="text-center text-muted">Loading…</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -237,6 +237,7 @@
           Sorted by how many of the 6 entry filters currently pass (best candidates first). The gap scan itself runs on a schedule (9:25-12:55 ET, every 30 min) — "Run scan now" triggers it on demand instead of waiting. Only shows candidates for a direction with an active strategy — a symbol can show a full pass without the bot actually buying it (daily trade/position caps, or the bot being paused).
         </div>
         <div id="prefilter-error" class="text-danger small px-3"></div>
+        <div id="watchlist-active-params" class="row g-2 px-3 pb-2"></div>
         <div class="card-body p-0" style="overflow-x:auto;">
           <table class="table table-sm mb-0">
             <thead><tr>
@@ -651,13 +652,41 @@ function sideBadge(side) {
 async function refreshPositions() {
   const rows = await modeApi("/api/positions");
   const body = document.getElementById("positions-body");
-  if (!rows.length) { body.innerHTML = '<tr><td colspan="8" class="text-center text-muted">No open positions</td></tr>'; return; }
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No open positions</td></tr>'; return; }
   body.innerHTML = rows.map(p => `<tr>
     <td>${p.symbol}</td><td>${sideBadge(p.side)}</td><td>${p.qty}</td><td>${fmtMoney(p.entry_price)}</td>
     <td>${fmtMoney(p.current_price)}</td><td>${fmtMoney(p.stop_price)}</td>
     <td class="small">${p.state}</td><td>${fmtR(p.unrealized_r)}</td>
+    <td>${p.hold_overnight
+      ? `<button class="btn btn-sm btn-outline-secondary hold-overnight-btn" data-symbol="${p.symbol}" data-hold="0">Held ✓</button>`
+      : `<button class="btn btn-sm btn-outline-warning hold-overnight-btn" data-symbol="${p.symbol}" data-hold="1">Hold overnight</button>`}</td>
   </tr>`).join("");
 }
+
+document.getElementById("positions-body").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".hold-overnight-btn");
+  if (!btn) return;
+  const symbol = btn.dataset.symbol;
+  const hold = btn.dataset.hold === "1";
+  const payload = { hold_overnight: hold };
+  if (hold && currentMode === "live") {
+    const typed = prompt(
+      `This skips today's automatic end-of-day close for ${symbol} in your LIVE account and carries it into tomorrow - real overnight gap risk. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
+    );
+    if (typed !== CLOSE_LIVE_CONFIRM_PHRASE) return;
+    payload.confirm = typed;
+  }
+  btn.disabled = true;
+  try {
+    await modeApi(`/api/positions/${symbol}/hold_overnight`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    refreshPositions();
+  } catch (err) {
+    alert("Failed: " + err.message);
+    btn.disabled = false;
+  }
+});
 
 function fmtPnl(v) {
   if (v === null || v === undefined) return "-";
@@ -728,6 +757,37 @@ function filterCell(r, key) {
   return r[key]
     ? '<td class="text-success fw-bold">&check;</td>'
     : '<td class="text-danger">&cross;</td>';
+}
+
+async function refreshActiveStrategyParams() {
+  const list = await api("/api/strategies");
+  const el = document.getElementById("watchlist-active-params");
+  const sides = [["Long", list.find(s => s.is_active && s.direction === "long")],
+                 ["Short", list.find(s => s.is_active && s.direction === "short")]];
+
+  const parts = await Promise.all(sides.map(async ([label, s]) => {
+    if (!s) return `<div class="col-md-6"><span class="text-muted small">${label}: no active strategy</span></div>`;
+    const full = await api(`/api/strategies/${s.id}`);
+    const r = full.rules;
+    const d3Key = Object.keys(r.daily_filters).find(k => k.startsWith("D3_"));
+    const i2 = r.intraday_filters.I2_rsi_above !== undefined
+      ? `RSI(${r.intraday_filters.I2_rsi_period || 14})>${r.intraday_filters.I2_rsi_above}`
+      : "new HOD/LOD";
+    return `<div class="col-md-6">
+      <div class="small mb-1"><strong>${label}: ${full.name}</strong>
+        <span class="badge ${RISK_BADGE_CLASS[full.risk_rating] || "bg-secondary"}">${full.risk_rating}</span></div>
+      <table class="table table-sm mb-0 mono" style="font-size:0.8rem;">
+        <tbody>
+          <tr><td class="text-muted">D3 gap</td><td>${r.daily_filters[d3Key]}%</td><td class="text-muted">I3 RVOL</td><td>x${r.intraday_filters.I3_rvol_min} (${r.intraday_filters.I3_rvol_lookback_days}d)</td></tr>
+          <tr><td class="text-muted">I2</td><td colspan="3">${i2}</td></tr>
+          <tr><td class="text-muted">Risk/trade</td><td>${r.risk.max_risk_per_trade_pct}%</td><td class="text-muted">Max size</td><td>${r.risk.max_position_size_pct_of_portfolio}%</td></tr>
+          <tr><td class="text-muted">Max positions</td><td>${r.risk.max_concurrent_positions}</td><td class="text-muted">Partial @</td><td>${r.exit.partial_profit_trigger_R}R</td></tr>
+          <tr><td class="text-muted">Breakeven @</td><td>${r.exit.breakeven_trigger_R}R</td><td class="text-muted">Entry window</td><td>${r.time_filter.earliest_entry_et}-${r.time_filter.latest_entry_et}</td></tr>
+        </tbody>
+      </table>
+    </div>`;
+  }));
+  el.innerHTML = parts.join("");
 }
 
 async function refreshWatchlist() {
@@ -854,6 +914,7 @@ async function activateStrategy(id, riskRating) {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
     });
     refreshStrategies();
+    refreshActiveStrategyParams();
   } catch (e) {
     alert("Could not activate: " + e.message);
   }
@@ -939,7 +1000,7 @@ document.getElementById("btn-flatten").addEventListener("click", async () => {
 
 function refreshAll() {
   refreshStatus(); refreshAccount(); refreshGatewayStatus(); refreshRiskParams(); refreshPositions(); refreshBrokerPositions();
-  refreshWatchlist(); refreshTrades(); refreshLog(); refreshPerformance(); refreshStrategies(); refreshIbkrCredentials();
+  refreshWatchlist(); refreshActiveStrategyParams(); refreshTrades(); refreshLog(); refreshPerformance(); refreshStrategies(); refreshIbkrCredentials();
   refreshMyGateway();
 }
 
