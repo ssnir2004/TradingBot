@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TradingBot — Trading</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  body { background:#f4f6f8; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .mode-tab { cursor:pointer; }
+  .mode-tab.active-paper { background:#0dcaf0 !important; color:#000 !important; }
+  .mode-tab.active-live { background:#dc3545 !important; color:#fff !important; }
+  th[data-bs-toggle="tooltip"] { cursor: help; text-decoration: underline dotted; text-underline-offset: 3px; }
+</style>
+</head>
+<body>
+{% include "_header.html" %}
+
+<div class="container-fluid px-4 pb-5">
+
+  <div class="row g-3 mb-3">
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span>Account Holdings <span class="badge bg-secondary fw-normal">every real IBKR position, not just the bot's</span></span>
+          <span class="text-muted small">Updated: <span id="broker-positions-updated" class="mono">-</span></span>
+        </div>
+        <div class="small text-muted px-3 pt-2">
+          Reads straight from the IBKR account — includes positions the bot didn't open (e.g. opened manually via TWS/Mobile) and older positions from any day, not just today. Refreshes every 5 minutes alongside the Account summary above. "Close" fires an immediate market order for the amount entered — for profit or loss, regardless of who opened it.
+        </div>
+        <div id="broker-positions-error" class="text-danger small px-3"></div>
+        <div class="card-body p-0">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Current</th><th data-bs-toggle="tooltip" title="שינוי ערך מאז סגירת אתמול">Daily P&amp;L</th><th>Unrealized P&amp;L</th><th data-bs-toggle="tooltip" title="הזמנת Stop אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש">Stop</th><th data-bs-toggle="tooltip" title="הזמנת Limit (Take Profit) אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש">Take Profit</th><th>Close</th></tr></thead>
+            <tbody id="broker-positions-body"><tr><td colspan="9" class="text-center text-muted">Loading…</td></tr></tbody>
+            <tfoot id="broker-positions-totals" class="d-none">
+              <tr class="table-light fw-bold">
+                <td colspan="4" class="text-end">Total</td>
+                <td id="broker-positions-total-daily"></td>
+                <td id="broker-positions-total-unrealized"></td>
+                <td colspan="3"></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="modal" id="chart-modal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="chart-modal-title">Chart</h5>
+        <div class="btn-group btn-group-sm mx-3" id="chart-interval-group" role="group">
+          <button type="button" class="btn btn-outline-secondary chart-interval-btn" data-interval="1m">1m</button>
+          <button type="button" class="btn btn-outline-secondary chart-interval-btn" data-interval="5m">5m</button>
+          <button type="button" class="btn btn-outline-secondary chart-interval-btn" data-interval="15m">15m</button>
+          <button type="button" class="btn btn-outline-secondary chart-interval-btn" data-interval="30m">30m</button>
+          <button type="button" class="btn btn-outline-secondary chart-interval-btn" data-interval="1h">1h</button>
+          <button type="button" class="btn btn-outline-secondary chart-interval-btn" data-interval="1d">1D</button>
+        </div>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div id="chart-container" style="height:600px;"></div>
+        <div class="text-muted small mt-2" id="chart-caption">Refreshes every 30s while open.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="/static/shared.js"></script>
+<script>
+function ordersCell(symbol, orders, orderType, remaining) {
+  const label = orderType === "stop" ? "stop" : "take-profit";
+  const rows = (orders || []).map(o => `
+    <div class="d-flex align-items-center gap-1 mb-1">
+      <span class="small">${fmtMoney(o.price)} &times;${o.qty}</span>
+      <button class="btn btn-sm btn-outline-danger py-0 px-1 broker-order-cancel-btn" data-symbol="${symbol}" data-order-id="${o.order_id}" title="Cancel this ${label}">&times;</button>
+    </div>`).join("");
+  const addBtn = `<button class="btn btn-sm btn-outline-secondary broker-order-add-btn" data-symbol="${symbol}" data-order-type="${orderType}" data-remaining="${remaining}" title="Add another ${label}">+ Add</button>`;
+  return rows + addBtn;
+}
+
+async function refreshBrokerPositions() {
+  const data = await modeApi("/api/broker_positions");
+  document.getElementById("broker-positions-updated").textContent = data.updated_at || "not refreshed yet";
+  const rows = data.positions || [];
+  const body = document.getElementById("broker-positions-body");
+  const totals = document.getElementById("broker-positions-totals");
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No holdings</td></tr>';
+    totals.classList.add("d-none");
+    return;
+  }
+  body.innerHTML = rows.map(p => {
+    const full = Math.abs(p.qty);
+    // Stop and take-profit allocate independently (a full stop plus a
+    // full take-profit on the same shares is the normal bracket pattern),
+    // so each gets its own "not yet covered" default for the Add prompt.
+    const stopRemaining = Math.max(0, full - (p.stop_orders || []).reduce((s, o) => s + o.qty, 0));
+    const tpRemaining = Math.max(0, full - (p.take_profit_orders || []).reduce((s, o) => s + o.qty, 0));
+    return `<tr>
+      <td>${symbolLink(p.symbol)}</td><td>${p.qty}</td><td>${fmtMoney(p.avg_cost)}</td>
+      <td>${fmtMoney(p.current_price)}</td><td>${fmtPnl(p.daily_pnl)}</td><td>${fmtPnl(p.unrealized_pnl)}</td>
+      <td>${ordersCell(p.symbol, p.stop_orders, "stop", stopRemaining)}</td>
+      <td>${ordersCell(p.symbol, p.take_profit_orders, "take_profit", tpRemaining)}</td>
+      <td>
+        <div class="input-group input-group-sm" style="width:170px;">
+          <input type="number" min="1" max="${full}" value="${full}" class="form-control form-control-sm broker-close-qty" data-symbol="${p.symbol}">
+          <button class="btn btn-outline-danger btn-sm broker-close-btn" data-symbol="${p.symbol}">Close</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join("");
+
+  const sum = (key) => rows.reduce((s, p) => s + (p[key] !== null && p[key] !== undefined ? p[key] : 0), 0);
+  const hasAny = (key) => rows.some(p => p[key] !== null && p[key] !== undefined);
+  document.getElementById("broker-positions-total-daily").innerHTML = hasAny("daily_pnl") ? fmtPnl(sum("daily_pnl")) : "-";
+  document.getElementById("broker-positions-total-unrealized").innerHTML = hasAny("unrealized_pnl") ? fmtPnl(sum("unrealized_pnl")) : "-";
+  totals.classList.remove("d-none");
+}
+
+document.getElementById("broker-positions-body").addEventListener("click", async (e) => {
+  const addBtn = e.target.closest(".broker-order-add-btn");
+  if (addBtn) {
+    const symbol = addBtn.dataset.symbol;
+    const orderType = addBtn.dataset.orderType;
+    const remaining = addBtn.dataset.remaining;
+    const label = orderType === "stop" ? "stop" : "take-profit";
+
+    const priceTyped = prompt(`${label[0].toUpperCase()}${label.slice(1)} price for ${symbol}:`);
+    if (priceTyped === null) return;
+    const price = Number(priceTyped);
+    if (!Number.isFinite(price) || price <= 0) { alert("Enter a valid positive price."); return; }
+
+    const qtyTyped = prompt(`Quantity for this ${label} (${remaining} share(s) not yet covered by an existing stop/take-profit order):`, remaining);
+    if (qtyTyped === null) return;
+    const qty = parseInt(qtyTyped, 10);
+    if (!Number.isFinite(qty) || qty <= 0) { alert("Enter a valid positive quantity."); return; }
+
+    const payload = { order_type: orderType, price, qty };
+    if (currentMode === "live") {
+      const confirmTyped = prompt(
+        `This adds a new ${label} order for ${qty} share(s) @ $${price.toFixed(2)} for ${symbol} in your LIVE account. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
+      );
+      if (confirmTyped !== CLOSE_LIVE_CONFIRM_PHRASE) return;
+      payload.confirm = confirmTyped;
+    }
+    addBtn.disabled = true;
+    try {
+      await modeApi(`/api/broker_positions/${symbol}/order`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      });
+      refreshBrokerPositions();
+    } catch (err) {
+      alert("Failed: " + err.message);
+      addBtn.disabled = false;
+    }
+    return;
+  }
+
+  const cancelBtn = e.target.closest(".broker-order-cancel-btn");
+  if (cancelBtn) {
+    const symbol = cancelBtn.dataset.symbol;
+    const orderId = cancelBtn.dataset.orderId;
+    if (!confirm(`Cancel order ${orderId} for ${symbol}?`)) return;
+    let url = `/api/broker_positions/${symbol}/order/${orderId}`;
+    if (currentMode === "live") {
+      const confirmTyped = prompt(`Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm cancelling this LIVE order:`);
+      if (confirmTyped !== CLOSE_LIVE_CONFIRM_PHRASE) return;
+      url += `?confirm=${encodeURIComponent(confirmTyped)}`;
+    }
+    cancelBtn.disabled = true;
+    try {
+      await modeApi(url, { method: "DELETE" });
+      refreshBrokerPositions();
+    } catch (err) {
+      alert("Failed: " + err.message);
+      cancelBtn.disabled = false;
+    }
+    return;
+  }
+
+  const btn = e.target.closest(".broker-close-btn");
+  if (!btn) return;
+  const symbol = btn.dataset.symbol;
+  const qtyInput = document.querySelector(`.broker-close-qty[data-symbol="${symbol}"]`);
+  const qty = parseInt(qtyInput.value, 10);
+  const errorEl = document.getElementById("broker-positions-error");
+  errorEl.textContent = "";
+
+  const payload = { symbol, qty };
+  if (currentMode === "live") {
+    const typed = prompt(
+      `This immediately market-closes ${qty} share(s) of ${symbol} in your LIVE account — for profit or loss, ` +
+      `regardless of who opened it or when. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
+    );
+    if (typed !== CLOSE_LIVE_CONFIRM_PHRASE) { errorEl.textContent = "Not confirmed — nothing was closed."; return; }
+    payload.confirm = typed;
+  } else if (!confirm(`Market-close ${qty} share(s) of ${symbol} (PAPER)?`)) {
+    return;
+  }
+
+  btn.disabled = true;
+  try {
+    await modeApi("/api/broker_positions/close", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    refreshBrokerPositions();
+  } catch (err) {
+    errorEl.textContent = "Close failed: " + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+function refreshAll() {
+  refreshStatus(); refreshAccount(); refreshGatewayStatus(); refreshBrokerPositions(); refreshIbkrCredentials(); refreshMyGateway();
+}
+</script>
+</body>
+</html>

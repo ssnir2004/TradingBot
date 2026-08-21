@@ -13,6 +13,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import cycle
@@ -25,6 +26,7 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
 
 app = FastAPI(title="TradingBot Dashboard")
+app.mount("/static", StaticFiles(directory=str(Path(__file__).resolve().parent / "static")), name="static")
 
 # Typed into the confirmation modal before any LIVE risk-sizing value can be
 # changed from the dashboard — a deliberate speed bump since these numbers
@@ -133,7 +135,25 @@ def index(request: Request):
         return RedirectResponse("/setup", status_code=303)
     if not read_session(request):
         return RedirectResponse("/login", status_code=303)
-    return templates.TemplateResponse(request, "index.html", {})
+    return RedirectResponse("/bot", status_code=303)
+
+
+@app.get("/bot", response_class=HTMLResponse)
+def bot_page(request: Request):
+    if not db.any_users_exist():
+        return RedirectResponse("/setup", status_code=303)
+    if not read_session(request):
+        return RedirectResponse("/login", status_code=303)
+    return templates.TemplateResponse(request, "bot.html", {"active_page": "bot"})
+
+
+@app.get("/trading", response_class=HTMLResponse)
+def trading_page(request: Request):
+    if not db.any_users_exist():
+        return RedirectResponse("/setup", status_code=303)
+    if not read_session(request):
+        return RedirectResponse("/login", status_code=303)
+    return templates.TemplateResponse(request, "trading.html", {"active_page": "trading"})
 
 
 @app.get("/guide", response_class=HTMLResponse)

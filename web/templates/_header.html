@@ -1,0 +1,126 @@
+<nav class="navbar navbar-dark bg-dark mb-4">
+  <div class="container-fluid">
+    <span class="navbar-brand mb-0 h1">TradingBot Dashboard</span>
+    <div class="d-flex gap-2">
+      <a href="/bot" class="btn btn-sm {{ 'btn-light' if active_page == 'bot' else 'btn-outline-light' }}">Bot</a>
+      <a href="/trading" class="btn btn-sm {{ 'btn-light' if active_page == 'trading' else 'btn-outline-light' }}">Trading</a>
+      <a href="/guide" class="btn btn-outline-light btn-sm">מדריך למשתמש</a>
+      <form method="post" action="/logout" class="d-flex">
+        <button class="btn btn-outline-light btn-sm" type="submit">Log out</button>
+      </form>
+    </div>
+  </div>
+</nav>
+
+<div class="container-fluid px-4">
+
+  <div class="row g-3 mb-3">
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span>My IBKR Login <span class="badge bg-secondary fw-normal">not tied to Paper/Live below — one login covers both</span></span>
+          <span id="ibkr-creds-badge" class="badge bg-secondary">...</span>
+        </div>
+        <div class="card-body">
+          <div class="small text-muted mb-2">
+            Your own IBKR username/password — only you enter it, no one else (including the admin) sees it. Stored encrypted. IBKR ties every paper account to its parent live account under the same login, so one entry here covers both tabs above.
+          </div>
+          <div class="row g-2 align-items-end">
+            <div class="col-6 col-md-4">
+              <label class="form-label small">IBKR Username</label>
+              <input type="text" id="ibkr-username" class="form-control form-control-sm" autocomplete="off">
+            </div>
+            <div class="col-6 col-md-4">
+              <label class="form-label small">IBKR Password</label>
+              <input type="password" id="ibkr-password" class="form-control form-control-sm" autocomplete="new-password" placeholder="••••••••">
+            </div>
+            <div class="col-6 col-md-2">
+              <button id="btn-save-ibkr-creds" class="btn btn-primary btn-sm w-100">Save</button>
+            </div>
+          </div>
+          <div id="ibkr-creds-error" class="text-danger small mt-2"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3 mb-3 d-none" id="my-gateway-row">
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span>My Gateway</span>
+          <span id="my-gw-badge" class="badge bg-secondary">...</span>
+        </div>
+        <div class="card-body">
+          <div class="small text-muted mb-2">
+            Starts your own IB Gateway processes (paper + live) using the IBKR login saved above. After clicking Connect, approve the 2FA push on your own phone — can take a minute. Once connected, click "Resume Trading" to actually let the bot trade on your account.
+          </div>
+          <div id="my-gw-detail" class="small mono text-muted mb-2">-</div>
+          <div class="d-flex gap-2">
+            <button id="btn-my-gw-connect" class="btn btn-primary btn-sm">Connect</button>
+            <button id="btn-my-gw-resume" class="btn btn-success btn-sm">Resume Trading</button>
+            <button id="btn-my-gw-disconnect" class="btn btn-outline-danger btn-sm">Disconnect</button>
+          </div>
+          <div id="my-gw-error" class="text-danger small mt-2"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Paper/Live tabs: both engines always run; this only selects which one's data you're viewing/controlling. -->
+  <div class="d-flex gap-2 mb-3">
+    <button id="tab-paper" class="btn btn-outline-info mode-tab fw-bold">PAPER</button>
+    <button id="tab-live" class="btn btn-outline-danger mode-tab fw-bold">LIVE — real money</button>
+  </div>
+
+  <div class="d-flex flex-wrap align-items-center justify-content-between mb-4 p-3 bg-white rounded shadow-sm gap-3">
+    <div class="d-flex align-items-center gap-3">
+      <span id="status-badge" class="badge bg-secondary fs-6">...</span>
+      <span class="text-muted small">Last cycle: <span id="last-cycle" class="mono">-</span></span>
+      <span class="text-muted small">Next cycle in: <span id="next-cycle-countdown" class="mono">-</span></span>
+    </div>
+    <div class="d-flex gap-2">
+      <button id="btn-enable" class="btn btn-success btn-sm">Enable trading</button>
+      <button id="btn-disable" class="btn btn-warning btn-sm">Pause new entries</button>
+      <button id="btn-flatten" class="btn btn-danger btn-sm">Flatten all now</button>
+    </div>
+  </div>
+  <div class="small text-muted mb-4">
+    Controls above apply only to the selected tab (<span id="mode-hint" class="fw-bold">PAPER</span>) — paper and live run independently.
+    "Pause new entries" stops that engine from opening new positions but keeps managing stops/trailing on anything already open.
+    "Flatten all now" is the emergency button — it market-sells every open position in this mode immediately, on the next ~20s check.
+  </div>
+
+  <div class="row g-3 mb-3">
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span>Gateway Connection</span>
+          <span id="gw-status-badge" class="badge bg-secondary">...</span>
+        </div>
+        <div class="card-body">
+          <div class="small text-muted mb-2">
+            Temporarily disconnects this mode's IB Gateway + trading engine so you can log into TWS or IBKR Mobile with the same account, without SSH. Blocked while any position is open in this mode — see the guide.
+          </div>
+          <div id="gw-detail" class="small mono text-muted mb-2">-</div>
+          <div class="d-flex gap-2">
+            <button id="btn-gw-disconnect" class="btn btn-outline-danger btn-sm d-none">Disconnect</button>
+            <button id="btn-gw-reconnect" class="btn btn-outline-primary btn-sm d-none">Reconnect Gateway</button>
+            <button id="btn-gw-resume" class="btn btn-outline-success btn-sm d-none">Resume Trading</button>
+          </div>
+          <div id="gw-error" class="text-danger small mt-2"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3 mb-3">
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header">Account (IBKR)</div>
+        <div class="card-body" id="account-summary">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+</div>
