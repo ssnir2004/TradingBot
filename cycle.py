@@ -286,21 +286,63 @@ def _current_price(symbol: str) -> float | None:
     return float(bars["Close"].iloc[-1])
 
 
-def _compute_rsi(closes: pd.Series, period: int) -> float | None:
+def _compute_rsi_series(closes: pd.Series, period: int) -> pd.Series:
     """Wilder's RSI (the standard definition — smoothed via an EWMA with
-    alpha=1/period) over `closes`, evaluated as of the most recent bar.
-    None if there isn't enough history yet to have a meaningful value."""
-    if len(closes) < period + 1:
-        return None
+    alpha=1/period) at every bar of `closes`, not just the latest — NaN
+    wherever there isn't yet `period` bars of history. _compute_rsi and the
+    dashboard's chart RSI line both build on this so they always agree."""
     delta = closes.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean().iloc[-1]
-    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean().iloc[-1]
-    if avg_loss == 0:
-        return 100.0
+    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
     rs = avg_gain / avg_loss
-    return float(100 - (100 / (1 + rs)))
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.mask(avg_loss == 0, 100.0)
+
+
+def _compute_rsi(closes: pd.Series, period: int) -> float | None:
+    """RSI as of the most recent bar of `closes` — None if there isn't
+    enough history yet to have a meaningful value."""
+    if len(closes) < period + 1:
+        return None
+    value = _compute_rsi_series(closes, period).iloc[-1]
+    return float(value) if pd.notna(value) else None
+
+
+def get_chart_rsi(bars: pd.DataFrame, period: int = 14) -> list[dict]:
+    """RSI(period) at every bar of `bars` (as returned by get_chart_bars),
+    for the dashboard's chart modal — same _compute_rsi_series math used
+    for the Watchlist table's RSI column, so the two always agree. Bars
+    without enough history yet for a value are omitted rather than sent
+    as null, so the chart's RSI line only starts once it's meaningful."""
+    series = _compute_rsi_series(bars["Close"], period)
+    return [
+        {"time": int(ts.timestamp()), "value": round(float(v), 2)}
+        for ts, v in series.items() if pd.notna(v)
+    ]
+
+
+def get_chart_volume(bars: pd.DataFrame) -> list[dict]:
+    """Per-bar volume for the dashboard's chart modal, same bars as
+    get_chart_bars/get_chart_rsi."""
+    return [{"time": int(ts.timestamp()), "value": float(v)} for ts, v in bars["Volume"].items()]
+
+
+def get_sma(symbol: str, period: int) -> float | None:
+    """The `period`-day SMA of daily closes as of yesterday's close —
+    same computation _evaluate_entry_filters uses for D2 (SMA200 on the
+    long-side default/aggressive/RSI presets) and the overextension check
+    on Short Parabolic Reversal (SMA50), exposed for the dashboard's chart
+    modal to show the actual threshold a strategy's D2 checks against.
+    Excludes today's still-forming bar, matching D2's own convention."""
+    try:
+        daily = yf.Ticker(symbol.replace(" ", "-")).history(period="260d" if period >= 200 else "80d", interval="1d")
+        if len(daily) < period + 1:
+            return None
+        return float(daily["Close"].iloc[-(period + 1):-1].mean())
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------- Step 4 ---

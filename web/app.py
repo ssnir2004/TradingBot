@@ -416,15 +416,17 @@ async def api_modify_stop(symbol: str, request: Request, mode: str = Depends(req
 
 @app.get("/api/candles")
 def api_candles(symbol: str, interval: str = "5m", mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
-    """Candles for the dashboard's chart modal at the requested interval
-    (one of cycle.CHART_INTERVAL_PERIODS) - pure yfinance, no IBKR
-    connection needed (mode/account_id are only here so the endpoint follows
-    the same auth/scoping shape as everything else)."""
+    """Candles (plus volume, RSI, and the SMA50/SMA200 reference levels D2
+    actually checks against) for the dashboard's chart modal, at the
+    requested interval (one of cycle.CHART_INTERVAL_PERIODS) - pure
+    yfinance, no IBKR connection needed (mode/account_id are only here so
+    the endpoint follows the same auth/scoping shape as everything else)."""
     if interval not in cycle.CHART_INTERVAL_PERIODS:
         raise HTTPException(status_code=400, detail=f"interval must be one of {sorted(cycle.CHART_INTERVAL_PERIODS)}")
-    bars = cycle.get_chart_bars(symbol.strip().upper(), interval)
+    symbol = symbol.strip().upper()
+    bars = cycle.get_chart_bars(symbol, interval)
     if bars is None:
-        return {"candles": []}
+        return {"candles": [], "volume": [], "rsi": [], "sma50": None, "sma200": None}
     candles = [
         {
             "time": int(ts.timestamp()),
@@ -435,7 +437,13 @@ def api_candles(symbol: str, interval: str = "5m", mode: str = Depends(require_m
         }
         for ts, row in bars.iterrows()
     ]
-    return {"candles": candles}
+    return {
+        "candles": candles,
+        "volume": cycle.get_chart_volume(bars),
+        "rsi": cycle.get_chart_rsi(bars),
+        "sma50": cycle.get_sma(symbol, 50),
+        "sma200": cycle.get_sma(symbol, 200),
+    }
 
 
 # Opting a LIVE position out of today's automatic EOD close is real overnight
