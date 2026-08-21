@@ -218,6 +218,14 @@
           <table class="table table-sm mb-0">
             <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Current</th><th data-bs-toggle="tooltip" title="שינוי ערך מאז סגירת אתמול">Daily P&amp;L</th><th>Unrealized P&amp;L</th><th data-bs-toggle="tooltip" title="הזמנת Stop אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש">Stop</th><th data-bs-toggle="tooltip" title="הזמנת Limit (Take Profit) אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש">Take Profit</th><th>Close</th></tr></thead>
             <tbody id="broker-positions-body"><tr><td colspan="9" class="text-center text-muted">Loading…</td></tr></tbody>
+            <tfoot id="broker-positions-totals" class="d-none">
+              <tr class="table-light fw-bold">
+                <td colspan="4" class="text-end">Total</td>
+                <td id="broker-positions-total-daily"></td>
+                <td id="broker-positions-total-unrealized"></td>
+                <td colspan="3"></td>
+              </tr>
+            </tfoot>
           </table>
         </div>
       </div>
@@ -852,7 +860,12 @@ async function refreshBrokerPositions() {
   document.getElementById("broker-positions-updated").textContent = data.updated_at || "not refreshed yet";
   const rows = data.positions || [];
   const body = document.getElementById("broker-positions-body");
-  if (!rows.length) { body.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No holdings</td></tr>'; return; }
+  const totals = document.getElementById("broker-positions-totals");
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No holdings</td></tr>';
+    totals.classList.add("d-none");
+    return;
+  }
   body.innerHTML = rows.map(p => {
     const full = Math.abs(p.qty);
     const allocated = (p.stop_orders || []).reduce((s, o) => s + o.qty, 0) + (p.take_profit_orders || []).reduce((s, o) => s + o.qty, 0);
@@ -870,6 +883,12 @@ async function refreshBrokerPositions() {
       </td>
     </tr>`;
   }).join("");
+
+  const sum = (key) => rows.reduce((s, p) => s + (p[key] !== null && p[key] !== undefined ? p[key] : 0), 0);
+  const hasAny = (key) => rows.some(p => p[key] !== null && p[key] !== undefined);
+  document.getElementById("broker-positions-total-daily").innerHTML = hasAny("daily_pnl") ? fmtPnl(sum("daily_pnl")) : "-";
+  document.getElementById("broker-positions-total-unrealized").innerHTML = hasAny("unrealized_pnl") ? fmtPnl(sum("unrealized_pnl")) : "-";
+  totals.classList.remove("d-none");
 }
 
 document.getElementById("broker-positions-body").addEventListener("click", async (e) => {
