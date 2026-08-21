@@ -544,14 +544,22 @@ async def api_add_broker_order(symbol: str, request: Request, mode: str = Depend
     if pos is None:
         raise HTTPException(status_code=404, detail="No open position for that symbol")
     held_qty = abs(pos["qty"])
+    # A stop and a take-profit for the SAME shares is the normal bracket
+    # pattern (protect the whole position both ways at once — if one
+    # fills, the other is simply left to cancel manually since these
+    # aren't OCO-linked), so only orders of the SAME type compete for the
+    # share count: two stops together can't cover more than what's held,
+    # but a full stop plus a full take-profit both can.
+    ibkr_order_type = "STP" if order_type == "stop" else "LMT"
     allocated = sum(
         o["qty"] for o in db.get_broker_orders(account_id, mode)["orders"]
-        if o["symbol"] == symbol and o["order_type"] in ("STP", "LMT")
+        if o["symbol"] == symbol and o["order_type"] == ibkr_order_type
     )
     if allocated + qty > held_qty:
+        label = "stop" if order_type == "stop" else "take-profit"
         raise HTTPException(
             status_code=400,
-            detail=f"{allocated} share(s) already allocated across existing stop/take-profit orders for {symbol} — "
+            detail=f"{allocated} share(s) already allocated across existing {label} orders for {symbol} — "
                    f"adding {qty} more would exceed the {held_qty} actually held.",
         )
 

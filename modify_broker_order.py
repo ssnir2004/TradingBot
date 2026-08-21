@@ -83,24 +83,31 @@ def main():
             sys.exit(1)
         held_qty = int(abs(held.position))
 
-        # A stop and a take-profit for the same shares are both exit-side
-        # orders - together they must not cover more shares than are
-        # actually held, or a fill on one leg leaves the other trying to
-        # sell/buy-to-cover shares that no longer exist.
-        ib.reqAllOpenOrders()
-        ib.sleep(1)
-        allocated = sum(
-            int(t.order.totalQuantity) for t in ib.openTrades()
-            if t.contract.symbol == symbol and t.order.orderType in ("STP", "LMT")
-        )
-        if allocated + args.qty > held_qty:
-            print(f"[{args.mode}] {symbol}: {allocated} share(s) already allocated across existing "
-                  f"stop/take-profit orders - adding {args.qty} more would exceed the {held_qty} actually held")
-            sys.exit(1)
-
         # A stop/take-profit protects/exits a long with a SELL, a short
         # with a BUY - same convention as cycle._place_stop.
         action = "SELL" if held.position > 0 else "BUY"
+
+        # A full stop plus a full take-profit on the same shares is the
+        # normal bracket pattern (protect the position both ways at once -
+        # these aren't OCO-linked, so if one fills the other is simply left
+        # to cancel manually), so only orders of the SAME type going the
+        # SAME closing direction compete for the share count: two stops
+        # together can't cover more than what's held, but a stop and a
+        # take-profit both can. An order going the other way (e.g. a
+        # separate limit buy unrelated to exiting this position) doesn't
+        # count against this at all.
+        ib.reqAllOpenOrders()
+        ib.sleep(1)
+        target_type = "STP" if args.order_type == "stop" else "LMT"
+        allocated = sum(
+            int(t.order.totalQuantity) for t in ib.openTrades()
+            if t.contract.symbol == symbol and t.order.orderType == target_type and t.order.action == action
+        )
+        if allocated + args.qty > held_qty:
+            print(f"[{args.mode}] {symbol}: {allocated} share(s) already allocated across existing "
+                  f"{args.order_type} orders - adding {args.qty} more would exceed the {held_qty} actually held")
+            sys.exit(1)
+
         contract = Stock(symbol, "SMART", "USD")
         (qualified,) = ib.qualifyContracts(contract)
         order = (

@@ -868,13 +868,16 @@ async function refreshBrokerPositions() {
   }
   body.innerHTML = rows.map(p => {
     const full = Math.abs(p.qty);
-    const allocated = (p.stop_orders || []).reduce((s, o) => s + o.qty, 0) + (p.take_profit_orders || []).reduce((s, o) => s + o.qty, 0);
-    const remaining = Math.max(0, full - allocated);
+    // Stop and take-profit allocate independently (a full stop plus a
+    // full take-profit on the same shares is the normal bracket pattern),
+    // so each gets its own "not yet covered" default for the Add prompt.
+    const stopRemaining = Math.max(0, full - (p.stop_orders || []).reduce((s, o) => s + o.qty, 0));
+    const tpRemaining = Math.max(0, full - (p.take_profit_orders || []).reduce((s, o) => s + o.qty, 0));
     return `<tr>
       <td>${symbolLink(p.symbol)}</td><td>${p.qty}</td><td>${fmtMoney(p.avg_cost)}</td>
       <td>${fmtMoney(p.current_price)}</td><td>${fmtPnl(p.daily_pnl)}</td><td>${fmtPnl(p.unrealized_pnl)}</td>
-      <td>${ordersCell(p.symbol, p.stop_orders, "stop", remaining)}</td>
-      <td>${ordersCell(p.symbol, p.take_profit_orders, "take_profit", remaining)}</td>
+      <td>${ordersCell(p.symbol, p.stop_orders, "stop", stopRemaining)}</td>
+      <td>${ordersCell(p.symbol, p.take_profit_orders, "take_profit", tpRemaining)}</td>
       <td>
         <div class="input-group input-group-sm" style="width:170px;">
           <input type="number" min="1" max="${full}" value="${full}" class="form-control form-control-sm broker-close-qty" data-symbol="${p.symbol}">
