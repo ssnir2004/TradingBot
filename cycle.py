@@ -45,7 +45,7 @@ from src.notify import notify
 
 PROJECT_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
-SUBPROCESS_TIMEOUT = 30
+SUBPROCESS_TIMEOUT = 40  # margin above ibkr_client.SETTLED_STATUSES_TIMEOUT (20s) plus connect/qualify/disconnect overhead
 
 TOO_EARLY_END = dt_time(10, 0)
 MANAGE_ONLY_MORNING_END = dt_time(10, 5)
@@ -164,6 +164,22 @@ def _place_stop(ib, symbol: str, quantity: int, stop_price: float, side: str) ->
     trade = ib.placeOrder(contract, order)
     ib.sleep(1)
     return trade.order.orderId
+
+
+def _broker_position(ib, symbol: str) -> dict | None:
+    """This symbol's real signed quantity/avg-cost at the broker right now,
+    independent of anything this bot's own DB thinks - None if flat.
+    trade.py only waits ibkr_client.SETTLED_STATUSES_TIMEOUT seconds for an
+    order to reach a final status before giving up and reporting failure —
+    but the order itself isn't cancelled just because our client stopped
+    watching it, so a market order can still fill (or a close can still
+    go through) after that deadline. This is the ground truth to check
+    before assuming a "not filled" subprocess result means nothing
+    happened at the broker."""
+    for p in ib.positions():
+        if p.contract.symbol == symbol and p.position != 0:
+            return {"qty": p.position, "avg_cost": float(p.avgCost)}
+    return None
 
 
 def _market_close(account_id: int, mode: str, ib, symbol: str, quantity: int, side: str) -> bool:
@@ -316,9 +332,28 @@ def force_close_all(account_id: int, mode: str, ib, positions: list[dict]):
     for pos in positions:
         side = pos.get("side", "long")
         _cancel_stop(ib, pos.get("stop_order_id"))
-        _market_close(account_id, mode, ib, pos["symbol"], pos["qty"], side)
-        log_decision(account_id, mode, {"event": "force_close", "symbol": pos["symbol"], "side": side, "qty": pos["qty"]})
-        db.remove_position(account_id, mode, pos["symbol"])
+        closed = _market_close(account_id, mode, ib, pos["symbol"], pos["qty"], side)
+        if not closed:
+            # Same delayed-fill race as entry_scan, on the way out: trade.py
+            # may have given up waiting before the close actually confirmed.
+            # Check the broker directly before trusting "not filled".
+            closed = _broker_position(ib, pos["symbol"]) is None
+        log_decision(account_id, mode, {"event": "force_close", "symbol": pos["symbol"], "side": side, "qty": pos["qty"], "confirmed": closed})
+        if closed:
+            db.remove_position(account_id, mode, pos["symbol"])
+        else:
+            # Genuinely still open, and its stop was just cancelled above to
+            # make way for the close attempt — re-arm it immediately so the
+            # position isn't left unprotected, keep it tracked so the next
+            # cycle retries closing it, and alert loudly since force-close
+            # failing outright needs a human to look.
+            pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], pos["stop_price"], side)
+            db.upsert_position(account_id, mode, pos)
+            notify(
+                f"[{mode.upper()}] FORCE CLOSE FAILED: {pos['symbol']}",
+                f"still holding {pos['qty']} after EOD close attempt - stop re-armed at ${pos['stop_price']:.2f}, will retry next cycle",
+                "high",
+            )
 
 
 # ---------------------------------------------------------------- Step 8 ---
@@ -486,15 +521,32 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
         )
         log_decision(account_id, mode, {"event": "entry_attempt", "symbol": ticker, "side": side, "qty": size, "price": price, "stdout": proc.stdout})
         if proc.returncode != 0:
-            continue
+            # trade.py reported "not filled", but that only means the order
+            # hadn't reached a final status within its own polling window —
+            # check the broker directly before assuming nothing happened
+            # (a delayed-but-real fill here would otherwise leave a real
+            # position completely untracked, with no stop and invisible to
+            # the EOD force-close).
+            broker_pos = _broker_position(ib, ticker)
+            if broker_pos is None:
+                continue
+            fill_qty, fill_price = abs(broker_pos["qty"]), broker_pos["avg_cost"]
+            log_decision(account_id, mode, {"event": "delayed_fill_recovered", "symbol": ticker, "side": side, "qty": fill_qty, "price": fill_price})
+            notify(
+                f"[{mode.upper()}] Delayed fill recovered: {ticker}",
+                f"order timed out waiting for a fill confirmation, but the broker shows {fill_qty} shares @ ${fill_price:.2f} - now tracked with a stop",
+                "high",
+            )
+        else:
+            fill_qty, fill_price = size, price
 
-        stop_order_id = _place_stop(ib, ticker, size, initial_stop, side)
+        stop_order_id = _place_stop(ib, ticker, fill_qty, initial_stop, side)
         new_position = {
             "symbol": ticker,
             "side": side,
-            "entry_price": price,
+            "entry_price": fill_price,
             "entry_time_iso": datetime.now(ET).isoformat(timespec="seconds"),
-            "qty": size,
+            "qty": fill_qty,
             "initial_stop": initial_stop,
             "stop_price": initial_stop,
             "stop_order_id": stop_order_id,
@@ -505,8 +557,8 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
         positions.append(new_position)
         side_positions.append(new_position)
         held_symbols.add(ticker)
-        notify(f"[{mode.upper()}] {action} {ticker}", f"@ ${price:.2f}, stop ${initial_stop:.2f}, qty {size}", "default")
-        log_decision(account_id, mode, {"event": "entry", "symbol": ticker, "side": side, "price": price, "stop": initial_stop, "qty": size})
+        notify(f"[{mode.upper()}] {action} {ticker}", f"@ ${fill_price:.2f}, stop ${initial_stop:.2f}, qty {fill_qty}", "default")
+        log_decision(account_id, mode, {"event": "entry", "symbol": ticker, "side": side, "price": fill_price, "stop": initial_stop, "qty": fill_qty})
 
     return positions
 

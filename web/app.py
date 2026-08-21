@@ -41,7 +41,7 @@ DISCONNECT_LIVE_CONFIRM_PHRASE = "ok"
 # account holding, independent of anything the bot itself is tracking.
 CLOSE_LIVE_CONFIRM_PHRASE = "ok"
 
-SUBPROCESS_TIMEOUT = 30
+SUBPROCESS_TIMEOUT = 40  # margin above ibkr_client.SETTLED_STATUSES_TIMEOUT (20s) plus connect/qualify/disconnect overhead
 
 
 def _env() -> dict:

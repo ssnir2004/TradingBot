@@ -3,7 +3,7 @@ import time
 
 from ib_async import IB, MarketOrder, Stock, Trade
 
-SETTLED_STATUSES_TIMEOUT = 10
+SETTLED_STATUSES_TIMEOUT = 20
 
 
 class IBKRClient:

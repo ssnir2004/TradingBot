@@ -78,13 +78,13 @@ def main():
         proc = subprocess.run(
             [sys.executable, str(PROJECT_DIR / "trade.py"), "--mode", args.mode,
              "--account-id", str(account_id), "--symbol", symbol, "--side", "BUY", "--size", str(quantity)],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=40,
         )
         print(proc.stdout)
         if proc.stderr:
             print(proc.stderr, file=sys.stderr)
     except subprocess.TimeoutExpired:
-        log("trade.py timed out after 30s")
+        log("trade.py timed out after 40s")
         sys.exit(1)
 
     rows = db.get_trades(account_id, args.mode, limit=1)
