@@ -20,10 +20,18 @@ explicit `side` argument before a position exists yet).
 
 Time gate (America/New_York):
     Sat/Sun                        -> "weekend"   (exit <1s)
-    before 10:00 or after 16:00    -> "too_early" / "closed" (exit <1s)
-    10:00-10:05 or 15:30-15:51     -> "manage_only" (no new entries)
+    before 9:35 or after 16:00     -> "too_early" / "closed" (exit <1s)
+    15:30-15:51                    -> "manage_only" (no new entries)
     15:51-16:00                    -> "force_close"
-    10:05-15:30                    -> "ok" (full cycle: manage + scan)
+    9:35-15:30                     -> "ok" (full cycle: manage + scan)
+
+9:35 is the earliest ANY strategy is allowed to enter (5 min after the
+actual 9:30 open) - it's a floor, not a per-strategy setting. Each side's
+own active strategy still gates itself further via its rules JSON's
+time_filter (earliest_entry_et/latest_entry_et), checked inside
+entry_scan — so a strategy configured for the default 10:05 start still
+only enters from 10:05, even though the cycle itself is already running
+"ok" from 9:35 onward for whichever other strategy wants to start earlier.
 """
 import argparse
 import math
@@ -47,8 +55,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
 SUBPROCESS_TIMEOUT = 40  # margin above ibkr_client.SETTLED_STATUSES_TIMEOUT (20s) plus connect/qualify/disconnect overhead
 
-TOO_EARLY_END = dt_time(10, 0)
-MANAGE_ONLY_MORNING_END = dt_time(10, 5)
+TOO_EARLY_END = dt_time(9, 35)  # earliest any strategy's own time_filter may request entries from - see entry_scan
 MANAGE_ONLY_AFTERNOON_START = dt_time(15, 30)
 FORCE_CLOSE_START = dt_time(15, 51)
 CLOSED_START = dt_time(16, 0)
@@ -78,7 +85,7 @@ def time_gate(now_et: datetime | None = None) -> str:
         return "closed"
     if t >= FORCE_CLOSE_START:
         return "force_close"
-    if t < MANAGE_ONLY_MORNING_END or t >= MANAGE_ONLY_AFTERNOON_START:
+    if t >= MANAGE_ONLY_AFTERNOON_START:
         return "manage_only"
     return "ok"
 
@@ -497,6 +504,31 @@ def _evaluate_entry_filters(account_id: int, mode: str, ticker: str, rules: dict
         return {"pass": False, "side": side, "error": str(exc)}
 
 
+def _within_entry_window(rules: dict, now_et: datetime | None = None) -> bool:
+    """Whether this strategy's own time_filter.earliest_entry_et/
+    latest_entry_et currently allow a new entry — the per-strategy floor
+    under the global one (cycle.TOO_EARLY_END): a strategy configured for
+    the default 10:05 start stays gated to 10:05 even once the cycle
+    itself is already running "ok" earlier for another strategy that
+    asked for an earlier window. Missing/unparseable bounds are treated as
+    no constraint on that side, so an older strategy row without this
+    field just keeps behaving as if the whole "ok" window applies to it."""
+    now_et = now_et or datetime.now(ET)
+    t = now_et.time()
+    tf = rules.get("time_filter", {})
+    for key, cmp in (("earliest_entry_et", lambda bound: t < bound), ("latest_entry_et", lambda bound: t >= bound)):
+        raw = tf.get(key)
+        if not raw:
+            continue
+        try:
+            hour, minute = (int(part) for part in raw.split(":", 1))
+            if cmp(dt_time(hour, minute)):
+                return False
+        except (ValueError, TypeError):
+            continue
+    return True
+
+
 def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dict, env: dict, side: str) -> list[dict]:
     """Scans this side's ('long' or 'short') watchlist for new entries
     under its own active strategy. positions holds ALL open positions
@@ -505,6 +537,9 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
     cycle. Concurrent-position and daily-entry caps are enforced per side
     (this side's own count against this side's own rules), not pooled
     across both directions."""
+    if not _within_entry_window(rules):
+        return positions
+
     risk = mode_config.risk_params(env, account_id, mode)
     if db.count_todays_entries(account_id, mode, side) >= risk["max_trades_per_day"]:
         return positions

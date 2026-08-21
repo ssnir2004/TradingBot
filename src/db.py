@@ -333,7 +333,7 @@ EXTRA_STRATEGY_PRESETS = [
                 "I3_rvol_min": 2.0,
                 "I3_rvol_lookback_days": 14,
             },
-            "time_filter": {"earliest_entry_et": "10:05", "latest_entry_et": "15:30", "force_close_et": "15:51"},
+            "time_filter": {"earliest_entry_et": "09:35", "latest_entry_et": "15:30", "force_close_et": "15:51"},
             "exit": {
                 "initial_stop_rule": "hod_plus_1pct",
                 "partial_profit_trigger_R": 0.75,
@@ -520,6 +520,24 @@ def init_db(seed_rules_path: Path | None = None):
             conn.execute(
                 "UPDATE strategies SET rules_json = ?, risk_rating = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(rsi_preset[1], indent=2), rsi_preset[2],
+                 datetime.now(ET).isoformat(timespec="seconds"), row["id"]),
+            )
+
+        # "Short Parabolic Reversal" moved its own earliest entry time to
+        # 09:35 (5 min after the actual 9:30 open, now that entry_scan
+        # actually reads a strategy's own time_filter — see
+        # _within_entry_window in cycle.py) instead of the shared 10:05
+        # default. Only touch rows still at the old value, so a deliberate
+        # manual re-edit after this migration already ran once isn't
+        # clobbered on a later restart.
+        row = conn.execute(
+            "SELECT id, rules_json FROM strategies WHERE name = 'Short Parabolic Reversal'"
+        ).fetchone()
+        if row and '"earliest_entry_et": "10:05"' in row["rules_json"]:
+            parabolic_preset = next(p for p in EXTRA_STRATEGY_PRESETS if p[0] == "Short Parabolic Reversal")
+            conn.execute(
+                "UPDATE strategies SET rules_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(parabolic_preset[1], indent=2),
                  datetime.now(ET).isoformat(timespec="seconds"), row["id"]),
             )
 
