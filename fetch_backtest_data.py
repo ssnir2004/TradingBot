@@ -93,6 +93,17 @@ def run_fetch(account_id: int, symbols: list[str], duration: str = DEFAULT_INITI
         mode_config.ibkr_port(env, account_id, "paper"),
         int(env.get("IBKR_BACKTEST_CLIENT_ID", 4)),
     )
+    # reqHistoricalData has no timeout of its own and can hang forever if
+    # the account isn't entitled to real-time/frozen data for a symbol -
+    # very common on a paper account whose linked live account has no
+    # active market data subscription. Delayed data (3) needs no
+    # subscription and is fine for backtesting bars from months ago, and
+    # RequestTimeout guarantees this never hangs indefinitely again even
+    # if some other cause is at play - a stuck request raises instead,
+    # which fetch_symbol's caller already catches and logs as "error" so
+    # the run moves on to the next symbol.
+    ibkr.ib.reqMarketDataType(3)
+    ibkr.ib.RequestTimeout = 30
     results = []
     try:
         for i, symbol in enumerate(symbols, start=1):
