@@ -469,12 +469,18 @@ def api_broker_positions(mode: str = Depends(require_mode), account_id: int = De
     data = db.get_broker_positions(account_id, mode)
     for pos in data["positions"]:
         price = None
+        prior_close = None
         try:
             price = cycle._current_price(pos["symbol"])
         except Exception:
             pass
+        try:
+            prior_close = cycle.get_prior_close(pos["symbol"])
+        except Exception:
+            pass
         pos["current_price"] = price
         pos["unrealized_pnl"] = ((price - pos["avg_cost"]) * pos["qty"]) if price is not None else None
+        pos["daily_pnl"] = ((price - prior_close) * pos["qty"]) if price is not None and prior_close is not None else None
     return data
 
 

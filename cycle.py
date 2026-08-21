@@ -226,6 +226,21 @@ def get_chart_bars(symbol: str) -> pd.DataFrame | None:
         return None
 
 
+def get_prior_close(symbol: str) -> float | None:
+    """Yesterday's close for `symbol` — same daily-bar convention as
+    _evaluate_entry_filters's D1/D2 (once the market is open, yfinance's
+    last daily row is always today's still-forming bar, so .iloc[-2] is
+    the prior completed session). Used for the dashboard's daily $ P&L on
+    real holdings, exposed unprefixed for the same reason as get_chart_bars."""
+    try:
+        daily = yf.Ticker(symbol.replace(" ", "-")).history(period="5d", interval="1d")
+        if len(daily) < 2:
+            return None
+        return float(daily["Close"].iloc[-2])
+    except Exception:
+        return None
+
+
 def _find_latest_swing_low(bars: pd.DataFrame) -> float | None:
     lows = bars["Low"].to_numpy()
     n = len(lows)

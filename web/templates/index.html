@@ -216,8 +216,8 @@
         <div id="broker-positions-error" class="text-danger small px-3"></div>
         <div class="card-body p-0">
           <table class="table table-sm mb-0">
-            <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Current</th><th>Unrealized P&amp;L</th><th>Close</th></tr></thead>
-            <tbody id="broker-positions-body"><tr><td colspan="6" class="text-center text-muted">Loading…</td></tr></tbody>
+            <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Current</th><th data-bs-toggle="tooltip" title="שינוי ערך מאז סגירת אתמול">Daily P&amp;L</th><th>Unrealized P&amp;L</th><th>Close</th></tr></thead>
+            <tbody id="broker-positions-body"><tr><td colspan="7" class="text-center text-muted">Loading…</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -806,12 +806,12 @@ async function refreshBrokerPositions() {
   document.getElementById("broker-positions-updated").textContent = data.updated_at || "not refreshed yet";
   const rows = data.positions || [];
   const body = document.getElementById("broker-positions-body");
-  if (!rows.length) { body.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No holdings</td></tr>'; return; }
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No holdings</td></tr>'; return; }
   body.innerHTML = rows.map(p => {
     const full = Math.abs(p.qty);
     return `<tr>
       <td>${symbolLink(p.symbol)}</td><td>${p.qty}</td><td>${fmtMoney(p.avg_cost)}</td>
-      <td>${fmtMoney(p.current_price)}</td><td>${fmtPnl(p.unrealized_pnl)}</td>
+      <td>${fmtMoney(p.current_price)}</td><td>${fmtPnl(p.daily_pnl)}</td><td>${fmtPnl(p.unrealized_pnl)}</td>
       <td>
         <div class="input-group input-group-sm" style="width:170px;">
           <input type="number" min="1" max="${full}" value="${full}" class="form-control form-control-sm broker-close-qty" data-symbol="${p.symbol}">
