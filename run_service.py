@@ -25,10 +25,12 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 import build_custom_universe
 import cycle
+import fetch_backtest_data
 import morning_prefilter
 import daily_summary
 from src import db
 from src.custom_universes import CUSTOM_UNIVERSES
+from src.sp500_tickers import SP500_TICKERS
 
 PROJECT_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
@@ -151,6 +153,20 @@ def main():
                 CronTrigger(day_of_week="sun", hour=8, minute=0, timezone=ET),
                 id=f"build_universe_{universe_key}", misfire_grace_time=3600,
             )
+        # Backtest data cache: unlike the gap prefilter (plain internet)
+        # this needs a live IBKR connection, on its own dedicated client ID
+        # (IBKR_BACKTEST_CLIENT_ID) so it never collides with the cycle's
+        # own connection - fetching hundreds of S&P 500 symbols' worth of
+        # historical bars takes a while (paced well under IBKR's
+        # historical-data rate limits, see fetch_backtest_data.py), so this
+        # runs weekly, off-hours, same slot as the universe builder above
+        # but with its own id so a slow run doesn't block it.
+        scheduler.add_job(
+            lambda: _guarded(mode, "fetch_backtest_data", account_id, fetch_backtest_data.run_fetch,
+                              account_id, list(SP500_TICKERS)),
+            CronTrigger(day_of_week="sun", hour=9, minute=0, timezone=ET),
+            id="fetch_backtest_data", misfire_grace_time=3600,
+        )
 
     logger.info("[%s] Trading service starting. Jobs: %s", mode, [j.id for j in scheduler.get_jobs()])
     try:
