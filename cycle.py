@@ -346,12 +346,54 @@ def get_sma(symbol: str, period: int) -> float | None:
 
 
 # ---------------------------------------------------------------- Step 4 ---
+def _breakeven_or_partial_decision(pos: dict, exit_cfg: dict, r_multiple: float) -> dict:
+    """Pure decision logic for manage_position's "pre_breakeven" stage —
+    shared with backtest_engine.py's exit simulator so both replay the
+    exact same thresholds instead of risking two copies drifting apart.
+    Only meaningful while pos["state"] == "pre_breakeven"; returns
+    {"action": "hold"} otherwise-uninteresting ticks."""
+    if r_multiple >= exit_cfg["breakeven_trigger_R"]:
+        return {"action": "breakeven_flip", "new_stop_price": pos["entry_price"], "new_state": "post_breakeven_no_partial"}
+    if r_multiple >= exit_cfg["partial_profit_trigger_R"]:
+        side = pos.get("side", "long")
+        entry = pos["entry_price"]
+        close_qty = min(math.ceil(pos["qty"] * exit_cfg["partial_profit_fraction"]), pos["qty"])
+        new_stop_price = entry * 1.01 if side == "short" else entry * 0.99
+        return {"action": "partial_profit", "close_qty": close_qty, "new_stop_price": new_stop_price, "new_state": "post_breakeven_partial_done"}
+    return {"action": "hold"}
+
+
+def _trailing_stop_decision(pos: dict, swing_stop_candidate: float | None) -> dict:
+    """Pure decision logic for manage_position's "post_breakeven" trailing
+    stage — same sharing rationale as _breakeven_or_partial_decision. The
+    caller computes swing_stop_candidate from whichever bars source is in
+    play (live 5m bars via _find_latest_swing_low/high, or a backtest's
+    historical bars) — this function only decides whether it's valid and
+    whether it improves on the current stop."""
+    if swing_stop_candidate is None:
+        return {"action": "hold"}
+    side = pos.get("side", "long")
+    initial_stop = pos["initial_stop"]
+    candidate_valid = (swing_stop_candidate < initial_stop) if side == "short" else (swing_stop_candidate > initial_stop)
+    if not candidate_valid:
+        return {"action": "hold"}
+    current_stop = pos.get("stop_price", initial_stop)
+    improves = (swing_stop_candidate < current_stop) if side == "short" else (swing_stop_candidate > current_stop)
+    if improves:
+        return {"action": "trail_stop", "new_stop_price": swing_stop_candidate}
+    return {"action": "hold"}
+
+
 def manage_position(account_id: int, mode: str, ib, pos: dict, rules: dict) -> dict:
     """rules must be the exit config for pos["side"] — see run_cycle, which
     picks the right (long or short) active strategy per position, falling
     back to a safe default if that side no longer has an active strategy
     (a position stays managed even if its strategy was deactivated or
-    deleted after it was opened)."""
+    deleted after it was opened). The two stages below are deliberately
+    separate `if`s, not `if`/`elif` — a breakeven flip and a trailing-stop
+    check can both fire on the same tick, since the state mutates in
+    between (see _breakeven_or_partial_decision/_trailing_stop_decision,
+    the pure decision logic both stages and backtest_engine.py share)."""
     exit_cfg = rules["exit"]
     side = pos.get("side", "long")
     price = _current_price(pos["symbol"])
@@ -369,49 +411,42 @@ def manage_position(account_id: int, mode: str, ib, pos: dict, rules: dict) -> d
     pos["r_multiple"] = r_multiple
 
     if pos["state"] == "pre_breakeven":
-        if r_multiple >= exit_cfg["breakeven_trigger_R"]:
+        decision = _breakeven_or_partial_decision(pos, exit_cfg, r_multiple)
+        if decision["action"] == "breakeven_flip":
             _cancel_stop(ib, pos.get("stop_order_id"))
-            pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], entry, side)
-            pos["stop_price"] = entry
-            pos["state"] = "post_breakeven_no_partial"
+            pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], decision["new_stop_price"], side)
+            pos["stop_price"] = decision["new_stop_price"]
+            pos["state"] = decision["new_state"]
             notify(f"[{mode.upper()}] BE {pos['symbol']}", f"stop -> ${entry:.2f}", "default")
             log_decision(account_id, mode, {"event": "breakeven_flip", "symbol": pos["symbol"], "side": side, "new_stop": entry})
-        elif r_multiple >= exit_cfg["partial_profit_trigger_R"]:
-            close_qty = math.ceil(pos["qty"] * exit_cfg["partial_profit_fraction"])
-            close_qty = min(close_qty, pos["qty"])
+        elif decision["action"] == "partial_profit":
+            close_qty = decision["close_qty"]
             if _market_close(account_id, mode, ib, pos["symbol"], close_qty, side):
                 remaining = pos["qty"] - close_qty
-                new_stop_price = entry * 1.01 if side == "short" else entry * 0.99
                 _cancel_stop(ib, pos.get("stop_order_id"))
                 pos["qty"] = remaining
                 if remaining > 0:
-                    pos["stop_order_id"] = _place_stop(ib, pos["symbol"], remaining, new_stop_price, side)
-                    pos["stop_price"] = new_stop_price
-                pos["state"] = "post_breakeven_partial_done"
+                    pos["stop_order_id"] = _place_stop(ib, pos["symbol"], remaining, decision["new_stop_price"], side)
+                    pos["stop_price"] = decision["new_stop_price"]
+                pos["state"] = decision["new_state"]
                 notify(f"[{mode.upper()}] PARTIAL {pos['symbol']}", f"closed {close_qty}/{close_qty + remaining} @ ${price:.2f}", "default")
                 log_decision(account_id, mode, {"event": "partial_profit", "symbol": pos["symbol"], "side": side, "closed": close_qty, "price": price})
 
     if pos["state"].startswith("post_breakeven"):
         bars = _get_5min_bars(pos["symbol"])
+        swing_stop_candidate = None
         if bars is not None and len(bars) > 5:
-            if side == "short":
-                swing = _find_latest_swing_high(bars)
-                candidate_stop = (swing + 0.01) if swing is not None else None
-                candidate_valid = candidate_stop is not None and candidate_stop < pos["initial_stop"]
-            else:
-                swing = _find_latest_swing_low(bars)
-                candidate_stop = (swing - 0.01) if swing is not None else None
-                candidate_valid = candidate_stop is not None and candidate_stop > pos["initial_stop"]
-            if candidate_valid:
-                current_stop = pos.get("stop_price", pos["initial_stop"])
-                improves = (candidate_stop < current_stop) if side == "short" else (candidate_stop > current_stop)
-                if improves:
-                    _cancel_stop(ib, pos.get("stop_order_id"))
-                    pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], candidate_stop, side)
-                    old_stop = pos.get("stop_price", pos["initial_stop"])
-                    pos["stop_price"] = candidate_stop
-                    notify(f"[{mode.upper()}] TRAIL {pos['symbol']}", f"stop ${old_stop:.2f} -> ${candidate_stop:.2f}", "default")
-                    log_decision(account_id, mode, {"event": "trail_stop", "symbol": pos["symbol"], "side": side, "old": old_stop, "new": candidate_stop})
+            swing = _find_latest_swing_high(bars) if side == "short" else _find_latest_swing_low(bars)
+            if swing is not None:
+                swing_stop_candidate = (swing + 0.01) if side == "short" else (swing - 0.01)
+        decision = _trailing_stop_decision(pos, swing_stop_candidate)
+        if decision["action"] == "trail_stop":
+            _cancel_stop(ib, pos.get("stop_order_id"))
+            pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], decision["new_stop_price"], side)
+            old_stop = pos.get("stop_price", pos["initial_stop"])
+            pos["stop_price"] = decision["new_stop_price"]
+            notify(f"[{mode.upper()}] TRAIL {pos['symbol']}", f"stop ${old_stop:.2f} -> ${decision['new_stop_price']:.2f}", "default")
+            log_decision(account_id, mode, {"event": "trail_stop", "symbol": pos["symbol"], "side": side, "old": old_stop, "new": decision["new_stop_price"]})
 
     if pos["qty"] > 0:
         db.upsert_position(account_id, mode, pos)
@@ -474,19 +509,18 @@ def force_close_all(account_id: int, mode: str, ib, positions: list[dict]):
 
 
 # ---------------------------------------------------------------- Step 8 ---
-def _evaluate_entry_filters(account_id: int, mode: str, ticker: str, rules: dict, side: str) -> dict:
-    """Evaluate D1-D3 (daily) and I1-I3 (intraday) from the active side
-    ('long' or 'short') strategy's rules for one ticker. Always returns a
-    detail dict with a "pass" bool; on a full pass it also carries
-    "price"/"stop_ref" for sizing (stop_ref is the low of day for a long's
-    stop, the high of day for a short's), and whenever all six filters
-    could be computed it carries each one's individual result (D1..I3)
-    plus "price"/"gap_pct"/"rvol"/"rsi" (the last is None unless this side's
-    active strategy uses an RSI-based I2) — this detail is what the dashboard's
-    Watchlist table shows, so entry_scan (which stops early once daily
-    trade/position caps are hit) isn't the only place this gets computed.
-    Uses yfinance only (same free/keyless data source as
-    morning_prefilter.py), no IBKR connection needed.
+def _evaluate_filters_from_bars(daily: pd.DataFrame, intraday: pd.DataFrame, rules: dict, side: str) -> dict:
+    """The actual D1-D3/I1-I3 decision logic, pulled out of
+    _evaluate_entry_filters as a pure function: no data fetching, no
+    wall-clock "now" — the day being evaluated is whatever the LAST date
+    in `intraday`'s index is, and `daily` must already end at that day's
+    prior trading day (i.e. daily.iloc[-2] is "yesterday" relative to the
+    evaluation point). This is what lets backtest_engine.py replay the
+    EXACT same decision logic against historical bars instead of live
+    ones — _evaluate_entry_filters (below) is now just "fetch fresh
+    yfinance data ending at the real current moment, then call this" - the
+    live bot and the backtester share this one implementation rather than
+    risking two copies quietly drifting apart.
 
     Long and short are exact mirrors: D1 breaks the prior day's high (long)
     or low (short); D2 wants the prior close on the trend side of the
@@ -495,81 +529,101 @@ def _evaluate_entry_filters(account_id: int, mode: str, ticker: str, rules: dict
     volume) is direction-agnostic."""
     daily_filters = rules["daily_filters"]
     intraday_filters = rules["intraday_filters"]
-    yahoo_symbol = ticker.replace(" ", "-")
 
+    if len(daily) < 201:
+        return {"pass": False, "side": side, "error": "not enough daily history"}
+    prior_day = daily.iloc[-2]
+    sma200 = daily["Close"].iloc[-201:-1].mean()
+
+    if intraday.empty:
+        return {"pass": False, "side": side, "error": "no intraday data"}
+
+    current_price = float(intraday["Close"].iloc[-1])
+    as_of_date = intraday.index[-1].date()
+    today_bars = intraday[intraday.index.date == as_of_date]
+    if today_bars.empty:
+        return {"pass": False, "side": side, "error": "no bars for today yet"}
+
+    premarket_bars = today_bars[today_bars.index.time < dt_time(9, 30)]
+    regular_bars = today_bars[today_bars.index.time >= dt_time(9, 30)]
+
+    prior_close = float(prior_day["Close"])
+    gap_pct = (current_price - prior_close) / prior_close * 100 if prior_close else 0.0
+    rsi_value = None  # only set when this strategy's I2 is RSI-based (see below) - None otherwise
+
+    if side == "long":
+        stop_ref = float(regular_bars["Low"].min()) if not regular_bars.empty else float(today_bars["Low"].min())
+        d1 = current_price > float(prior_day["High"])  # above yesterday's high
+        d2 = float(prior_day["Close"]) > float(sma200)  # yesterday's close above the 200-day SMA
+        d3 = gap_pct >= daily_filters["D3_min_gap_pct_from_prior_close"]  # gap up >= threshold
+        premarket_extreme = float(premarket_bars["High"].max()) if not premarket_bars.empty else float("-inf")
+        i1 = current_price > premarket_extreme  # above today's premarket high
+        if "I2_rsi_above" in intraday_filters:
+            rsi_value = _compute_rsi(intraday["Close"], intraday_filters.get("I2_rsi_period", 14))
+            i2 = rsi_value is not None and rsi_value > intraday_filters["I2_rsi_above"]  # RSI above threshold
+        else:
+            extreme_so_far = float(today_bars["High"].iloc[:-1].max()) if len(today_bars) > 1 else float("-inf")
+            i2 = current_price > extreme_so_far  # new high-of-day
+    else:
+        stop_ref = float(regular_bars["High"].max()) if not regular_bars.empty else float(today_bars["High"].max())
+        d1 = current_price < float(prior_day["Low"])  # below yesterday's low
+        if "D2_prior_close_pct_above_sma50_min" in daily_filters:
+            sma50 = daily["Close"].iloc[-51:-1].mean()
+            ext_pct = (float(prior_day["Close"]) - float(sma50)) / float(sma50) * 100 if sma50 else 0.0
+            d2 = ext_pct >= daily_filters["D2_prior_close_pct_above_sma50_min"]  # overextended above the 50-day SMA
+        else:
+            d2 = float(prior_day["Close"]) < float(sma200)  # yesterday's close below the 200-day SMA
+        d3 = gap_pct <= -daily_filters["D3_min_gap_pct_down_from_prior_close"]  # gap down >= threshold
+        premarket_extreme = float(premarket_bars["Low"].min()) if not premarket_bars.empty else float("inf")
+        i1 = current_price < premarket_extreme  # below today's premarket low
+        if "I2_rsi_below" in intraday_filters:
+            rsi_value = _compute_rsi(intraday["Close"], intraday_filters.get("I2_rsi_period", 14))
+            i2 = rsi_value is not None and rsi_value < intraday_filters["I2_rsi_below"]  # RSI below threshold (rolled over)
+        else:
+            extreme_so_far = float(today_bars["Low"].iloc[:-1].min()) if len(today_bars) > 1 else float("inf")
+            i2 = current_price < extreme_so_far  # new low-of-day
+
+    # I3: relative volume vs lookback-day average >= threshold (direction-agnostic)
+    lookback = intraday_filters["I3_rvol_lookback_days"]
+    avg_daily_volume = float(daily["Volume"].iloc[-(lookback + 1):-1].mean())
+    today_volume_so_far = float(today_bars["Volume"].sum())
+    rvol = today_volume_so_far / avg_daily_volume if avg_daily_volume else 0.0
+    i3 = rvol >= intraday_filters["I3_rvol_min"]
+
+    passed = bool(d1 and d2 and d3 and i1 and i2 and i3)
+    return {
+        "pass": passed, "side": side,
+        "D1": bool(d1), "D2": bool(d2), "D3": bool(d3),
+        "I1": bool(i1), "I2": bool(i2), "I3": bool(i3),
+        "price": current_price, "rvol": rvol, "gap_pct": gap_pct,
+        "stop_ref": stop_ref, "rsi": rsi_value,
+    }
+
+
+def _evaluate_entry_filters(account_id: int, mode: str, ticker: str, rules: dict, side: str) -> dict:
+    """Live wrapper around _evaluate_filters_from_bars: fetches fresh
+    yfinance data ending at the real current moment, then hands it to the
+    shared pure decision logic. Always returns a detail dict with a "pass"
+    bool; on a full pass it also carries "price"/"stop_ref" for sizing
+    (stop_ref is the low of day for a long's stop, the high of day for a
+    short's), and whenever all six filters could be computed it carries
+    each one's individual result (D1..I3) plus
+    "price"/"gap_pct"/"rvol"/"rsi" (the last is None unless this side's
+    active strategy uses an RSI-based I2) — this detail is what the
+    dashboard's Watchlist table shows, so entry_scan (which stops early
+    once daily trade/position caps are hit) isn't the only place this gets
+    computed. Uses yfinance only (same free/keyless data source as
+    morning_prefilter.py), no IBKR connection needed."""
+    yahoo_symbol = ticker.replace(" ", "-")
     try:
         daily = yf.Ticker(yahoo_symbol).history(period="260d", interval="1d")
-        if len(daily) < 201:
-            return {"pass": False, "side": side, "error": "not enough daily history"}
-        prior_day = daily.iloc[-2]
-        sma200 = daily["Close"].iloc[-201:-1].mean()
-
         intraday = yf.Ticker(yahoo_symbol).history(period="5d", interval="5m", prepost=True)
-        if intraday.empty:
-            return {"pass": False, "side": side, "error": "no intraday data"}
-        intraday.index = intraday.index.tz_convert(ET)
-
-        current_price = float(intraday["Close"].iloc[-1])
-        today = datetime.now(ET).date()
-        today_bars = intraday[intraday.index.date == today]
-        if today_bars.empty:
-            return {"pass": False, "side": side, "error": "no bars for today yet"}
-
-        premarket_bars = today_bars[today_bars.index.time < dt_time(9, 30)]
-        regular_bars = today_bars[today_bars.index.time >= dt_time(9, 30)]
-
-        prior_close = float(prior_day["Close"])
-        gap_pct = (current_price - prior_close) / prior_close * 100 if prior_close else 0.0
-        rsi_value = None  # only set when this strategy's I2 is RSI-based (see below) - None otherwise
-
-        if side == "long":
-            stop_ref = float(regular_bars["Low"].min()) if not regular_bars.empty else float(today_bars["Low"].min())
-            d1 = current_price > float(prior_day["High"])  # above yesterday's high
-            d2 = float(prior_day["Close"]) > float(sma200)  # yesterday's close above the 200-day SMA
-            d3 = gap_pct >= daily_filters["D3_min_gap_pct_from_prior_close"]  # gap up >= threshold
-            premarket_extreme = float(premarket_bars["High"].max()) if not premarket_bars.empty else float("-inf")
-            i1 = current_price > premarket_extreme  # above today's premarket high
-            if "I2_rsi_above" in intraday_filters:
-                rsi_value = _compute_rsi(intraday["Close"], intraday_filters.get("I2_rsi_period", 14))
-                i2 = rsi_value is not None and rsi_value > intraday_filters["I2_rsi_above"]  # RSI above threshold
-            else:
-                extreme_so_far = float(today_bars["High"].iloc[:-1].max()) if len(today_bars) > 1 else float("-inf")
-                i2 = current_price > extreme_so_far  # new high-of-day
-        else:
-            stop_ref = float(regular_bars["High"].max()) if not regular_bars.empty else float(today_bars["High"].max())
-            d1 = current_price < float(prior_day["Low"])  # below yesterday's low
-            if "D2_prior_close_pct_above_sma50_min" in daily_filters:
-                sma50 = daily["Close"].iloc[-51:-1].mean()
-                ext_pct = (float(prior_day["Close"]) - float(sma50)) / float(sma50) * 100 if sma50 else 0.0
-                d2 = ext_pct >= daily_filters["D2_prior_close_pct_above_sma50_min"]  # overextended above the 50-day SMA
-            else:
-                d2 = float(prior_day["Close"]) < float(sma200)  # yesterday's close below the 200-day SMA
-            d3 = gap_pct <= -daily_filters["D3_min_gap_pct_down_from_prior_close"]  # gap down >= threshold
-            premarket_extreme = float(premarket_bars["Low"].min()) if not premarket_bars.empty else float("inf")
-            i1 = current_price < premarket_extreme  # below today's premarket low
-            if "I2_rsi_below" in intraday_filters:
-                rsi_value = _compute_rsi(intraday["Close"], intraday_filters.get("I2_rsi_period", 14))
-                i2 = rsi_value is not None and rsi_value < intraday_filters["I2_rsi_below"]  # RSI below threshold (rolled over)
-            else:
-                extreme_so_far = float(today_bars["Low"].iloc[:-1].min()) if len(today_bars) > 1 else float("inf")
-                i2 = current_price < extreme_so_far  # new low-of-day
-
-        # I3: relative volume vs lookback-day average >= threshold (direction-agnostic)
-        lookback = intraday_filters["I3_rvol_lookback_days"]
-        avg_daily_volume = float(daily["Volume"].iloc[-(lookback + 1):-1].mean())
-        today_volume_so_far = float(today_bars["Volume"].sum())
-        rvol = today_volume_so_far / avg_daily_volume if avg_daily_volume else 0.0
-        i3 = rvol >= intraday_filters["I3_rvol_min"]
-
-        passed = bool(d1 and d2 and d3 and i1 and i2 and i3)
-        detail = {
-            "pass": passed, "side": side,
-            "D1": bool(d1), "D2": bool(d2), "D3": bool(d3),
-            "I1": bool(i1), "I2": bool(i2), "I3": bool(i3),
-            "price": current_price, "rvol": rvol, "gap_pct": gap_pct,
-            "stop_ref": stop_ref, "rsi": rsi_value,
-        }
-        log_decision(account_id, mode, {"event": "filter_eval", "symbol": ticker, **detail})
+        if not intraday.empty:
+            intraday.index = intraday.index.tz_convert(ET)
+        detail = _evaluate_filters_from_bars(daily, intraday, rules, side)
+        detail["side"] = side
+        event = "filter_eval" if "error" not in detail else "filter_eval_error"
+        log_decision(account_id, mode, {"event": event, "symbol": ticker, **detail})
         return detail
     except Exception as exc:  # noqa: BLE001 - one bad ticker must not kill the scan
         log_decision(account_id, mode, {"event": "filter_eval_error", "symbol": ticker, "side": side, "error": str(exc)})
