@@ -652,6 +652,47 @@ async def api_broker_positions_close(request: Request, mode: str = Depends(requi
     return {"ok": True, "stdout": proc.stdout}
 
 
+# A manual buy/sell fires a real market order immediately and independent
+# of any strategy - it never gets a bot-managed stop (use the Stop/Take
+# Profit columns in Account Holdings for that once it shows up there), so
+# it gets the same speed bump as every other LIVE-affecting action.
+MANUAL_ORDER_LIVE_CONFIRM_PHRASE = "ok"
+
+
+@app.post("/api/trading/order")
+async def api_place_manual_order(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    body = await request.json()
+    symbol = (body.get("symbol") or "").strip().upper()
+    side = body.get("side")
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    if side not in ("BUY", "SELL"):
+        raise HTTPException(status_code=400, detail="side must be 'BUY' or 'SELL'")
+    try:
+        qty = int(body.get("qty"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="qty must be a whole number")
+    if qty <= 0:
+        raise HTTPException(status_code=400, detail="qty must be positive")
+
+    if mode == "live" and body.get("confirm") != MANUAL_ORDER_LIVE_CONFIRM_PHRASE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Type '{MANUAL_ORDER_LIVE_CONFIRM_PHRASE}' to confirm placing a LIVE market order.",
+        )
+
+    proc = subprocess.run(
+        [sys.executable, str(PROJECT_DIR / "trade.py"), "--mode", mode,
+         "--account-id", str(account_id), "--symbol", symbol, "--side", side, "--size", str(qty)],
+        capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
+    )
+    db.log_decision(account_id, mode, "dashboard_control", user=user, action="manual_order",
+                     symbol=symbol, side=side, qty=qty, stdout=proc.stdout, returncode=proc.returncode)
+    if proc.returncode != 0:
+        raise HTTPException(status_code=400, detail=proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "Order failed")
+    return {"ok": True, "stdout": proc.stdout}
+
+
 @app.get("/api/trades")
 def api_trades(limit: int = 100, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
     return db.get_trades(account_id, mode, limit=limit)

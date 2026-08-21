@@ -18,11 +18,28 @@
 <nav class="navbar navbar-dark bg-dark mb-4">
   <div class="container-fluid">
     <span class="navbar-brand mb-0 h1">TradingBot - מדריך למשתמש</span>
-    <a href="/" class="btn btn-outline-light btn-sm">חזרה לדשבורד</a>
+    <div class="d-flex gap-2">
+      <a href="/bot" class="btn btn-outline-light btn-sm">Bot</a>
+      <a href="/trading" class="btn btn-outline-light btn-sm">Trading</a>
+    </div>
   </div>
 </nav>
 
 <div class="container pb-5" style="max-width: 900px;">
+
+  <div class="card">
+    <div class="card-body">
+      <h4>שני עמודים: Bot ו-Trading</h4>
+      <p class="mb-0">
+        הדשבורד מחולק לשני עמודים (ניווט בראש כל עמוד): <strong>Bot</strong> -
+        סטטוס והפעלה/השהיה של הבוט, Risk Settings, אסטרטגיות, Watchlist,
+        ביצועים, הפוזיציות שהבוט עצמו פתח, יומן עסקאות ופעולות; <strong>Trading</strong> -
+        מסחר ידני נוח על התיק האמיתי (Place Order, Account Holdings, גרף).
+        כרטיסים משותפים (חיבור IBKR, טאבי PAPER/LIVE, סטטוס ה-Gateway,
+        Account) מופיעים בראש שני העמודים.
+      </p>
+    </div>
+  </div>
 
   <div class="card">
     <div class="card-body">
@@ -382,9 +399,24 @@
 
   <div class="card">
     <div class="card-body">
+      <h4>Place Order - קנייה/מכירה ידנית</h4>
+      <p class="mb-0">
+        בראש עמוד <strong>Trading</strong>: הקלדת סימבול, בחירת Buy/Sell
+        (Sell פותח שורט) וכמות, ולחיצה על Place Order שולחת מיד הזמנת
+        Market אמיתית - עצמאית לגמרי מכל אסטרטגיה, ולא מקבלת סטופ
+        אוטומטי מהבוט. אחרי שהפוזיציה מופיעה ב-Account Holdings למטה
+        (יכול לקחת עד כמה דקות, כי זה מתעדכן כל 5 דקות) - אפשר להוסיף לה
+        Stop/Take Profit משם. ב-<span class="badge badge-live">LIVE</span>
+        דורש הקלדת אישור (<span class="mono">ok</span>).
+      </p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
       <h4>Account Holdings - כל הפוזיציות בחשבון, גם לא של הבוט</h4>
       <p>
-        הכרטיס "Account Holdings" (מתחת ל-Open Positions) מציג את
+        הכרטיס "Account Holdings" (בעמוד <strong>Trading</strong>) מציג את
         <strong>כל</strong> ההחזקות האמיתיות בחשבון ה-IBKR של הטאב הנבחר -
         ישירות מהברוקר, ללא תלות במה שהבוט עצמו פתח או עוקב אחריו. זה
         כולל פוזיציות שפתחת ידנית ב-TWS/IBKR Mobile, ופוזיציות מכל יום -

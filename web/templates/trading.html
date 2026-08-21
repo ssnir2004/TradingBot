@@ -23,6 +23,41 @@
   <div class="row g-3 mb-3">
     <div class="col-12">
       <div class="card">
+        <div class="card-header">Place Order <span class="badge bg-secondary fw-normal">market order, fires immediately</span></div>
+        <div class="card-body">
+          <div class="small text-muted mb-2">
+            Opens (or adds to) a real position at market price, independent of any strategy — it never gets a bot-managed stop. Once it shows up in Account Holdings below (can take a few minutes), use the Stop/Take Profit columns there to protect it.
+          </div>
+          <div class="row g-2 align-items-end">
+            <div class="col-6 col-md-3">
+              <label class="form-label small">Symbol</label>
+              <input type="text" id="order-symbol" class="form-control form-control-sm text-uppercase" placeholder="AAPL">
+            </div>
+            <div class="col-6 col-md-2">
+              <label class="form-label small">Side</label>
+              <select id="order-side" class="form-select form-select-sm">
+                <option value="BUY">Buy</option>
+                <option value="SELL">Sell (short)</option>
+              </select>
+            </div>
+            <div class="col-6 col-md-2">
+              <label class="form-label small">Quantity</label>
+              <input type="number" min="1" step="1" id="order-qty" class="form-control form-control-sm">
+            </div>
+            <div class="col-6 col-md-2">
+              <button id="btn-place-order" class="btn btn-primary btn-sm w-100">Place Order</button>
+            </div>
+          </div>
+          <div id="order-error" class="text-danger small mt-2"></div>
+          <div id="order-success" class="text-success small mt-2"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3 mb-3">
+    <div class="col-12">
+      <div class="card">
         <div class="card-header d-flex justify-content-between align-items-center">
           <span>Account Holdings <span class="badge bg-secondary fw-normal">every real IBKR position, not just the bot's</span></span>
           <span class="text-muted small">Updated: <span id="broker-positions-updated" class="mono">-</span></span>
@@ -216,6 +251,44 @@ document.getElementById("broker-positions-body").addEventListener("click", async
     refreshBrokerPositions();
   } catch (err) {
     errorEl.textContent = "Close failed: " + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+document.getElementById("btn-place-order").addEventListener("click", async () => {
+  const errorEl = document.getElementById("order-error");
+  const successEl = document.getElementById("order-success");
+  errorEl.textContent = ""; successEl.textContent = "";
+  const symbol = document.getElementById("order-symbol").value.trim().toUpperCase();
+  const side = document.getElementById("order-side").value;
+  const qty = parseInt(document.getElementById("order-qty").value, 10);
+  if (!symbol) { errorEl.textContent = "Symbol is required."; return; }
+  if (!Number.isFinite(qty) || qty <= 0) { errorEl.textContent = "Enter a valid positive quantity."; return; }
+
+  const payload = { symbol, side, qty };
+  const actionLabel = side === "BUY" ? "buy" : "sell (short)";
+  if (currentMode === "live") {
+    const typed = prompt(
+      `This immediately places a LIVE market order to ${actionLabel} ${qty} share(s) of ${symbol}. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
+    );
+    if (typed !== CLOSE_LIVE_CONFIRM_PHRASE) { errorEl.textContent = "Not confirmed — nothing was ordered."; return; }
+    payload.confirm = typed;
+  } else if (!confirm(`Place a ${actionLabel} order for ${qty} share(s) of ${symbol} (PAPER)?`)) {
+    return;
+  }
+
+  const btn = document.getElementById("btn-place-order");
+  btn.disabled = true;
+  try {
+    await modeApi("/api/trading/order", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    successEl.textContent = `Order filled — ${symbol} may take a few minutes to appear in Account Holdings below.`;
+    document.getElementById("order-symbol").value = "";
+    document.getElementById("order-qty").value = "";
+  } catch (err) {
+    errorEl.textContent = "Order failed: " + err.message;
   } finally {
     btn.disabled = false;
   }
