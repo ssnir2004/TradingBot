@@ -195,6 +195,10 @@
             <option value="aggressive">Aggressive</option>
           </select>
         </div>
+        <div class="mb-2">
+          <label class="form-label">Description <span class="text-muted small">(מוצג למשתמשים ליד האסטרטגיה)</span></label>
+          <textarea id="strategy-description" class="form-control" rows="3" dir="rtl"></textarea>
+        </div>
         <label class="form-label">Rules (JSON)</label>
         <textarea id="strategy-rules" class="form-control rules-editor"></textarea>
         <div id="strategy-error" class="text-danger small mt-2"></div>
@@ -489,7 +493,7 @@ async function refreshStrategies() {
   const rows = await api("/api/strategies");
   const body = document.getElementById("strategies-body");
   body.innerHTML = rows.map(s => `<tr>
-    <td>${s.name}</td>
+    <td>${s.name} ${s.description ? `<button class="btn btn-sm btn-link p-0 ms-1 strategy-info-btn" data-id="${s.id}" title="הצג/הסתר הסבר">&#8505;&#65039;</button>` : ""}</td>
     <td>${sideBadge(s.direction)}</td>
     <td><span class="badge ${RISK_BADGE_CLASS[s.risk_rating] || "bg-secondary"}">${s.risk_rating}</span></td>
     <td>${s.is_active ? '<span class="badge bg-success">active</span>' : ""}</td>
@@ -499,8 +503,15 @@ async function refreshStrategies() {
       <button class="btn btn-sm btn-outline-secondary" onclick="editStrategy(${s.id})">Edit</button>
       ${s.is_active ? "" : `<button class="btn btn-sm btn-outline-danger" onclick="deleteStrategy(${s.id})">Delete</button>`}
     </td>
-  </tr>`).join("");
+  </tr>
+  ${s.description ? `<tr class="strategy-desc-row d-none" id="strategy-desc-${s.id}"><td colspan="6" class="small text-muted" dir="rtl">${s.description}</td></tr>` : ""}`).join("");
 }
+
+document.getElementById("strategies-body").addEventListener("click", (e) => {
+  const btn = e.target.closest(".strategy-info-btn");
+  if (!btn) return;
+  document.getElementById(`strategy-desc-${btn.dataset.id}`).classList.toggle("d-none");
+});
 
 async function activateStrategy(id, riskRating) {
   const payload = {};
@@ -536,6 +547,7 @@ async function editStrategy(id) {
   document.getElementById("strategy-direction").value = s.direction;
   document.getElementById("strategy-direction").disabled = true;
   document.getElementById("strategy-risk-rating").value = s.risk_rating;
+  document.getElementById("strategy-description").value = s.description || "";
   document.getElementById("strategy-rules").value = JSON.stringify(s.rules, null, 2);
   document.getElementById("strategy-error").textContent = "";
   strategyModal.show();
@@ -559,6 +571,7 @@ document.getElementById("btn-new-strategy").addEventListener("click", async () =
   document.getElementById("strategy-direction").disabled = false;
   document.getElementById("strategy-direction").value = "long";
   document.getElementById("strategy-risk-rating").value = "moderate";
+  document.getElementById("strategy-description").value = "";
   await loadBaseRulesForDirection("long");
   document.getElementById("strategy-error").textContent = "";
   strategyModal.show();
@@ -570,12 +583,13 @@ document.getElementById("btn-save-strategy").addEventListener("click", async () 
   try { rules = JSON.parse(document.getElementById("strategy-rules").value); }
   catch (e) { errorEl.textContent = "Invalid JSON: " + e.message; return; }
   const riskRating = document.getElementById("strategy-risk-rating").value;
+  const description = document.getElementById("strategy-description").value;
 
   try {
     if (editingStrategyId) {
       await api(`/api/strategies/${editingStrategyId}`, {
         method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rules, risk_rating: riskRating }),
+        body: JSON.stringify({ rules, risk_rating: riskRating, description }),
       });
     } else {
       const name = document.getElementById("strategy-name").value.trim();
@@ -583,7 +597,7 @@ document.getElementById("btn-save-strategy").addEventListener("click", async () 
       const direction = document.getElementById("strategy-direction").value;
       await api("/api/strategies", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, rules, direction, risk_rating: riskRating }),
+        body: JSON.stringify({ name, rules, direction, risk_rating: riskRating, description }),
       });
     }
     strategyModal.hide();

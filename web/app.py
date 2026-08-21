@@ -776,13 +776,14 @@ async def api_create_strategy(request: Request, account_id: int = Depends(requir
     rules = body.get("rules")
     direction = body.get("direction", "long")
     risk_rating = body.get("risk_rating", "moderate")
+    description = body.get("description", "") or ""
     if not name or not isinstance(rules, dict):
         raise HTTPException(status_code=400, detail="name and rules are required")
     if direction not in db.DIRECTIONS:
         raise HTTPException(status_code=400, detail=f"direction must be one of {db.DIRECTIONS}")
     if risk_rating not in db.RISK_RATINGS:
         raise HTTPException(status_code=400, detail=f"risk_rating must be one of {db.RISK_RATINGS}")
-    strategy_id = db.create_strategy(name, rules, direction, risk_rating)
+    strategy_id = db.create_strategy(name, rules, direction, risk_rating, description)
     _log_account_action(account_id, user, action="create_strategy", name=name, direction=direction, risk_rating=risk_rating)
     return {"id": strategy_id}
 
@@ -794,11 +795,12 @@ async def api_update_strategy(strategy_id: int, request: Request, account_id: in
     body = await request.json()
     rules = body.get("rules")
     risk_rating = body.get("risk_rating")
+    description = body.get("description")
     if not isinstance(rules, dict):
         raise HTTPException(status_code=400, detail="rules is required")
     if risk_rating is not None and risk_rating not in db.RISK_RATINGS:
         raise HTTPException(status_code=400, detail=f"risk_rating must be one of {db.RISK_RATINGS}")
-    db.update_strategy(strategy_id, rules, risk_rating)
+    db.update_strategy(strategy_id, rules, risk_rating, description)
     _log_account_action(account_id, user, action="update_strategy", strategy_id=strategy_id)
     return {"ok": True}
 

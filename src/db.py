@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS strategies (
     direction TEXT NOT NULL DEFAULT 'long',
     rules_json TEXT NOT NULL,
     risk_rating TEXT NOT NULL DEFAULT 'moderate',
+    description TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -224,6 +225,7 @@ EXTRA_STRATEGY_PRESETS = [
         },
         "conservative",
         "long",
+        "זהה לחלוטין ל-Long Breakout Conservative בכל הפרמטרים המספריים - D1-D3, I1, I3, ניהול הסיכון והיציאה. ההבדל היחיד הוא תנאי I2: במקום לדרוש שיא חדש תוך-יומי, בודקת RSI(14) על נרות 5 דקות מעל 50 (מומנטום חיובי לפי אינדיקטור, ולא רק מחיר שיא).",
     ),
     (
         "Long Breakout Aggressive",
@@ -259,6 +261,7 @@ EXTRA_STRATEGY_PRESETS = [
         },
         "aggressive",
         "long",
+        "גרסה רופפת יותר של אסטרטגיית ה-Long: פער מינימלי נמוך יותר (1.5% במקום 3%), ו-RVOL מינימלי נמוך יותר (x1.2 במקום x2.0) - יותר עסקאות פוטנציאליות, אבל גם יותר 'רעש' וסיכוי לאיתותי שווא. סיכון גבוה משמעותית: 2.5% מהתיק לעסקה, מקס' 20% מהתיק לפוזיציה, עד 8 פוזיציות בו-זמנית. Partial profit ב-1.5R, Breakeven ב-2R - יעדי רווח גבוהים יותר, תואמים לסיכון הגבוה יותר.",
     ),
     (
         # Exact mirror of rules.json's long default, flipped for breakdowns
@@ -300,6 +303,7 @@ EXTRA_STRATEGY_PRESETS = [
         },
         "conservative",
         "short",
+        "מראה מדויק והפוך-כיוון של Long Breakout Conservative: (D1) המחיר מתחת לשפל של אתמול, (D2) סגירת אתמול מתחת לממוצע נע 200 יום, (D3) פער למטה של לפחות 3%, (I1) מתחת לשפל המסחר המוקדם, (I2) שפל חדש תוך-יומי, (I3) מחזור מסחר פי 2 מהממוצע. Stop 1% מעל השיא היום, אותם יעדי partial/breakeven/trailing כמו הגרסה הארוכה - רק הפוכים בכיוון. אותו פרופיל סיכון (1% לעסקה, מקס' 10%, עד 5 פוזיציות).",
     ),
     (
         # Catches a parabolic blow-off top instead of an already-confirmed
@@ -349,6 +353,7 @@ EXTRA_STRATEGY_PRESETS = [
         },
         "aggressive",
         "short",
+        "נועדה לתפוס בדיוק את המקרה שבו Short Breakdown Conservative מפספסת: מניה שעלתה פרבולית ומתחילה להתהפך בשיא, כשהיא עדיין הרבה מעל ה-SMA200 (D2 השמרני לא יתמלא עד שהמניה כבר נפלה משמעותית). שני שינויים מהגרסה השמרנית: D2 דורש שסגירת אתמול תהיה לפחות 40% מעל ה-SMA50 (מתיחת יתר פרבולית, לא 'כבר מתחת ל-SMA200'), ו-I2 דורש RSI(14) מתחת ל-50 תוך-יומי (אישור שהמומנטום התהפך בפועל, לא שפל יומי חדש). זמן הכניסה המוקדם ביותר שלה גם מוקדם יותר - 9:35 במקום 10:05, כדי לתפוס את ההיפוך מוקדם ככל האפשר. זו כניסה נגד המגמה שהתקיימה עד כה (mean-reversion), ולכן חשופה יותר לאיתותי שווא.",
     ),
 ]
 
@@ -480,6 +485,7 @@ def init_db(seed_rules_path: Path | None = None):
         _migrate_settings_to_per_mode(conn)
         _migrate_add_column(conn, "strategies", "risk_rating", "TEXT NOT NULL DEFAULT 'moderate'")
         _migrate_add_column(conn, "strategies", "direction", "TEXT NOT NULL DEFAULT 'long'")
+        _migrate_add_column(conn, "strategies", "description", "TEXT NOT NULL DEFAULT ''")
         _migrate_add_column(conn, "positions", "side", "TEXT NOT NULL DEFAULT 'long'")
         _migrate_add_column(conn, "positions", "hold_overnight", "INTEGER NOT NULL DEFAULT 0")
         _migrate_add_column(conn, "watchlist", "direction", "TEXT NOT NULL DEFAULT 'long'")
@@ -609,22 +615,48 @@ def init_db(seed_rules_path: Path | None = None):
         conn.execute("DROP INDEX IF EXISTS idx_decision_log_mode_timestamp")
         conn.executescript(INDEXES_SCHEMA)
 
+        default_strategy_description = (
+            "האסטרטגיה הבסיסית - זיהוי פריצה (breakout) שמרנית: (D1) המחיר מעל השיא של אתמול, "
+            "(D2) סגירת אתמול מעל הממוצע הנע 200 יום, (D3) פער (gap) של לפחות 3% מעלה, "
+            "(I1) מעל השיא של המסחר המוקדם, (I2) שיא חדש תוך-יומי, (I3) מחזור מסחר פי 2 לפחות "
+            "מהממוצע (RVOL x2.0). Stop 1% מתחת לשפל היום, Partial profit ב-1R, Breakeven ב-1.5R, "
+            "טריילינג סטופ אחרי זה. סיכון שמרני: 1% מהתיק לעסקה, מקס' 10% מהתיק לפוזיציה, "
+            "עד 5 פוזיציות בו-זמנית."
+        )
         row = conn.execute("SELECT COUNT(*) AS c FROM strategies").fetchone()
         if row["c"] == 0 and seed_rules_path and seed_rules_path.exists():
             now = datetime.now(ET).isoformat(timespec="seconds")
             rules_json = seed_rules_path.read_text()
             conn.execute(
-                "INSERT INTO strategies (name, direction, rules_json, risk_rating, created_at, updated_at) "
-                "VALUES (?, 'long', ?, 'conservative', ?, ?)",
-                ("Long Breakout Conservative", rules_json, now, now),
+                "INSERT INTO strategies (name, direction, rules_json, risk_rating, description, created_at, updated_at) "
+                "VALUES (?, 'long', ?, 'conservative', ?, ?, ?)",
+                ("Long Breakout Conservative", rules_json, default_strategy_description, now, now),
             )
 
-        for name, rules, risk_rating, direction in EXTRA_STRATEGY_PRESETS:
+        # Backfill the description for the default seeded strategy on an
+        # old install that predates this column - only while it's still
+        # empty, so a deliberate manual edit isn't clobbered on restart.
+        conn.execute(
+            "UPDATE strategies SET description = ? WHERE name = 'Long Breakout Conservative' AND description = ''",
+            (default_strategy_description,),
+        )
+
+        for name, rules, risk_rating, direction, description in EXTRA_STRATEGY_PRESETS:
             now = datetime.now(ET).isoformat(timespec="seconds")
             conn.execute(
-                "INSERT OR IGNORE INTO strategies (name, direction, rules_json, risk_rating, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (name, direction, json.dumps(rules, indent=2), risk_rating, now, now),
+                "INSERT OR IGNORE INTO strategies (name, direction, rules_json, risk_rating, description, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (name, direction, json.dumps(rules, indent=2), risk_rating, description, now, now),
+            )
+
+        # Backfill the description for a strategy that already existed
+        # before this column did (old install) - only while it's still the
+        # empty default, so a deliberate manual edit made after this
+        # migration already ran once isn't clobbered on a later restart.
+        for preset_name, _rules, _risk, _direction, preset_description in EXTRA_STRATEGY_PRESETS:
+            conn.execute(
+                "UPDATE strategies SET description = ? WHERE name = ? AND description = ''",
+                (preset_description, preset_name),
             )
 
 
@@ -977,7 +1009,7 @@ def _check_direction(direction: str):
 def list_strategies(account_id: int) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT s.id, s.name, s.direction, s.risk_rating, s.created_at, s.updated_at, "
+            "SELECT s.id, s.name, s.direction, s.risk_rating, s.description, s.created_at, s.updated_at, "
             "(a.strategy_id IS NOT NULL) AS is_active "
             "FROM strategies s "
             "LEFT JOIN account_active_strategy a ON a.strategy_id = s.id AND a.account_id = ? "
@@ -1010,20 +1042,20 @@ def get_strategy(strategy_id: int) -> dict | None:
         return dict(row) if row else None
 
 
-def create_strategy(name: str, rules: dict, direction: str, risk_rating: str = "moderate") -> int:
+def create_strategy(name: str, rules: dict, direction: str, risk_rating: str = "moderate", description: str = "") -> int:
     _check_direction(direction)
     _check_risk_rating(risk_rating)
     now = datetime.now(ET).isoformat(timespec="seconds")
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO strategies (name, direction, rules_json, risk_rating, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (name, direction, json.dumps(rules, indent=2), risk_rating, now, now),
+            "INSERT INTO strategies (name, direction, rules_json, risk_rating, description, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (name, direction, json.dumps(rules, indent=2), risk_rating, description, now, now),
         )
         return cur.lastrowid
 
 
-def update_strategy(strategy_id: int, rules: dict, risk_rating: str | None = None):
+def update_strategy(strategy_id: int, rules: dict, risk_rating: str | None = None, description: str | None = None):
     # direction is intentionally not editable here — it defines what the
     # rules JSON's fields even mean (D1_above_prior_day_high vs
     # D1_below_prior_day_low, etc), so changing it on an existing strategy
@@ -1032,16 +1064,16 @@ def update_strategy(strategy_id: int, rules: dict, risk_rating: str | None = Non
         _check_risk_rating(risk_rating)
     now = datetime.now(ET).isoformat(timespec="seconds")
     with get_conn() as conn:
+        sets = ["rules_json = ?", "updated_at = ?"]
+        params: list = [json.dumps(rules, indent=2), now]
         if risk_rating is not None:
-            conn.execute(
-                "UPDATE strategies SET rules_json = ?, risk_rating = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(rules, indent=2), risk_rating, now, strategy_id),
-            )
-        else:
-            conn.execute(
-                "UPDATE strategies SET rules_json = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(rules, indent=2), now, strategy_id),
-            )
+            sets.append("risk_rating = ?")
+            params.append(risk_rating)
+        if description is not None:
+            sets.append("description = ?")
+            params.append(description)
+        params.append(strategy_id)
+        conn.execute(f"UPDATE strategies SET {', '.join(sets)} WHERE id = ?", params)
 
 
 def activate_strategy(account_id: int, strategy_id: int):
