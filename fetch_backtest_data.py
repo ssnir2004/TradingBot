@@ -95,11 +95,19 @@ def run_fetch(account_id: int, symbols: list[str], duration: str = DEFAULT_INITI
     )
     results = []
     try:
-        for symbol in symbols:
+        for i, symbol in enumerate(symbols, start=1):
+            # Printed (and flushed) per symbol, not just in the final
+            # summary - this is the only way to tell "still working,
+            # 200/500 done" apart from "stuck" when watching the run live,
+            # since IBKR historical-data calls have no built-in timeout of
+            # their own and can hang if the Gateway stops responding.
+            print(f"[{i}/{len(symbols)}] {symbol} ...", end=" ", flush=True)
             try:
                 result = fetch_symbol(ibkr.ib, symbol, duration)
+                print(result["status"], flush=True)
             except Exception as exc:  # noqa: BLE001 - one bad symbol must not kill the run
                 result = {"symbol": symbol, "status": "error", "error": str(exc)}
+                print(f"error: {exc}", flush=True)
             results.append(result)
             time.sleep(REQUEST_PAUSE_SECONDS)
     finally:
