@@ -376,6 +376,65 @@ def api_positions(mode: str = Depends(require_mode), account_id: int = Depends(r
     return positions
 
 
+# Moving a LIVE stop cancels the order actually protecting the position and
+# replaces it, so it gets the same speed bump as other LIVE-affecting
+# actions - there's a real (if brief) window where the position is unprotected.
+MODIFY_STOP_LIVE_CONFIRM_PHRASE = "ok"
+
+
+@app.put("/api/positions/{symbol}/stop")
+async def api_modify_stop(symbol: str, request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    body = await request.json()
+    try:
+        stop_price = float(body.get("stop_price"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="stop_price must be a number")
+    if stop_price <= 0:
+        raise HTTPException(status_code=400, detail="stop_price must be positive")
+
+    if mode == "live" and body.get("confirm") != MODIFY_STOP_LIVE_CONFIRM_PHRASE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Type '{MODIFY_STOP_LIVE_CONFIRM_PHRASE}' to confirm moving a LIVE stop order.",
+        )
+
+    symbol = symbol.strip().upper()
+    if not any(p["symbol"] == symbol for p in db.get_open_positions(account_id, mode)):
+        raise HTTPException(status_code=404, detail="No open position for that symbol")
+
+    proc = subprocess.run(
+        [sys.executable, str(PROJECT_DIR / "modify_stop.py"), "--mode", mode,
+         "--account-id", str(account_id), "--symbol", symbol, "--stop-price", str(stop_price)],
+        capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
+    )
+    db.log_decision(account_id, mode, "dashboard_control", user=user, action="modify_stop",
+                     symbol=symbol, stop_price=stop_price, stdout=proc.stdout, returncode=proc.returncode)
+    if proc.returncode != 0:
+        raise HTTPException(status_code=400, detail=proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "Modify failed")
+    return {"ok": True, "stdout": proc.stdout}
+
+
+@app.get("/api/candles")
+def api_candles(symbol: str, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    """5m candles for the dashboard's chart modal - pure yfinance, no IBKR
+    connection needed (mode/account_id are only here so the endpoint follows
+    the same auth/scoping shape as everything else)."""
+    bars = cycle.get_chart_bars(symbol.strip().upper())
+    if bars is None:
+        return {"candles": []}
+    candles = [
+        {
+            "time": int(ts.timestamp()),
+            "open": round(float(row.Open), 4),
+            "high": round(float(row.High), 4),
+            "low": round(float(row.Low), 4),
+            "close": round(float(row.Close), 4),
+        }
+        for ts, row in bars.iterrows()
+    ]
+    return {"candles": candles}
+
+
 # Opting a LIVE position out of today's automatic EOD close is real overnight
 # gap risk taken on deliberately, so it gets the same speed bump as other
 # LIVE-affecting actions; turning it back off just restores the normal safe

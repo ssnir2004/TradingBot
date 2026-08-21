@@ -203,6 +203,22 @@ def _get_5min_bars(symbol: str) -> pd.DataFrame | None:
         return None
 
 
+def get_chart_bars(symbol: str) -> pd.DataFrame | None:
+    """5m OHLC bars (last 5 trading days, incl. pre/post market) for the
+    dashboard's candlestick chart — same fetch shape as
+    _evaluate_entry_filters's intraday history, exposed unprefixed since
+    web/app.py (which never talks to IBKR directly, but yfinance needs no
+    broker connection) calls this directly rather than through a subprocess."""
+    try:
+        bars = yf.Ticker(symbol.replace(" ", "-")).history(period="5d", interval="5m", prepost=True)
+        if bars.empty:
+            return None
+        bars.index = bars.index.tz_convert(ET)
+        return bars
+    except Exception:
+        return None
+
+
 def _find_latest_swing_low(bars: pd.DataFrame) -> float | None:
     lows = bars["Low"].to_numpy()
     n = len(lows)

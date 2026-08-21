@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TradingBot Dashboard</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
   body { background:#f4f6f8; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -346,6 +347,21 @@
   </div>
 </div>
 
+<div class="modal" id="chart-modal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="chart-modal-title">Chart</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div id="chart-container" style="height:480px;"></div>
+        <div class="text-muted small mt-2">5-minute candles, last 5 trading days (includes pre/post market). Refreshes every 30s while open.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 const POLL_MS = 5000;
@@ -373,6 +389,46 @@ function modeApi(path, options) {
 
 function fmtMoney(v) { return (v === null || v === undefined || v === "") ? "-" : `$${Number(v).toFixed(2)}`; }
 function fmtR(v) { return (v === null || v === undefined) ? "-" : `${Number(v).toFixed(2)}R`; }
+
+function symbolLink(symbol) { return `<a href="#" class="symbol-link" data-symbol="${symbol}">${symbol}</a>`; }
+
+let chartModal = null, chartInstance = null, candleSeries = null, chartRefreshTimer = null;
+
+async function loadChartData(symbol) {
+  try {
+    const data = await modeApi(`/api/candles?symbol=${encodeURIComponent(symbol)}`);
+    candleSeries.setData(data.candles || []);
+  } catch (e) { /* keep showing the last good data on a transient fetch failure */ }
+}
+
+function openChart(symbol) {
+  document.getElementById("chart-modal-title").textContent = `${symbol} — ${currentMode.toUpperCase()}`;
+  const container = document.getElementById("chart-container");
+  container.innerHTML = "";
+  chartInstance = LightweightCharts.createChart(container, {
+    width: container.clientWidth, height: 480,
+    layout: { background: { color: "#ffffff" }, textColor: "#212529" },
+    grid: { vertLines: { color: "#eee" }, horzLines: { color: "#eee" } },
+    timeScale: { timeVisible: true, secondsVisible: false },
+  });
+  candleSeries = chartInstance.addCandlestickSeries();
+  loadChartData(symbol);
+  if (chartRefreshTimer) clearInterval(chartRefreshTimer);
+  chartRefreshTimer = setInterval(() => loadChartData(symbol), 30000);
+  if (!chartModal) chartModal = new bootstrap.Modal(document.getElementById("chart-modal"));
+  chartModal.show();
+}
+
+document.getElementById("chart-modal").addEventListener("hidden.bs.modal", () => {
+  if (chartRefreshTimer) { clearInterval(chartRefreshTimer); chartRefreshTimer = null; }
+});
+
+document.addEventListener("click", (e) => {
+  const link = e.target.closest(".symbol-link");
+  if (!link) return;
+  e.preventDefault();
+  openChart(link.dataset.symbol);
+});
 
 function setMode(mode) {
   currentMode = mode;
@@ -655,9 +711,10 @@ async function refreshPositions() {
   const body = document.getElementById("positions-body");
   if (!rows.length) { body.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No open positions</td></tr>'; return; }
   body.innerHTML = rows.map(p => `<tr>
-    <td>${p.symbol}</td><td>${sideBadge(p.side)}</td><td>${p.qty}</td><td>${fmtMoney(p.entry_price)}</td>
-    <td>${fmtMoney(p.current_price)}</td><td>${fmtMoney(p.stop_price)}</td>
-    <td class="small">${p.state}</td><td>${fmtR(p.unrealized_r)}</td>
+    <td>${symbolLink(p.symbol)}</td><td>${sideBadge(p.side)}</td><td>${p.qty}</td><td>${fmtMoney(p.entry_price)}</td>
+    <td>${fmtMoney(p.current_price)}</td>
+    <td>${fmtMoney(p.stop_price)} <button class="btn btn-sm btn-outline-secondary edit-stop-btn" data-symbol="${p.symbol}" data-current="${p.stop_price}" title="Edit stop">&#9998;</button></td>
+    <td class="small" title="אין הוראת Take Profit קבועה - הרווח נלקח בהדרגה לפי אחוזי R, ראה פאנל האסטרטגיה למעלה">${p.state}</td><td>${fmtR(p.unrealized_r)}</td>
     <td>${p.hold_overnight
       ? `<button class="btn btn-sm btn-outline-secondary hold-overnight-btn" data-symbol="${p.symbol}" data-hold="0">Held ✓</button>`
       : `<button class="btn btn-sm btn-outline-warning hold-overnight-btn" data-symbol="${p.symbol}" data-hold="1">Hold overnight</button>`}</td>
@@ -665,6 +722,35 @@ async function refreshPositions() {
 }
 
 document.getElementById("positions-body").addEventListener("click", async (e) => {
+  const editBtn = e.target.closest(".edit-stop-btn");
+  if (editBtn) {
+    const symbol = editBtn.dataset.symbol;
+    const current = editBtn.dataset.current;
+    const typed = prompt(`New stop price for ${symbol} (current: $${current}):`, current);
+    if (typed === null) return;
+    const stopPrice = Number(typed);
+    if (!Number.isFinite(stopPrice) || stopPrice <= 0) { alert("Enter a valid positive price."); return; }
+    const payload = { stop_price: stopPrice };
+    if (currentMode === "live") {
+      const confirmTyped = prompt(
+        `This cancels the current stop and places a new one at $${stopPrice.toFixed(2)} for ${symbol} in your LIVE account. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
+      );
+      if (confirmTyped !== CLOSE_LIVE_CONFIRM_PHRASE) return;
+      payload.confirm = confirmTyped;
+    }
+    editBtn.disabled = true;
+    try {
+      await modeApi(`/api/positions/${symbol}/stop`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      });
+      refreshPositions();
+    } catch (err) {
+      alert("Failed: " + err.message);
+      editBtn.disabled = false;
+    }
+    return;
+  }
+
   const btn = e.target.closest(".hold-overnight-btn");
   if (!btn) return;
   const symbol = btn.dataset.symbol;
@@ -704,7 +790,7 @@ async function refreshBrokerPositions() {
   body.innerHTML = rows.map(p => {
     const full = Math.abs(p.qty);
     return `<tr>
-      <td>${p.symbol}</td><td>${p.qty}</td><td>${fmtMoney(p.avg_cost)}</td>
+      <td>${symbolLink(p.symbol)}</td><td>${p.qty}</td><td>${fmtMoney(p.avg_cost)}</td>
       <td>${fmtMoney(p.current_price)}</td><td>${fmtPnl(p.unrealized_pnl)}</td>
       <td>
         <div class="input-group input-group-sm" style="width:170px;">
@@ -813,7 +899,7 @@ async function refreshWatchlist() {
       ? `<span class="badge bg-secondary" title="${r.error || 'no data'}">n/a</span>`
       : `<span class="badge ${r.pass ? "bg-success" : r._passedCount >= 4 ? "bg-warning text-dark" : "bg-secondary"}">${r._passedCount}/6</span>`;
     return `<tr>
-      <td class="fw-bold">${r.symbol}</td>
+      <td class="fw-bold">${symbolLink(r.symbol)}</td>
       <td>${sideBadge(r.side)}</td>
       <td>${passedBadge}</td>
       ${FILTER_KEYS.map(k => filterCell(r, k)).join("")}
