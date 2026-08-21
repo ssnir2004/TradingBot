@@ -369,7 +369,7 @@ const LIVE_RISK_CONFIRM_PHRASE = "ok";
 const CLOSE_LIVE_CONFIRM_PHRASE = "ok";
 let editingStrategyId = null;
 let strategyModal;
-let currentMode = "paper";
+let currentMode = "live";
 let nextCycleAtMs = null;
 
 async function api(path, options) {
@@ -1119,7 +1119,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   strategyModal = new bootstrap.Modal(document.getElementById("strategy-modal"));
   document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(el => new bootstrap.Tooltip(el));
   await refreshMe();
-  setMode("paper");
+  setMode("live");
   setInterval(refreshAll, POLL_MS);
   setInterval(updateCountdown, 1000);
 });
