@@ -232,9 +232,19 @@ first scheduled run (up to a week away):
 sudo -iu tradingbot bash -c "cd /opt/tradingbot && .venv/bin/python build_custom_universe.py --universe ixic_large_beta_buy"
 ```
 
-Takes a while (one yfinance fundamentals lookup per NASDAQ-listed candidate,
-several thousand tickers) — let it run in the background
-(`... &` or a `screen`/`tmux` session) rather than waiting on it.
+Takes a while by design — one yfinance fundamentals lookup per NASDAQ-listed
+candidate (several thousand tickers), deliberately throttled (2 workers,
+paced submissions) so it doesn't look like scraping to Yahoo and get the
+session's crumb rejected wholesale. Let it run in the background
+(`... &` or a `screen`/`tmux` session) rather than waiting on it; a run
+over the full NASDAQ-listed universe can take 30-60+ minutes.
+
+If the JSON result shows `"survivors_count": 0` with a wall of
+`Invalid Crumb` / `HTTP Error 401` lines, that's Yahoo temporarily
+rate-limiting this server's IP after too many fundamentals requests too
+fast (it happened after an early version of this script ran 8 workers with
+no pacing) — retrying immediately just repeats it. Wait 30-60 minutes and
+run it again once; don't loop-retry.
 
 If `ibgateway-paper.service` or `ibgateway-live.service` restarts (nightly
 `AutoRestartTime`, a crash, a server reboot) and IBKR forces a fresh 2FA

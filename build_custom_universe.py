@@ -33,6 +33,8 @@ DEFAULT_MIN_BETA = 1.2
 DEFAULT_MIN_RECOMMENDATION_MEAN = 2.0  # yfinance scale: 1.0=Strong Buy ... 5.0=Strong Sell
 ACCEPTABLE_RECOMMENDATION_KEYS = {"strong_buy", "buy"}
 REQUEST_TIMEOUT = 15
+REQUEST_STAGGER_SECONDS = 0.3
+DEFAULT_WORKERS = 2
 
 
 def _yahoo_to_ibkr(ticker: str) -> str:
@@ -66,11 +68,27 @@ def fetch_nasdaq_listed_symbols() -> list[str]:
     return sorted(set(symbols))
 
 
+def _fetch_info(symbol: str) -> dict | None:
+    """One attempt at yf.Ticker(symbol).info, with a single retry after a
+    short backoff - Yahoo's fundamentals endpoint (unlike the plain-OHLCV
+    endpoint morning_prefilter.py uses, which needs no auth) requires a
+    session crumb/cookie that occasionally gets rejected under load
+    ("Invalid Crumb" / HTTP 401); one retry a couple seconds later clears
+    most of those without having to re-run the whole scan."""
+    for attempt in range(2):
+        try:
+            info = yf.Ticker(symbol).info
+        except Exception:  # noqa: BLE001 - one bad ticker must not kill the scan
+            info = None
+        if info:
+            return info
+        if attempt == 0:
+            time.sleep(2.0)
+    return None
+
+
 def _screen_one(symbol: str, min_market_cap: float, min_beta: float, min_recommendation_mean: float) -> dict | None:
-    try:
-        info = yf.Ticker(symbol).info
-    except Exception:  # noqa: BLE001 - one bad ticker must not kill the scan
-        return None
+    info = _fetch_info(symbol)
     if not info:
         return None
 
@@ -128,10 +146,17 @@ def build_universe(
     survivors = []
     failed = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(_screen_one, symbol, min_market_cap, min_beta, min_recommendation_mean): symbol
-            for symbol in candidates
-        }
+        # Submitted with a small stagger, not all at once - bursting
+        # thousands of fundamentals requests at Yahoo in the same instant
+        # (even through only a couple of worker threads) reads as scraping
+        # and gets the session's crumb rejected wholesale ("Invalid Crumb"
+        # on every single ticker), which happened the first time this
+        # ran with 8 workers submitted in one burst. This is a slow,
+        # deliberately gentle scan - it only needs to run once a week.
+        futures = {}
+        for symbol in candidates:
+            futures[pool.submit(_screen_one, symbol, min_market_cap, min_beta, min_recommendation_mean)] = symbol
+            time.sleep(REQUEST_STAGGER_SECONDS)
         for future in as_completed(futures):
             try:
                 hit = future.result()
@@ -193,7 +218,7 @@ def main():
     parser.add_argument("--min-beta", type=float, default=DEFAULT_MIN_BETA)
     parser.add_argument("--min-recommendation-mean", type=float, default=DEFAULT_MIN_RECOMMENDATION_MEAN)
     parser.add_argument("--limit", type=int, default=None, help="Cap candidates screened (testing only)")
-    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 

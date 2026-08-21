@@ -145,7 +145,8 @@ def main():
                 lambda key=universe_key: _guarded(
                     mode, f"build_universe_{key}", account_id, build_custom_universe.build_universe,
                     key, build_custom_universe.DEFAULT_MIN_MARKET_CAP, build_custom_universe.DEFAULT_MIN_BETA,
-                    build_custom_universe.DEFAULT_MIN_RECOMMENDATION_MEAN, None, 8, False,
+                    build_custom_universe.DEFAULT_MIN_RECOMMENDATION_MEAN, None,
+                    build_custom_universe.DEFAULT_WORKERS, False,
                 ),
                 CronTrigger(day_of_week="sun", hour=8, minute=0, timezone=ET),
                 id=f"build_universe_{universe_key}", misfire_grace_time=3600,
