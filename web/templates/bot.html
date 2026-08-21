@@ -16,6 +16,9 @@
   .mode-tab.active-paper { background:#0dcaf0 !important; color:#000 !important; }
   .mode-tab.active-live { background:#dc3545 !important; color:#fff !important; }
   th[data-bs-toggle="tooltip"] { cursor: help; text-decoration: underline dotted; text-underline-offset: 3px; }
+  #strategy-info-body h6 { font-weight: 700; margin-top: 1rem; }
+  #strategy-info-body h6:first-child { margin-top: 0; }
+  #strategy-info-body p { white-space: pre-line; margin-bottom: 0.5rem; }
 </style>
 </head>
 <body>
@@ -211,6 +214,22 @@
   </div>
 </div>
 
+<!-- Strategy info modal -->
+<div class="modal" id="strategy-info-modal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="strategy-info-title">Strategy</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="strategy-info-body" dir="rtl"></div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">סגור</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="chart-modal" tabindex="-1">
   <div class="modal-dialog modal-xl modal-dialog-centered">
     <div class="modal-content">
@@ -240,6 +259,7 @@
 const LIVE_RISK_CONFIRM_PHRASE = "ok";
 let editingStrategyId = null;
 let strategyModal;
+let strategyInfoModal;
 
 async function refreshRiskParams() {
   // Skip while the user is actively editing one of these fields — the 5s
@@ -489,11 +509,14 @@ async function refreshPerformance() {
     </div>`).join("") || '<p class="text-muted">No closed trades</p>';
 }
 
+let strategiesCache = {};
+
 async function refreshStrategies() {
   const rows = await api("/api/strategies");
+  strategiesCache = Object.fromEntries(rows.map(s => [s.id, s]));
   const body = document.getElementById("strategies-body");
   body.innerHTML = rows.map(s => `<tr>
-    <td>${s.name} ${s.description ? `<button class="btn btn-sm btn-link p-0 ms-1 strategy-info-btn" data-id="${s.id}" title="הצג/הסתר הסבר">&#8505;&#65039;</button>` : ""}</td>
+    <td>${s.name} ${s.description ? `<button class="btn btn-sm btn-link p-0 ms-1 strategy-info-btn" data-id="${s.id}" title="הצג הסבר מלא">&#8505;&#65039;</button>` : ""}</td>
     <td>${sideBadge(s.direction)}</td>
     <td><span class="badge ${RISK_BADGE_CLASS[s.risk_rating] || "bg-secondary"}">${s.risk_rating}</span></td>
     <td>${s.is_active ? '<span class="badge bg-success">active</span>' : ""}</td>
@@ -503,14 +526,43 @@ async function refreshStrategies() {
       <button class="btn btn-sm btn-outline-secondary" onclick="editStrategy(${s.id})">Edit</button>
       ${s.is_active ? "" : `<button class="btn btn-sm btn-outline-danger" onclick="deleteStrategy(${s.id})">Delete</button>`}
     </td>
-  </tr>
-  ${s.description ? `<tr class="strategy-desc-row d-none" id="strategy-desc-${s.id}"><td colspan="6" class="small text-muted" dir="rtl">${s.description}</td></tr>` : ""}`).join("");
+  </tr>`).join("");
+}
+
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// Description text uses a light "## Heading" convention (sections
+// separated by a blank line) - parsed into <h6>/<p> blocks for the info
+// modal instead of dumping one long paragraph. Escaped via textContent
+// (not string interpolation) before going into innerHTML, then rendered
+// with white-space:pre-line (see the <style> block) so a section's own
+// internal line breaks (e.g. one line per D1-I3 filter) still show.
+function renderStrategyDescription(text) {
+  if (!text) return '<p class="text-muted">No description yet.</p>';
+  return text.split(/\n(?=## )/).map(section => {
+    const m = section.match(/^## (.+)\n?([\s\S]*)$/);
+    if (!m) return `<p>${escapeHtml(section.trim())}</p>`;
+    const [, heading, body] = m;
+    return `<h6>${escapeHtml(heading.trim())}</h6><p>${escapeHtml(body.trim())}</p>`;
+  }).join("");
+}
+
+function showStrategyInfo(id) {
+  const s = strategiesCache[id];
+  if (!s) return;
+  document.getElementById("strategy-info-title").textContent = s.name;
+  document.getElementById("strategy-info-body").innerHTML = renderStrategyDescription(s.description);
+  strategyInfoModal.show();
 }
 
 document.getElementById("strategies-body").addEventListener("click", (e) => {
   const btn = e.target.closest(".strategy-info-btn");
   if (!btn) return;
-  document.getElementById(`strategy-desc-${btn.dataset.id}`).classList.toggle("d-none");
+  showStrategyInfo(Number(btn.dataset.id));
 });
 
 async function activateStrategy(id, riskRating) {
@@ -615,6 +667,7 @@ function refreshAll() {
 
 document.addEventListener("DOMContentLoaded", () => {
   strategyModal = new bootstrap.Modal(document.getElementById("strategy-modal"));
+  strategyInfoModal = new bootstrap.Modal(document.getElementById("strategy-info-modal"));
 });
 </script>
 </body>
