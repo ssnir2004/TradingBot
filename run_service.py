@@ -23,10 +23,12 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+import build_custom_universe
 import cycle
 import morning_prefilter
 import daily_summary
 from src import db
+from src.custom_universes import CUSTOM_UNIVERSES
 
 PROJECT_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
@@ -131,6 +133,23 @@ def main():
             CronTrigger(day_of_week="mon-fri", hour=9, minute=25, timezone=ET),
             id="maintenance", misfire_grace_time=300,
         )
+        # Custom-universe fundamentals (market cap/beta/analyst rating)
+        # drift over weeks, not minutes, so this runs far less often than
+        # the gap prefilter - weekly is enough, and stays well inside each
+        # universe's own max_staleness_days safety margin even if one run
+        # is missed. Needs real internet access to nasdaqtrader.com/yfinance
+        # (see build_custom_universe.py's own docstring) - fine here since
+        # this runs on the deployed server, unlike a sandboxed dev session.
+        for universe_key in CUSTOM_UNIVERSES:
+            scheduler.add_job(
+                lambda key=universe_key: _guarded(
+                    mode, f"build_universe_{key}", account_id, build_custom_universe.build_universe,
+                    key, build_custom_universe.DEFAULT_MIN_MARKET_CAP, build_custom_universe.DEFAULT_MIN_BETA,
+                    build_custom_universe.DEFAULT_MIN_RECOMMENDATION_MEAN, None, 8, False,
+                ),
+                CronTrigger(day_of_week="sun", hour=8, minute=0, timezone=ET),
+                id=f"build_universe_{universe_key}", misfire_grace_time=3600,
+            )
 
     logger.info("[%s] Trading service starting. Jobs: %s", mode, [j.id for j in scheduler.get_jobs()])
     try:

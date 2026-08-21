@@ -215,6 +215,27 @@ sudo -iu tradingbot bash -c "cd /opt/tradingbot && git pull && .venv/bin/pip ins
 sudo systemctl restart trading-bot-paper.service trading-bot-live.service dashboard.service
 ```
 
+### Custom-universe strategies (e.g. "Long Breakout NASDAQ Beta")
+
+A strategy can restrict itself to a fundamentals-screened universe (market
+cap, beta, analyst rating) narrower than the default S&P 500 scan — see
+`src/custom_universes.py`. `build_custom_universe.py` builds/refreshes the
+ticker list for one of these; `trading-bot-paper.service`'s scheduler
+already runs it automatically every Sunday 08:00 ET for every universe
+defined there, so this is normally hands-off. The one time it needs a
+manual run is right after this feature is first deployed — the cache
+starts out empty, and a strategy pinned to an empty/stale universe just
+finds no candidates rather than erroring, so it fails silently until the
+first scheduled run (up to a week away):
+
+```bash
+sudo -iu tradingbot bash -c "cd /opt/tradingbot && .venv/bin/python build_custom_universe.py --universe ixic_large_beta_buy"
+```
+
+Takes a while (one yfinance fundamentals lookup per NASDAQ-listed candidate,
+several thousand tickers) — let it run in the background
+(`... &` or a `screen`/`tmux` session) rather than waiting on it.
+
 If `ibgateway-paper.service` or `ibgateway-live.service` restarts (nightly
 `AutoRestartTime`, a crash, a server reboot) and IBKR forces a fresh 2FA
 challenge, the matching `trading-bot-*.service` will simply fail to connect

@@ -601,6 +601,14 @@ def _within_entry_window(rules: dict, now_et: datetime | None = None) -> bool:
     return True
 
 
+def _strategy_universe(rules: dict) -> str:
+    """The watchlist universe tag this strategy's candidates must carry
+    (see db.get_watchlist/replace_watchlist) - "default" (the S&P 500 scan)
+    unless the strategy's rules_json restricts itself to a named custom
+    universe via universe_filters.custom_universe."""
+    return rules.get("universe_filters", {}).get("custom_universe") or "default"
+
+
 def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dict, env: dict, side: str) -> list[dict]:
     """Scans this side's ('long' or 'short') watchlist for new entries
     under its own active strategy. positions holds ALL open positions
@@ -621,7 +629,7 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
     if len(side_positions) >= max_concurrent:
         return positions
 
-    watchlist = [row["symbol"] for row in db.get_watchlist(account_id, mode, direction=side)]
+    watchlist = [row["symbol"] for row in db.get_watchlist(account_id, mode, direction=side, universe=_strategy_universe(rules))]
     if not watchlist:
         return positions
 
@@ -730,7 +738,7 @@ def scan_watchlist_filters(account_id: int):
         rules = db.get_active_rules(account_id, side)
         if rules is None:
             continue
-        for row in db.get_watchlist(account_id, "paper", direction=side):
+        for row in db.get_watchlist(account_id, "paper", direction=side, universe=_strategy_universe(rules)):
             detail = _evaluate_entry_filters(account_id, "paper", row["symbol"], rules, side)
             results.append({"symbol": row["symbol"], "gap_pct": row["gap_pct"], **detail})
 

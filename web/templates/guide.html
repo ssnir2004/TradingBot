@@ -312,7 +312,7 @@
 
   <div class="card">
     <div class="card-body">
-      <h5>דירוג סיכון וארבע אסטרטגיות מובנות</h5>
+      <h5>דירוג סיכון והאסטרטגיות המובנות</h5>
       <p>לכל אסטרטגיה יש דירוג סיכון (Risk rating) - תג צבעוני ליד השם:</p>
       <table class="table table-sm">
         <thead><tr><th style="width:140px;">דירוג</th><th>מה זה אומר</th></tr></thead>
@@ -322,15 +322,16 @@
           <tr><td><span class="badge bg-danger">aggressive</span></td><td>סף כניסה רופף משמעותית (יותר עסקאות, יותר "רעש"), סיכון גבוה משמעותית לעסקה.</td></tr>
         </tbody>
       </table>
-      <p>ארבע אסטרטגיות מוכנות מגיעות עם הבוט:</p>
+      <p>אסטרטגיות מוכנות מגיעות עם הבוט:</p>
       <table class="table table-sm">
-        <thead><tr><th>שם</th><th>כיוון</th><th>Gap מינימלי</th><th>RVOL מינימלי</th><th>סיכון/עסקה</th><th>גודל פוזיציה מקס'</th><th>פוזיציות בו-זמנית</th></tr></thead>
+        <thead><tr><th>שם</th><th>כיוון</th><th>יקום</th><th>Gap מינימלי</th><th>RVOL מינימלי</th><th>סיכון/עסקה</th><th>גודל פוזיציה מקס'</th><th>פוזיציות בו-זמנית</th></tr></thead>
         <tbody>
-          <tr><td>Long Breakout Conservative</td><td><span class="badge bg-primary">LONG</span></td><td>3.0%</td><td>x2.0</td><td>1.0%</td><td>10%</td><td>5</td></tr>
-          <tr><td>Long Breakout RSI Filter</td><td><span class="badge bg-primary">LONG</span></td><td>3.0%</td><td>x2.0</td><td>1.0%</td><td>10%</td><td>5</td></tr>
-          <tr><td>Long Breakout Aggressive</td><td><span class="badge bg-primary">LONG</span></td><td>1.5%</td><td>x1.2</td><td>2.5%</td><td>20%</td><td>8</td></tr>
-          <tr><td>Short Breakdown Conservative</td><td><span class="badge bg-danger">SHORT</span></td><td>3.0%</td><td>x2.0</td><td>1.0%</td><td>10%</td><td>5</td></tr>
-          <tr><td>Short Parabolic Reversal</td><td><span class="badge bg-danger">SHORT</span></td><td>3.0%</td><td>x2.0</td><td>1.0%</td><td>10%</td><td>5</td></tr>
+          <tr><td>Long Breakout Conservative</td><td><span class="badge bg-primary">LONG</span></td><td>S&amp;P 500</td><td>3.0%</td><td>x2.0</td><td>1.0%</td><td>10%</td><td>5</td></tr>
+          <tr><td>Long Breakout RSI Filter</td><td><span class="badge bg-primary">LONG</span></td><td>S&amp;P 500</td><td>3.0%</td><td>x2.0</td><td>1.0%</td><td>10%</td><td>5</td></tr>
+          <tr><td>Long Breakout Aggressive</td><td><span class="badge bg-primary">LONG</span></td><td>S&amp;P 500</td><td>1.5%</td><td>x1.2</td><td>2.5%</td><td>20%</td><td>8</td></tr>
+          <tr><td>Long Breakout NASDAQ Beta</td><td><span class="badge bg-primary">LONG</span></td><td>NASDAQ (IXIC), מסונן</td><td>3.0%</td><td>x2.0</td><td>1.0%</td><td>10%</td><td>5</td></tr>
+          <tr><td>Short Breakdown Conservative</td><td><span class="badge bg-danger">SHORT</span></td><td>S&amp;P 500</td><td>3.0%</td><td>x2.0</td><td>1.0%</td><td>10%</td><td>5</td></tr>
+          <tr><td>Short Parabolic Reversal</td><td><span class="badge bg-danger">SHORT</span></td><td>S&amp;P 500</td><td>3.0%</td><td>x2.0</td><td>1.0%</td><td>10%</td><td>5</td></tr>
         </tbody>
       </table>
       <p class="text-muted small">
@@ -338,6 +339,14 @@
         הן מתאימות) כתובים כהסבר מלא ליד כל אסטרטגיה בדשבורד עצמו - לחצו
         על סמל ה-<span class="mono">&#8505;&#65039;</span> ליד שם האסטרטגיה בטבלת
         Strategies כדי לראות אותו.
+      </p>
+      <p class="text-muted small">
+        <strong>Long Breakout NASDAQ Beta</strong> שונה מכל שאר האסטרטגיות
+        בעמודת "יקום": במקום לסרוק את ה-S&amp;P 500, היא מוגבלת מראש לרשימת
+        מניות NASDAQ שעברה סינון פונדמנטלי (שווי שוק, ביטא, דירוג אנליסטים)
+        - הרשימה הזו לא מחושבת חי בכל מחזור אלא נבנית מראש ומתעדכנת פעם
+        בשבוע. אם הרשימה עדיין לא נוצרה בשרת (או התיישנה), האסטרטגיה פשוט
+        לא תמצא מועמדים באותו יום - ראו את ההסבר המלא שלה בדשבורד.
       </p>
       <p class="mb-0">
         הפעלת אסטרטגיה מדורגת <span class="badge bg-danger">aggressive</span>

@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 import yfinance as yf
 
 from src import db
+from src.custom_universes import load_all_custom_universes
 from src.notify import notify
 from src.sp500_tickers import SP500_TICKERS
 
@@ -37,7 +38,18 @@ def _yahoo_to_ibkr(ticker: str) -> str:
 
 def run_scan(min_gap: float, min_price: float, dry_run: bool) -> dict:
     started = time.monotonic()
-    yahoo_tickers = [_ibkr_to_yahoo(t) for t in SP500_TICKERS]
+
+    # "default" (the S&P 500) is always scanned; any custom universe with a
+    # valid, non-stale cache (see src/custom_universes.py) is scanned too,
+    # in the same pass — a ticker in more than one universe (common, since
+    # plenty of S&P 500 names are also NASDAQ-listed) is only downloaded
+    # once and just picks up multiple tags.
+    universe_membership: dict[str, set[str]] = {"default": set(SP500_TICKERS)}
+    for key, tickers in load_all_custom_universes().items():
+        universe_membership[key] = set(tickers)
+
+    all_tickers = sorted(set().union(*universe_membership.values()))
+    yahoo_tickers = [_ibkr_to_yahoo(t) for t in all_tickers]
 
     data = yf.download(
         tickers=" ".join(yahoo_tickers),
@@ -53,7 +65,7 @@ def run_scan(min_gap: float, min_price: float, dry_run: bool) -> dict:
         result = {
             "success": False,
             "error": "yf.download returned an empty dataframe",
-            "total_screened": len(SP500_TICKERS),
+            "total_screened": len(all_tickers),
         }
         print(json.dumps(result))
         notify(
@@ -69,9 +81,9 @@ def run_scan(min_gap: float, min_price: float, dry_run: bool) -> dict:
     below_price = 0
     failed = 0
 
-    multi_ticker = len(SP500_TICKERS) > 1
+    multi_ticker = len(all_tickers) > 1
 
-    for ibkr_ticker, yahoo_ticker in zip(SP500_TICKERS, yahoo_tickers):
+    for ibkr_ticker, yahoo_ticker in zip(all_tickers, yahoo_tickers):
         try:
             bars = data[yahoo_ticker] if multi_ticker else data
             bars = bars.dropna(how="all")
@@ -89,11 +101,13 @@ def run_scan(min_gap: float, min_price: float, dry_run: bool) -> dict:
                 below_price += 1
                 continue
 
+            universes = [key for key, members in universe_membership.items() if ibkr_ticker in members]
             entry = {
                 "ticker": ibkr_ticker,
                 "gap_pct": gap_pct,
                 "open": float(bars.iloc[-1]["Open"]),
                 "prev_close": yesterday_close,
+                "universes": universes,
             }
             if gap_pct >= min_gap:
                 up_survivors.append(entry)
@@ -110,7 +124,7 @@ def run_scan(min_gap: float, min_price: float, dry_run: bool) -> dict:
     down_survivors.sort(key=lambda s: s["gap_pct"])  # most negative (biggest gap down) first
     down_survivors = down_survivors[:MAX_SURVIVORS]
 
-    total = len(SP500_TICKERS)
+    total = len(all_tickers)
     elapsed = round(time.monotonic() - started, 2)
     now_et_str = datetime.now(ET).strftime("%Y-%m-%d %H:%M %Z")
 
@@ -147,11 +161,11 @@ def run_scan(min_gap: float, min_price: float, dry_run: bool) -> dict:
         # watchlist rows) rather than re-running it per account.
         watchlist_entries = [
             {"symbol": s["ticker"], "direction": "long", "gap_pct": s["gap_pct"],
-             "open_price": s["open"], "prev_close": s["prev_close"]}
+             "open_price": s["open"], "prev_close": s["prev_close"], "universes": s["universes"]}
             for s in up_survivors
         ] + [
             {"symbol": s["ticker"], "direction": "short", "gap_pct": s["gap_pct"],
-             "open_price": s["open"], "prev_close": s["prev_close"]}
+             "open_price": s["open"], "prev_close": s["prev_close"], "universes": s["universes"]}
             for s in down_survivors
         ]
         for account_id in db.list_account_ids():

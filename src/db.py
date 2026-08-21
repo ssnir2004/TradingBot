@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
     open_price REAL,
     prev_close REAL,
     generated_at TEXT,
+    universe TEXT NOT NULL DEFAULT ',default,',
     PRIMARY KEY (account_id, mode, symbol)
 );
 
@@ -355,6 +356,60 @@ EXTRA_STRATEGY_PRESETS = [
         "short",
         "נועדה לתפוס בדיוק את המקרה שבו Short Breakdown Conservative מפספסת: מניה שעלתה פרבולית ומתחילה להתהפך בשיא, כשהיא עדיין הרבה מעל ה-SMA200 (D2 השמרני לא יתמלא עד שהמניה כבר נפלה משמעותית). שני שינויים מהגרסה השמרנית: D2 דורש שסגירת אתמול תהיה לפחות 40% מעל ה-SMA50 (מתיחת יתר פרבולית, לא 'כבר מתחת ל-SMA200'), ו-I2 דורש RSI(14) מתחת ל-50 תוך-יומי (אישור שהמומנטום התהפך בפועל, לא שפל יומי חדש). זמן הכניסה המוקדם ביותר שלה גם מוקדם יותר - 9:35 במקום 10:05, כדי לתפוס את ההיפוך מוקדם ככל האפשר. זו כניסה נגד המגמה שהתקיימה עד כה (mean-reversion), ולכן חשופה יותר לאיתותי שווא.",
     ),
+    (
+        # Identical numbers to the default Long Breakout Conservative
+        # (D1-D3, I1-I3, exit, risk) — the only difference is the universe
+        # this strategy is even allowed to consider: instead of the S&P
+        # 500, it's restricted (via universe_filters.custom_universe, see
+        # cycle._strategy_universe / db.get_watchlist's universe param) to
+        # a fundamentals-screened slice of the NASDAQ Composite (IXIC) —
+        # market cap > $1B, beta > 1.2, analyst consensus Buy or better —
+        # built by build_custom_universe.py and cached in
+        # data/universes/ixic_large_beta_buy.json. That cache has to exist
+        # and be fresh (see src/custom_universes.py's max_staleness_days)
+        # or this strategy simply finds no candidates.
+        "Long Breakout NASDAQ Beta",
+        {
+            "strategy_name": "Long Breakout NASDAQ Beta",
+            "direction": "long_only",
+            "trade_timeframe": "5m",
+            "universe_filters": {
+                "index": "NASDAQ Composite (IXIC)",
+                "min_price_usd": 3.0,
+                "custom_universe": "ixic_large_beta_buy",
+                "min_market_cap_usd": 1_000_000_000,
+                "min_beta": 1.2,
+                "min_analyst_rating": "buy",
+            },
+            "daily_filters": {
+                "D1_above_prior_day_high": True,
+                "D2_prior_close_above_sma200": True,
+                "D3_min_gap_pct_from_prior_close": 3.0,
+            },
+            "intraday_filters": {
+                "I1_above_premarket_high": True,
+                "I2_above_today_hod": True,
+                "I3_rvol_min": 2.0,
+                "I3_rvol_lookback_days": 14,
+            },
+            "time_filter": {"earliest_entry_et": "10:05", "latest_entry_et": "15:30", "force_close_et": "15:51"},
+            "exit": {
+                "initial_stop_rule": "lod_minus_1pct",
+                "partial_profit_trigger_R": 0.75,
+                "partial_profit_fraction": 0.3333,
+                "breakeven_trigger_R": 1.0,
+                "post_breakeven_trail": "swing_low_5m_2_2",
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+            },
+        },
+        "conservative",
+        "long",
+        "זהה במספרים לחלוטין ל-Long Breakout Conservative - אותם D1-D3, I1-I3, ניהול סיכון ויציאה. ההבדל היחיד הוא היקום שהיא בכלל מסתכלת עליו: במקום S&P 500, רק מניות הנסחרות ב-NASDAQ (מדד IXIC) שעברו סינון פונדמנטלי - שווי שוק מעל 1 מיליארד דולר, ביטא מעל 1.2 (תנודתיות גבוהה מהשוק), ודירוג אנליסטים ממוצע של Buy ומעלה. הרשימה הזו לא מחושבת בכל מחזור כמו D1-I3 - היא נבנית מראש ע\"י סקריפט נפרד (build_custom_universe.py) שדורש גישה חיה לאינטרנט לנתונים פונדמנטליים, ומתעדכנת מעת לעת (מומלץ אחת לשבוע) - אם הרשימה השמורה ישנה מדי, האסטרטגיה פשוט לא תמצא מועמדים.",
+    ),
 ]
 
 
@@ -488,6 +543,7 @@ def init_db(seed_rules_path: Path | None = None):
         _migrate_add_column(conn, "strategies", "description", "TEXT NOT NULL DEFAULT ''")
         _migrate_add_column(conn, "positions", "side", "TEXT NOT NULL DEFAULT 'long'")
         _migrate_add_column(conn, "positions", "hold_overnight", "INTEGER NOT NULL DEFAULT 0")
+        _migrate_add_column(conn, "watchlist", "universe", "TEXT NOT NULL DEFAULT ',default,'")
         _migrate_add_column(conn, "watchlist", "direction", "TEXT NOT NULL DEFAULT 'long'")
         # The shipped default strategy predates risk_rating and got the
         # generic 'moderate' default from the ALTER TABLE above — it's
@@ -853,25 +909,48 @@ def replace_watchlist(account_id: int, mode: str, entries: list[dict]):
     """Replaces the ENTIRE watchlist (both directions) for this account+mode
     — a caller that only scans one direction must pass the other
     direction's current entries back in too, or they'll be wiped.
-    morning_prefilter.py scans both in one pass for exactly this reason."""
+    morning_prefilter.py scans both in one pass for exactly this reason.
+
+    Each entry may carry a "universes" list (e.g. ["default"] or
+    ["default", "ixic_large_beta_buy"] for a symbol that qualifies for more
+    than one strategy universe) - stored as a comma-delimited, comma-wrapped
+    tag string (",default,ixic_large_beta_buy,") so get_watchlist's universe
+    filter can do a simple LIKE containment check without a join table.
+    Entries with no "universes" key default to just ["default"], the
+    S&P 500 scan's own tag."""
     _check_mode(mode)
     now = datetime.now(ET).isoformat(timespec="seconds")
     with get_conn() as conn:
         conn.execute("DELETE FROM watchlist WHERE account_id = ? AND mode = ?", (account_id, mode))
+        rows = []
+        for e in entries:
+            e = dict(e)
+            universes = e.pop("universes", None) or ["default"]
+            e["universe"] = "," + ",".join(universes) + ","
+            rows.append({"direction": "long", **e, "account_id": account_id, "mode": mode, "generated_at": now})
         conn.executemany(
-            "INSERT INTO watchlist (account_id, mode, symbol, direction, gap_pct, open_price, prev_close, generated_at) "
-            "VALUES (:account_id, :mode, :symbol, :direction, :gap_pct, :open_price, :prev_close, :generated_at)",
-            [{"direction": "long", **e, "account_id": account_id, "mode": mode, "generated_at": now} for e in entries],
+            "INSERT INTO watchlist (account_id, mode, symbol, direction, gap_pct, open_price, prev_close, generated_at, universe) "
+            "VALUES (:account_id, :mode, :symbol, :direction, :gap_pct, :open_price, :prev_close, :generated_at, :universe)",
+            rows,
         )
 
 
-def get_watchlist(account_id: int, mode: str, direction: str | None = None) -> list[dict]:
+def get_watchlist(account_id: int, mode: str, direction: str | None = None, universe: str | None = None) -> list[dict]:
+    """universe, when given, restricts results to rows tagged with that
+    universe key (see replace_watchlist) - e.g. a strategy whose
+    universe_filters.custom_universe is "ixic_large_beta_buy" only ever
+    sees symbols tagged with that key, never plain S&P 500 survivors, and
+    vice versa a strategy with no custom_universe only sees "default"-tagged
+    symbols."""
     _check_mode(mode)
     query = "SELECT * FROM watchlist WHERE account_id = ? AND mode = ?"
     params = [account_id, mode]
     if direction is not None:
         query += " AND direction = ?"
         params.append(direction)
+    if universe is not None:
+        query += " AND universe LIKE ?"
+        params.append(f"%,{universe},%")
     query += " ORDER BY ABS(gap_pct) DESC"
     with get_conn() as conn:
         rows = conn.execute(query, params).fetchall()
