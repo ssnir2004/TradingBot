@@ -159,6 +159,23 @@ CREATE TABLE IF NOT EXISTS account_gateway_ports (
     paper_port INTEGER NOT NULL,
     live_port INTEGER NOT NULL
 );
+
+-- One row per backtest run (possibly covering several strategies at once,
+-- for side-by-side comparison — see params_json's strategy_ids). Runs in
+-- a background thread in the dashboard process itself (no subprocess,
+-- unlike every IBKR-touching endpoint - src/backtest_engine.py only reads
+-- the local historical-bar cache plus yfinance, never talks to IBKR at
+-- run time), so results_json is filled in once that thread finishes.
+CREATE TABLE IF NOT EXISTS backtests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    params_json TEXT NOT NULL,
+    results_json TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    finished_at TEXT
+);
 """
 
 # Created after the mode-column migrations run below — an older DB's
@@ -166,6 +183,7 @@ CREATE TABLE IF NOT EXISTS account_gateway_ports (
 INDEXES_SCHEMA = """
 CREATE INDEX IF NOT EXISTS idx_trades_account_mode_timestamp ON trades(account_id, mode, timestamp_iso);
 CREATE INDEX IF NOT EXISTS idx_decision_log_account_mode_timestamp ON decision_log(account_id, mode, timestamp_iso);
+CREATE INDEX IF NOT EXISTS idx_backtests_account_created ON backtests(account_id, created_at);
 """
 
 # Two extra presets seeded alongside the conservative default (rules.json),
@@ -1355,6 +1373,70 @@ def delete_strategy(strategy_id: int):
         if active:
             raise ValueError("Cannot delete a strategy that's active on at least one account; deactivate it there first")
         conn.execute("DELETE FROM strategies WHERE id = ?", (strategy_id,))
+
+
+# -------------------------------------------------------------- backtests ---
+def create_backtest(account_id: int, params: dict) -> int:
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO backtests (account_id, status, params_json, created_at) VALUES (?, 'pending', ?, ?)",
+            (account_id, json.dumps(params), now),
+        )
+        return cur.lastrowid
+
+
+def start_backtest(backtest_id: int):
+    with get_conn() as conn:
+        conn.execute("UPDATE backtests SET status = 'running' WHERE id = ?", (backtest_id,))
+
+
+def finish_backtest(backtest_id: int, results: dict):
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE backtests SET status = 'done', results_json = ?, finished_at = ? WHERE id = ?",
+            (json.dumps(results), now, backtest_id),
+        )
+
+
+def fail_backtest(backtest_id: int, error: str):
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE backtests SET status = 'failed', error = ?, finished_at = ? WHERE id = ?",
+            (error, now, backtest_id),
+        )
+
+
+def get_backtest(backtest_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM backtests WHERE id = ?", (backtest_id,)).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["params"] = json.loads(result.pop("params_json"))
+        raw_results = result.pop("results_json")
+        result["results"] = json.loads(raw_results) if raw_results else None
+        return result
+
+
+def list_backtests(account_id: int, limit: int = 20) -> list[dict]:
+    """Summary rows only (no results_json - can be large with several
+    strategies' full trade logs) for the history list; fetch a single
+    backtest's full detail via get_backtest."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, account_id, status, params_json, error, created_at, finished_at FROM backtests "
+            "WHERE account_id = ? ORDER BY created_at DESC LIMIT ?",
+            (account_id, limit),
+        ).fetchall()
+        results = []
+        for row in rows:
+            result = dict(row)
+            result["params"] = json.loads(result.pop("params_json"))
+            results.append(result)
+        return results
 
 
 # ------------------------------------------------------------------ users ---

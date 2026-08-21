@@ -8,6 +8,8 @@ it never talks to IBKR directly, so it can safely run as a separate process.
 import json
 import subprocess
 import sys
+import threading
+from datetime import date
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -18,7 +20,7 @@ from fastapi.templating import Jinja2Templates
 
 import cycle
 import morning_prefilter
-from src import db, gateway_provisioning, mode_config, perf, secrets_store
+from src import backtest_data, backtest_engine, db, gateway_provisioning, mode_config, perf, secrets_store
 from web import gateway_control
 from web.auth import COOKIE_NAME, make_session_cookie, read_session, require_user
 
@@ -154,6 +156,15 @@ def trading_page(request: Request):
     if not read_session(request):
         return RedirectResponse("/login", status_code=303)
     return templates.TemplateResponse(request, "trading.html", {"active_page": "trading"})
+
+
+@app.get("/backtest", response_class=HTMLResponse)
+def backtest_page(request: Request):
+    if not db.any_users_exist():
+        return RedirectResponse("/setup", status_code=303)
+    if not read_session(request):
+        return RedirectResponse("/login", status_code=303)
+    return templates.TemplateResponse(request, "backtest.html", {"active_page": "backtest"})
 
 
 @app.get("/guide", response_class=HTMLResponse)
@@ -840,3 +851,108 @@ def api_delete_strategy(strategy_id: int, account_id: int = Depends(require_acco
         raise HTTPException(status_code=400, detail=str(exc))
     _log_account_action(account_id, user, action="delete_strategy", strategy_id=strategy_id)
     return {"ok": True}
+
+
+# --------------------------------------------------------------- backtests ---
+# Runs entirely in a background thread inside THIS process, unlike every
+# IBKR-touching endpoint above — backtest_engine.py only reads the local
+# historical-bar cache (src/backtest_data.py) plus yfinance for daily bars,
+# never talks to IBKR at run time, so there's no subprocess/client-id
+# concern here the way there is for trade.py etc.
+DEFAULT_BACKTEST_PORTFOLIO_VALUE = 100_000.0
+DEFAULT_BACKTEST_MAX_RISK_PCT = 1.0
+DEFAULT_BACKTEST_MAX_TRADES_PER_DAY = 5
+
+
+def _run_backtest_job(backtest_id: int, params: dict):
+    db.start_backtest(backtest_id)
+    try:
+        start_date = date.fromisoformat(params["start_date"])
+        end_date = date.fromisoformat(params["end_date"])
+        symbols = params["symbols"]
+        results = {}
+        for strategy_id in params["strategy_ids"]:
+            strategy = db.get_strategy(strategy_id)
+            if not strategy:
+                results[str(strategy_id)] = {"error": "Strategy not found"}
+                continue
+            rules = json.loads(strategy["rules_json"])
+            sim = backtest_engine.simulate_strategy(
+                rules, strategy["direction"], symbols, start_date, end_date,
+                params["portfolio_value"], params["max_risk_pct"], params["max_trades_per_day"],
+            )
+            pairs = perf.pair_trades(sim["trades"])
+            aggregate = perf.aggregate(pairs)
+            r_values = perf.compute_r_multiples(pairs)
+            histogram = [{"label": l, "count": c, "is_loss": loss} for l, c, loss in perf.histogram(r_values)]
+            results[str(strategy_id)] = {
+                "strategy_name": strategy["name"],
+                "direction": strategy["direction"],
+                "pairs": pairs,
+                "aggregate": aggregate,
+                "histogram": histogram,
+                "skipped_symbols": sim["skipped_symbols"],
+            }
+        db.finish_backtest(backtest_id, results)
+    except Exception as exc:  # noqa: BLE001 - a bad run must record failure, not crash the thread silently
+        db.fail_backtest(backtest_id, str(exc))
+
+
+@app.post("/api/backtests")
+async def api_create_backtest(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    body = await request.json()
+    strategy_ids = body.get("strategy_ids")
+    if not isinstance(strategy_ids, list) or not strategy_ids:
+        raise HTTPException(status_code=400, detail="strategy_ids (a non-empty list) is required")
+    try:
+        strategy_ids = [int(sid) for sid in strategy_ids]
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="strategy_ids must be integers")
+
+    try:
+        start_date = date.fromisoformat(body.get("start_date", ""))
+        end_date = date.fromisoformat(body.get("end_date", ""))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="start_date/end_date must be YYYY-MM-DD")
+    if start_date > end_date:
+        raise HTTPException(status_code=400, detail="start_date must not be after end_date")
+
+    symbols = body.get("symbols") or backtest_data.cached_symbols(backtest_engine.BAR_SIZE)
+    if not symbols:
+        raise HTTPException(
+            status_code=400,
+            detail="No symbols have cached historical bars yet - run fetch_backtest_data.py on the server first.",
+        )
+
+    params = {
+        "strategy_ids": strategy_ids,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "symbols": symbols,
+        "portfolio_value": float(body.get("portfolio_value", DEFAULT_BACKTEST_PORTFOLIO_VALUE)),
+        "max_risk_pct": float(body.get("max_risk_pct", DEFAULT_BACKTEST_MAX_RISK_PCT)),
+        "max_trades_per_day": int(body.get("max_trades_per_day", DEFAULT_BACKTEST_MAX_TRADES_PER_DAY)),
+    }
+    backtest_id = db.create_backtest(account_id, params)
+    _log_account_action(account_id, user, action="create_backtest", backtest_id=backtest_id, strategy_ids=strategy_ids)
+    threading.Thread(target=_run_backtest_job, args=(backtest_id, params), daemon=True).start()
+    return {"id": backtest_id}
+
+
+@app.get("/api/backtests")
+def api_list_backtests(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    return db.list_backtests(account_id)
+
+
+@app.get("/api/backtests/{backtest_id}")
+def api_get_backtest(backtest_id: int, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    result = db.get_backtest(backtest_id)
+    if not result or result["account_id"] != account_id:
+        raise HTTPException(status_code=404, detail="Backtest not found")
+    return result
+
+
+@app.get("/api/backtest_universe")
+def api_backtest_universe(user: str = Depends(require_user)):
+    symbols = backtest_data.cached_symbols(backtest_engine.BAR_SIZE)
+    return {"symbols": symbols, "count": len(symbols)}

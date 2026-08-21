@@ -1,0 +1,14 @@
+<nav class="navbar navbar-dark bg-dark mb-4">
+  <div class="container-fluid">
+    <span class="navbar-brand mb-0 h1">TradingBot Dashboard</span>
+    <div class="d-flex gap-2">
+      <a href="/bot" class="btn btn-sm {{ 'btn-light' if active_page == 'bot' else 'btn-outline-light' }}">Bot</a>
+      <a href="/trading" class="btn btn-sm {{ 'btn-light' if active_page == 'trading' else 'btn-outline-light' }}">Trading</a>
+      <a href="/backtest" class="btn btn-sm {{ 'btn-light' if active_page == 'backtest' else 'btn-outline-light' }}">Backtest</a>
+      <a href="/guide" class="btn btn-outline-light btn-sm">מדריך למשתמש</a>
+      <form method="post" action="/logout" class="d-flex">
+        <button class="btn btn-outline-light btn-sm" type="submit">Log out</button>
+      </form>
+    </div>
+  </div>
+</nav>
