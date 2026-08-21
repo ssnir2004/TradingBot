@@ -386,7 +386,8 @@ def _evaluate_entry_filters(account_id: int, mode: str, ticker: str, rules: dict
     "price"/"stop_ref" for sizing (stop_ref is the low of day for a long's
     stop, the high of day for a short's), and whenever all six filters
     could be computed it carries each one's individual result (D1..I3)
-    plus "price"/"gap_pct"/"rvol" — this detail is what the dashboard's
+    plus "price"/"gap_pct"/"rvol"/"rsi" (the last is None unless this side's
+    active strategy uses an RSI-based I2) — this detail is what the dashboard's
     Watchlist table shows, so entry_scan (which stops early once daily
     trade/position caps are hit) isn't the only place this gets computed.
     Uses yfinance only (same free/keyless data source as
@@ -424,6 +425,7 @@ def _evaluate_entry_filters(account_id: int, mode: str, ticker: str, rules: dict
 
         prior_close = float(prior_day["Close"])
         gap_pct = (current_price - prior_close) / prior_close * 100 if prior_close else 0.0
+        rsi_value = None  # only set when this strategy's I2 is RSI-based (see below) - None otherwise
 
         if side == "long":
             stop_ref = float(regular_bars["Low"].min()) if not regular_bars.empty else float(today_bars["Low"].min())
@@ -433,8 +435,8 @@ def _evaluate_entry_filters(account_id: int, mode: str, ticker: str, rules: dict
             premarket_extreme = float(premarket_bars["High"].max()) if not premarket_bars.empty else float("-inf")
             i1 = current_price > premarket_extreme  # above today's premarket high
             if "I2_rsi_above" in intraday_filters:
-                rsi = _compute_rsi(intraday["Close"], intraday_filters.get("I2_rsi_period", 14))
-                i2 = rsi is not None and rsi > intraday_filters["I2_rsi_above"]  # RSI above threshold
+                rsi_value = _compute_rsi(intraday["Close"], intraday_filters.get("I2_rsi_period", 14))
+                i2 = rsi_value is not None and rsi_value > intraday_filters["I2_rsi_above"]  # RSI above threshold
             else:
                 extreme_so_far = float(today_bars["High"].iloc[:-1].max()) if len(today_bars) > 1 else float("-inf")
                 i2 = current_price > extreme_so_far  # new high-of-day
@@ -451,8 +453,8 @@ def _evaluate_entry_filters(account_id: int, mode: str, ticker: str, rules: dict
             premarket_extreme = float(premarket_bars["Low"].min()) if not premarket_bars.empty else float("inf")
             i1 = current_price < premarket_extreme  # below today's premarket low
             if "I2_rsi_below" in intraday_filters:
-                rsi = _compute_rsi(intraday["Close"], intraday_filters.get("I2_rsi_period", 14))
-                i2 = rsi is not None and rsi < intraday_filters["I2_rsi_below"]  # RSI below threshold (rolled over)
+                rsi_value = _compute_rsi(intraday["Close"], intraday_filters.get("I2_rsi_period", 14))
+                i2 = rsi_value is not None and rsi_value < intraday_filters["I2_rsi_below"]  # RSI below threshold (rolled over)
             else:
                 extreme_so_far = float(today_bars["Low"].iloc[:-1].min()) if len(today_bars) > 1 else float("inf")
                 i2 = current_price < extreme_so_far  # new low-of-day
@@ -470,7 +472,7 @@ def _evaluate_entry_filters(account_id: int, mode: str, ticker: str, rules: dict
             "D1": bool(d1), "D2": bool(d2), "D3": bool(d3),
             "I1": bool(i1), "I2": bool(i2), "I3": bool(i3),
             "price": current_price, "rvol": rvol, "gap_pct": gap_pct,
-            "stop_ref": stop_ref,
+            "stop_ref": stop_ref, "rsi": rsi_value,
         }
         log_decision(account_id, mode, {"event": "filter_eval", "symbol": ticker, **detail})
         return detail

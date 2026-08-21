@@ -252,9 +252,10 @@
               <th data-bs-toggle="tooltip" title="נפח מסחר יחסי לממוצע">I3</th>
               <th data-bs-toggle="tooltip" title="פער % מסגירה קודמת">Gap</th>
               <th data-bs-toggle="tooltip" title="מחזור מסחר יחסי (Relative Volume)">RVOL</th>
+              <th data-bs-toggle="tooltip" title="RSI(14) בנרות 5 דק' - מוצג רק כשה-I2 של האסטרטגיה מבוסס RSI">RSI</th>
               <th data-bs-toggle="tooltip" title="מחיר נוכחי">Price</th>
             </tr></thead>
-            <tbody id="watchlist-body"><tr><td colspan="12" class="text-center text-muted">Loading…</td></tr></tbody>
+            <tbody id="watchlist-body"><tr><td colspan="13" class="text-center text-muted">Loading…</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -770,8 +771,11 @@ async function refreshActiveStrategyParams() {
     const full = await api(`/api/strategies/${s.id}`);
     const r = full.rules;
     const d3Key = Object.keys(r.daily_filters).find(k => k.startsWith("D3_"));
+    const rsiPeriod = r.intraday_filters.I2_rsi_period || 14;
     const i2 = r.intraday_filters.I2_rsi_above !== undefined
-      ? `RSI(${r.intraday_filters.I2_rsi_period || 14})>${r.intraday_filters.I2_rsi_above}`
+      ? `RSI(${rsiPeriod})>${r.intraday_filters.I2_rsi_above}`
+      : r.intraday_filters.I2_rsi_below !== undefined
+      ? `RSI(${rsiPeriod})<${r.intraday_filters.I2_rsi_below}`
       : "new HOD/LOD";
     return `<div class="col-md-6">
       <div class="small mb-1"><strong>${label}: ${full.name}</strong>
@@ -795,7 +799,7 @@ async function refreshWatchlist() {
   document.getElementById("watchlist-checked").textContent = data.updated_at || "not checked yet";
   const rows = data.results || [];
   const body = document.getElementById("watchlist-body");
-  if (!rows.length) { body.innerHTML = '<tr><td colspan="12" class="text-center text-muted">Empty</td></tr>'; return; }
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="13" class="text-center text-muted">Empty</td></tr>'; return; }
 
   const withCount = rows.map(r => ({
     ...r,
@@ -815,6 +819,7 @@ async function refreshWatchlist() {
       ${FILTER_KEYS.map(k => filterCell(r, k)).join("")}
       <td>${r.gap_pct !== undefined && r.gap_pct !== null ? Number(r.gap_pct).toFixed(2) + "%" : "-"}</td>
       <td>${r.rvol !== undefined ? "x" + Number(r.rvol).toFixed(2) : "-"}</td>
+      <td>${r.rsi !== undefined && r.rsi !== null ? Number(r.rsi).toFixed(1) : "-"}</td>
       <td>${fmtMoney(r.price)}</td>
     </tr>`;
   }).join("");
