@@ -246,6 +246,37 @@ fast (it happened after an early version of this script ran 8 workers with
 no pacing) — retrying immediately just repeats it. Wait 30-60 minutes and
 run it again once; don't loop-retry.
 
+### Backtest engine
+
+The dashboard's Backtest page (`/backtest`) replays a strategy against
+real historical bars — daily bars come from yfinance (unlimited-ish
+history, same as the live bot), but the intraday (5-minute) bars it needs
+for entry timing and exit management come from IBKR's own historical-data
+API instead of yfinance, since yfinance only keeps ~60 days of intraday
+history while IBKR gives months per request. `fetch_backtest_data.py`
+pulls and locally caches those bars (`data/backtest_bars/`) — once a bar
+is fetched it's kept forever, so the usable backtest window only grows
+over time. `trading-bot-paper.service`'s scheduler already runs it
+automatically every Sunday 09:00 ET for the full S&P 500 universe, but —
+same as the custom-universe builder — it needs one manual run right after
+this feature is first deployed, or the Backtest page has nothing to test
+against for up to a week:
+
+```bash
+sudo -iu tradingbot bash -c "cd /opt/tradingbot && .venv/bin/python fetch_backtest_data.py"
+```
+
+Unlike the other two background jobs, this one needs a live IB Gateway
+connection (its own dedicated client ID, `IBKR_BACKTEST_CLIENT_ID` in
+`.env` — add it if upgrading from before this feature existed, see
+`.env.example`), so run it while `ibgateway-paper.service` is up. It's
+deliberately paced (2 seconds between symbols) to stay well under IBKR's
+historical-data pacing limits, so a full S&P 500 initial backfill takes
+a while — run it in the background (`... &` or `screen`/`tmux`) rather
+than waiting on it. Re-running it later (by hand or via the weekly
+schedule) is always incremental — it only fetches the gap since each
+symbol's last cached bar, never re-downloads what's already cached.
+
 If `ibgateway-paper.service` or `ibgateway-live.service` restarts (nightly
 `AutoRestartTime`, a crash, a server reboot) and IBKR forces a fresh 2FA
 challenge, the matching `trading-bot-*.service` will simply fail to connect
