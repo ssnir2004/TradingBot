@@ -489,9 +489,16 @@ def api_broker_positions(mode: str = Depends(require_mode), account_id: int = De
         pos["unrealized_pnl"] = ((price - pos["avg_cost"]) * pos["qty"]) if price is not None else None
         pos["daily_pnl"] = ((price - prior_close) * pos["qty"]) if price is not None and prior_close is not None else None
 
+        # A stop/take-profit that actually protects/exits THIS position
+        # must trade in the closing direction (SELL for a long, BUY for a
+        # short) - an STP or LMT order on the same symbol going the other
+        # way isn't a stop or take-profit at all (e.g. a separate limit
+        # buy order averaging into a long), and showing it as one would be
+        # actively misleading about what protects the position.
+        closing_action = "SELL" if pos["qty"] > 0 else "BUY"
         symbol_orders = orders_by_symbol.get(pos["symbol"], [])
-        pos["stop_orders"] = [o for o in symbol_orders if o["order_type"] == "STP"]
-        pos["take_profit_orders"] = [o for o in symbol_orders if o["order_type"] == "LMT"]
+        pos["stop_orders"] = [o for o in symbol_orders if o["order_type"] == "STP" and o["action"] == closing_action]
+        pos["take_profit_orders"] = [o for o in symbol_orders if o["order_type"] == "LMT" and o["action"] == closing_action]
     return data
 
 
