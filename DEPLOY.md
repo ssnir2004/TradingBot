@@ -124,7 +124,8 @@ nano deploy/ibc/config-paper.ini   # your real IBKR username/password
 chmod 600 deploy/ibc/config-paper.ini
 
 cp deploy/ibc/config-live.ini.example deploy/ibc/config-live.ini
-nano deploy/ibc/config-live.ini    # same IBKR login, TradingMode=live
+nano deploy/ibc/config-live.ini    # verify whether your paper account shares the live login or has
+                                    # its own separate one (see config-paper.ini.example) - don't assume; TradingMode=live
 chmod 600 deploy/ibc/config-live.ini
 ```
 

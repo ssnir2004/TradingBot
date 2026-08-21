@@ -6,9 +6,16 @@
 # Paper and live run as two SEPARATE, simultaneous IB Gateway processes on
 # this box (see deploy/ibgateway-paper.service / ibgateway-live.service and
 # DEPLOY.md) — this is the paper one. See config-live.ini.example for the
-# live counterpart; the only difference between the two is TradingMode and
-# usually nothing else, since paper trading uses the same IBKR login as
-# your live account.
+# live counterpart. IBKR often auto-creates a paper account sharing the
+# live account's own login, but NOT always — some accounts have a genuinely
+# separate paper username/password. Verify which applies to you (e.g. by
+# logging into IBKR's website with each) rather than assuming they match;
+# using the live credentials here when your paper account actually has its
+# own separate login fails as "Unrecognized Username or Password" deep in
+# IBC's log, while the Gateway process itself still starts and even accepts
+# API socket connections — the symptom shows up downstream instead, as
+# every real request (positions, historical data, contract qualification)
+# timing out with no obvious link back to the credentials.
 #
 # This covers the settings that matter for this project. IBC ships its own
 # reference config.ini with the full, authoritative list of every option —

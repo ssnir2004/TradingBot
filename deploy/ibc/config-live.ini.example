@@ -6,8 +6,12 @@
 # below — this file only calls out where it differs.
 
 # ---- credentials ----
-# Usually identical to config-paper.ini — paper trading uses the same IBKR
-# login as your live account, just a different TradingMode.
+# Often identical to config-paper.ini, but not always — some accounts have
+# a genuinely separate paper username/password rather than sharing the live
+# login. Verify which applies to you rather than assuming (see
+# config-paper.ini.example's fuller note); using the wrong credentials here
+# doesn't fail loudly at startup, it silently breaks every real request
+# once connected.
 IbLoginId=your_ibkr_username
 IbPassword=your_ibkr_password
 TradingMode=live
