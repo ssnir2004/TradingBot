@@ -352,11 +352,19 @@
     <div class="modal-content">
       <div class="modal-header">
         <h5 class="modal-title" id="chart-modal-title">Chart</h5>
+        <div class="btn-group btn-group-sm mx-3" id="chart-interval-group" role="group">
+          <button type="button" class="btn btn-outline-secondary chart-interval-btn" data-interval="1m">1m</button>
+          <button type="button" class="btn btn-outline-secondary chart-interval-btn" data-interval="5m">5m</button>
+          <button type="button" class="btn btn-outline-secondary chart-interval-btn" data-interval="15m">15m</button>
+          <button type="button" class="btn btn-outline-secondary chart-interval-btn" data-interval="30m">30m</button>
+          <button type="button" class="btn btn-outline-secondary chart-interval-btn" data-interval="1h">1h</button>
+          <button type="button" class="btn btn-outline-secondary chart-interval-btn" data-interval="1d">1D</button>
+        </div>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
       <div class="modal-body">
         <div id="chart-container" style="height:480px;"></div>
-        <div class="text-muted small mt-2">5-minute candles, last 5 trading days (includes pre/post market). Refreshes every 30s while open.</div>
+        <div class="text-muted small mt-2" id="chart-caption">Refreshes every 30s while open.</div>
       </div>
     </div>
   </div>
@@ -393,10 +401,25 @@ function fmtR(v) { return (v === null || v === undefined) ? "-" : `${Number(v).t
 function symbolLink(symbol) { return `<a href="#" class="symbol-link" data-symbol="${symbol}">${symbol}</a>`; }
 
 let chartModal = null, chartInstance = null, candleSeries = null, chartRefreshTimer = null, chartResizeHandler = null, pendingChartSymbol = null;
+let currentChartInterval = "5m";
+const CHART_INTERVAL_CAPTIONS = {
+  "1m": "1-minute candles, last 5 trading days",
+  "5m": "5-minute candles, last 5 trading days",
+  "15m": "15-minute candles, last month",
+  "30m": "30-minute candles, last month",
+  "1h": "1-hour candles, last 3 months",
+  "1d": "Daily candles, last 6 months",
+};
+
+function updateChartCaption() {
+  const base = CHART_INTERVAL_CAPTIONS[currentChartInterval] || "";
+  const prepost = currentChartInterval === "1d" ? "" : " (includes pre/post market)";
+  document.getElementById("chart-caption").textContent = `${base}${prepost}. Refreshes every 30s while open.`;
+}
 
 async function loadChartData(symbol) {
   try {
-    const data = await modeApi(`/api/candles?symbol=${encodeURIComponent(symbol)}`);
+    const data = await modeApi(`/api/candles?symbol=${encodeURIComponent(symbol)}&interval=${currentChartInterval}`);
     if (candleSeries) candleSeries.setData(data.candles || []);
   } catch (e) { /* keep showing the last good data on a transient fetch failure */ }
 }
@@ -404,9 +427,21 @@ async function loadChartData(symbol) {
 function openChart(symbol) {
   document.getElementById("chart-modal-title").textContent = `${symbol} — ${currentMode.toUpperCase()}`;
   pendingChartSymbol = symbol;
+  currentChartInterval = "5m";
+  document.querySelectorAll(".chart-interval-btn").forEach(btn => btn.classList.toggle("active", btn.dataset.interval === currentChartInterval));
+  updateChartCaption();
   if (!chartModal) chartModal = new bootstrap.Modal(document.getElementById("chart-modal"));
   chartModal.show();
 }
+
+document.getElementById("chart-interval-group").addEventListener("click", (e) => {
+  const btn = e.target.closest(".chart-interval-btn");
+  if (!btn || !pendingChartSymbol) return;
+  currentChartInterval = btn.dataset.interval;
+  document.querySelectorAll(".chart-interval-btn").forEach(b => b.classList.toggle("active", b === btn));
+  updateChartCaption();
+  loadChartData(pendingChartSymbol);
+});
 
 // Bootstrap gives the modal display:block only once it's actually shown -
 // creating the chart any earlier measures a 0-width/0-height container, so

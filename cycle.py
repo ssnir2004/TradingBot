@@ -210,14 +210,29 @@ def _get_5min_bars(symbol: str) -> pd.DataFrame | None:
         return None
 
 
-def get_chart_bars(symbol: str) -> pd.DataFrame | None:
-    """5m OHLC bars (last 5 trading days, incl. pre/post market) for the
-    dashboard's candlestick chart — same fetch shape as
-    _evaluate_entry_filters's intraday history, exposed unprefixed since
-    web/app.py (which never talks to IBKR directly, but yfinance needs no
-    broker connection) calls this directly rather than through a subprocess."""
+# How far back to fetch for each selectable chart interval, chosen to stay
+# comfortably under yfinance's per-interval lookback limits (1m: 7d max;
+# 2m-30m: 60d max; 60m/1h: 730d max; 1d+: effectively unlimited) while still
+# giving a chart with a reasonable amount of history for that granularity.
+CHART_INTERVAL_PERIODS = {
+    "1m": "5d", "5m": "5d", "15m": "1mo", "30m": "1mo", "1h": "3mo", "1d": "6mo",
+}
+
+
+def get_chart_bars(symbol: str, interval: str = "5m") -> pd.DataFrame | None:
+    """OHLC bars for the dashboard's candlestick chart, at the requested
+    interval (one of CHART_INTERVAL_PERIODS' keys — same fetch shape as
+    _evaluate_entry_filters's intraday history for the intraday intervals).
+    Exposed unprefixed since web/app.py (which never talks to IBKR
+    directly, but yfinance needs no broker connection) calls this directly
+    rather than through a subprocess. Daily bars skip pre/post market,
+    since yfinance doesn't extend that session concept to daily data."""
+    if interval not in CHART_INTERVAL_PERIODS:
+        interval = "5m"
     try:
-        bars = yf.Ticker(symbol.replace(" ", "-")).history(period="5d", interval="5m", prepost=True)
+        bars = yf.Ticker(symbol.replace(" ", "-")).history(
+            period=CHART_INTERVAL_PERIODS[interval], interval=interval, prepost=(interval != "1d"),
+        )
         if bars.empty:
             return None
         bars.index = bars.index.tz_convert(ET)

@@ -415,11 +415,14 @@ async def api_modify_stop(symbol: str, request: Request, mode: str = Depends(req
 
 
 @app.get("/api/candles")
-def api_candles(symbol: str, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
-    """5m candles for the dashboard's chart modal - pure yfinance, no IBKR
+def api_candles(symbol: str, interval: str = "5m", mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    """Candles for the dashboard's chart modal at the requested interval
+    (one of cycle.CHART_INTERVAL_PERIODS) - pure yfinance, no IBKR
     connection needed (mode/account_id are only here so the endpoint follows
     the same auth/scoping shape as everything else)."""
-    bars = cycle.get_chart_bars(symbol.strip().upper())
+    if interval not in cycle.CHART_INTERVAL_PERIODS:
+        raise HTTPException(status_code=400, detail=f"interval must be one of {sorted(cycle.CHART_INTERVAL_PERIODS)}")
+    bars = cycle.get_chart_bars(symbol.strip().upper(), interval)
     if bars is None:
         return {"candles": []}
     candles = [
