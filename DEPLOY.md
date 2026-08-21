@@ -270,13 +270,21 @@ sudo -iu tradingbot bash -c "cd /opt/tradingbot && .venv/bin/python fetch_backte
 Unlike the other two background jobs, this one needs a live IB Gateway
 connection (its own dedicated client ID, `IBKR_BACKTEST_CLIENT_ID` in
 `.env` — add it if upgrading from before this feature existed, see
-`.env.example`), so run it while `ibgateway-paper.service` is up. It's
-deliberately paced (2 seconds between symbols) to stay well under IBKR's
-historical-data pacing limits, so a full S&P 500 initial backfill takes
-a while — run it in the background (`... &` or `screen`/`tmux`) rather
-than waiting on it. Re-running it later (by hand or via the weekly
-schedule) is always incremental — it only fetches the gap since each
-symbol's last cached bar, never re-downloads what's already cached.
+`.env.example`), so run it while `ibgateway-paper.service` is up.
+
+IBKR silently rejects (or hangs on) a single `reqHistoricalData` request
+for 5-minute bars spanning more than a few days, even though its own docs
+advertise "months per request" — so a symbol's first-ever backfill is
+paged backward in small (`CHUNK_DAYS`, currently 5-day) requests, paced
+2 seconds apart, rather than one big ask. That makes an initial full S&P
+500 backfill (6 months of history per symbol) genuinely slow — expect it
+to run for several hours, not minutes — so always run it in the
+background (`nohup ... &` or `screen`/`tmux`) rather than waiting on it,
+and check on it later via its per-symbol progress output. Re-running it
+later (by hand or via the weekly schedule) is much faster since it's
+always incremental — it only fetches the gap since each symbol's last
+cached bar (typically 1-2 chunk requests), never re-downloads what's
+already cached.
 
 If `ibgateway-paper.service` or `ibgateway-live.service` restarts (nightly
 `AutoRestartTime`, a crash, a server reboot) and IBKR forces a fresh 2FA

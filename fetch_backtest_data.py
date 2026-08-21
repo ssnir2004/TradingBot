@@ -1,11 +1,15 @@
 """Fetches/refreshes the local historical-bars cache backtest_engine.py
 reads from (see src/backtest_data.py) — pulls 5-minute bars (including
 premarket/after-hours, via useRTH=False) per symbol from IBKR's own
-reqHistoricalData, which — unlike yfinance's ~60-day intraday cap — can
-pull months of history per request. Always incremental: a symbol already
-cached is only topped up with the gap since its last cached bar, so
-running this again later (see run_service.py's weekly schedule) just
-extends the cache forward, never re-fetches what's already there.
+reqHistoricalData, which — unlike yfinance's ~60-day intraday cap — has
+no real ceiling on total history available. It does, however, silently
+reject/hang on a single request spanning more than a few days at this
+bar size, so each symbol's target span is paged backward in small
+(CHUNK_DAYS) chunks rather than asked for in one request (see
+_fetch_span). Always incremental: a symbol already cached is only
+topped up with the gap since its last cached bar, so running this again
+later (see run_service.py's weekly schedule) just extends the cache
+forward, never re-fetches what's already there.
 
 Needs a live IB Gateway connection — connects with its own dedicated
 client ID (IBKR_BACKTEST_CLIENT_ID), same pattern as trade.py — so run
@@ -32,9 +36,19 @@ from src.sp500_tickers import SP500_TICKERS
 PROJECT_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
 BAR_SIZE = "5 mins"
-DEFAULT_INITIAL_DURATION = "6 M"  # per-request depth for a symbol with no cache yet
-MAX_GAP_FILL_DAYS = 180  # cap a single incremental request even if the cache is very stale
+DEFAULT_INITIAL_DURATION = "6 M"  # total depth for a symbol with no cache yet
+MAX_GAP_FILL_DAYS = 180  # cap a single incremental fetch even if the cache is very stale
 REQUEST_PAUSE_SECONDS = 2.0  # stay well under IBKR's historical-data pacing limits
+CHUNK_DAYS = 5  # IBKR silently rejects/hangs on a single 5-min-bar request spanning
+# more than a few days (confirmed: "5 D" returns instantly, "6 M" doesn't) - so any
+# multi-day span is paged backward in CHUNK_DAYS-sized reqHistoricalData calls.
+
+_DURATION_UNIT_DAYS = {"D": 1, "W": 7, "M": 30, "Y": 365}
+
+
+def _duration_to_days(duration: str) -> int:
+    amount, unit = duration.strip().split()
+    return int(amount) * _DURATION_UNIT_DAYS[unit.upper()[0]]
 
 
 def _bars_to_df(bars) -> pd.DataFrame:
@@ -54,24 +68,48 @@ def _bars_to_df(bars) -> pd.DataFrame:
     return df
 
 
+def _fetch_span(ib, qualified, total_days: int) -> pd.DataFrame:
+    """Pages backward from now in CHUNK_DAYS-sized reqHistoricalData calls
+    until `total_days` of history is covered (see CHUNK_DAYS above for why
+    a single request can't just ask for the whole span directly)."""
+    frames = []
+    remaining = total_days
+    cursor = ""  # "" means "now" for IBKR's endDateTime; a datetime after that
+    while remaining > 0:
+        step = min(remaining, CHUNK_DAYS)
+        bars = ib.reqHistoricalData(
+            qualified, endDateTime=cursor, durationStr=f"{step} D",
+            barSizeSetting=BAR_SIZE, whatToShow="TRADES", useRTH=False, formatDate=2,
+        )
+        df = _bars_to_df(bars)
+        if df.empty:
+            break
+        frames.append(df)
+        cursor = df.index.min().tz_convert("UTC").to_pydatetime()
+        remaining -= step
+        if remaining > 0:
+            time.sleep(REQUEST_PAUSE_SECONDS)
+    if not frames:
+        return pd.DataFrame()
+    combined = pd.concat(frames).sort_index()
+    return combined[~combined.index.duplicated(keep="last")]
+
+
 def fetch_symbol(ib, symbol: str, initial_duration: str) -> dict:
     contract = Stock(symbol, "SMART", "USD")
     (qualified,) = ib.qualifyContracts(contract)
     existing = load_cached_bars(symbol, BAR_SIZE)
 
-    duration = initial_duration
     if existing is not None and not existing.empty:
         last_cached = existing.index.max()
         gap_days = (datetime.now(ET) - last_cached).days
         if gap_days < 1:
             return {"symbol": symbol, "status": "up_to_date", "new_bars": 0, "total_bars": len(existing)}
-        duration = f"{min(gap_days + 2, MAX_GAP_FILL_DAYS)} D"
+        total_days = min(gap_days + 2, MAX_GAP_FILL_DAYS)
+    else:
+        total_days = _duration_to_days(initial_duration)
 
-    bars = ib.reqHistoricalData(
-        qualified, endDateTime="", durationStr=duration,
-        barSizeSetting=BAR_SIZE, whatToShow="TRADES", useRTH=False, formatDate=2,
-    )
-    df = _bars_to_df(bars)
+    df = _fetch_span(ib, qualified, total_days)
     if df.empty:
         return {"symbol": symbol, "status": "no_data", "new_bars": 0}
 
