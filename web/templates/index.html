@@ -392,19 +392,35 @@ function fmtR(v) { return (v === null || v === undefined) ? "-" : `${Number(v).t
 
 function symbolLink(symbol) { return `<a href="#" class="symbol-link" data-symbol="${symbol}">${symbol}</a>`; }
 
-let chartModal = null, chartInstance = null, candleSeries = null, chartRefreshTimer = null;
+let chartModal = null, chartInstance = null, candleSeries = null, chartRefreshTimer = null, chartResizeHandler = null, pendingChartSymbol = null;
 
 async function loadChartData(symbol) {
   try {
     const data = await modeApi(`/api/candles?symbol=${encodeURIComponent(symbol)}`);
-    candleSeries.setData(data.candles || []);
+    if (candleSeries) candleSeries.setData(data.candles || []);
   } catch (e) { /* keep showing the last good data on a transient fetch failure */ }
 }
 
 function openChart(symbol) {
   document.getElementById("chart-modal-title").textContent = `${symbol} — ${currentMode.toUpperCase()}`;
+  pendingChartSymbol = symbol;
+  if (!chartModal) chartModal = new bootstrap.Modal(document.getElementById("chart-modal"));
+  chartModal.show();
+}
+
+// Bootstrap gives the modal display:block only once it's actually shown -
+// creating the chart any earlier measures a 0-width/0-height container, so
+// lightweight-charts silently renders nothing (a blank modal, no gridlines
+// even). Wait for shown.bs.modal so the container has real dimensions.
+document.getElementById("chart-modal").addEventListener("shown.bs.modal", () => {
+  const symbol = pendingChartSymbol;
+  if (!symbol) return;
   const container = document.getElementById("chart-container");
   container.innerHTML = "";
+  if (typeof LightweightCharts === "undefined") {
+    container.innerHTML = '<p class="text-danger">Could not load the charting library (blocked network request?) - try refreshing.</p>';
+    return;
+  }
   chartInstance = LightweightCharts.createChart(container, {
     width: container.clientWidth, height: 480,
     layout: { background: { color: "#ffffff" }, textColor: "#212529" },
@@ -415,12 +431,16 @@ function openChart(symbol) {
   loadChartData(symbol);
   if (chartRefreshTimer) clearInterval(chartRefreshTimer);
   chartRefreshTimer = setInterval(() => loadChartData(symbol), 30000);
-  if (!chartModal) chartModal = new bootstrap.Modal(document.getElementById("chart-modal"));
-  chartModal.show();
-}
+  chartResizeHandler = () => chartInstance && chartInstance.applyOptions({ width: container.clientWidth });
+  window.addEventListener("resize", chartResizeHandler);
+});
 
 document.getElementById("chart-modal").addEventListener("hidden.bs.modal", () => {
   if (chartRefreshTimer) { clearInterval(chartRefreshTimer); chartRefreshTimer = null; }
+  if (chartResizeHandler) { window.removeEventListener("resize", chartResizeHandler); chartResizeHandler = null; }
+  if (chartInstance) { chartInstance.remove(); chartInstance = null; }
+  candleSeries = null;
+  pendingChartSymbol = null;
 });
 
 document.addEventListener("click", (e) => {
