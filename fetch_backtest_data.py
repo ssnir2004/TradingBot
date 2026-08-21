@@ -132,15 +132,15 @@ def run_fetch(account_id: int, symbols: list[str], duration: str = DEFAULT_INITI
         int(env.get("IBKR_BACKTEST_CLIENT_ID", 4)),
     )
     # reqHistoricalData has no timeout of its own and can hang forever if
-    # the account isn't entitled to real-time/frozen data for a symbol -
-    # very common on a paper account whose linked live account has no
-    # active market data subscription. Delayed data (3) needs no
-    # subscription and is fine for backtesting bars from months ago, and
-    # RequestTimeout guarantees this never hangs indefinitely again even
-    # if some other cause is at play - a stuck request raises instead,
-    # which fetch_symbol's caller already catches and logs as "error" so
-    # the run moves on to the next symbol.
-    ibkr.ib.reqMarketDataType(3)
+    # the Gateway stops responding mid-request. RequestTimeout guarantees
+    # a stuck request raises instead, which fetch_symbol's caller already
+    # catches and logs as "error" so the run moves on to the next symbol.
+    # Do NOT switch to delayed data (reqMarketDataType(3)) here - it was
+    # tried as a fix for an unrelated hang (actually caused by requesting
+    # too many months of 5-min bars in one call, see CHUNK_DAYS above) and
+    # turned out to silently break reqHistoricalData for this account,
+    # which already has live data entitlements: confirmed by isolated
+    # testing that the exact same request succeeds instantly without it.
     ibkr.ib.RequestTimeout = 30
     results = []
     try:
