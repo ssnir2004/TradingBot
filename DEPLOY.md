@@ -272,6 +272,16 @@ connection (its own dedicated client ID, `IBKR_BACKTEST_CLIENT_ID` in
 `.env` — add it if upgrading from before this feature existed, see
 `.env.example`), so run it while `ibgateway-paper.service` is up.
 
+IBKR takes paper accounts offline for extended weekend maintenance —
+observed starting right around Friday's session close (~00:00 ET
+Saturday) and not reliably back until Sunday evening or Monday. During
+that window every request hangs/fails with `Error 1100: Connectivity
+between IBKR and Trader Workstation has been lost` (and the IBC log under
+`~/ibc-logs-paper/` shows a "No Internet connection" dialog) no matter how
+many times the Gateway is restarted — this is expected and not a bug in
+this script or the Gateway config. Don't run (or debug failures of) this
+job over the weekend; retry once markets are back.
+
 IBKR silently rejects (or hangs on) a single `reqHistoricalData` request
 for 5-minute bars spanning more than a few days, even though its own docs
 advertise "months per request" — so a symbol's first-ever backfill is
