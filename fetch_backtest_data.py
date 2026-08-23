@@ -177,16 +177,24 @@ def fetch_symbol(ib, symbol: str, initial_duration: str) -> dict:
     return {"symbol": symbol, "status": "ok", "new_bars": new_count, "total_bars": len(merged)}
 
 
-def run_fetch(account_id: int, symbols: list[str], duration: str = DEFAULT_INITIAL_DURATION) -> dict:
+def run_fetch(
+    account_id: int, symbols: list[str], duration: str = DEFAULT_INITIAL_DURATION, mode: str = "paper"
+) -> dict:
     """The actual fetch-everything routine, connecting to IBKR with its own
     dedicated client ID (never collides with the cycle's own connection or
     trade.py's) and disconnecting when done — importable so
     run_service.py's scheduler can call it directly on a weekly cadence,
-    same pattern as morning_prefilter.run_scan/build_custom_universe.build_universe."""
+    same pattern as morning_prefilter.run_scan/build_custom_universe.build_universe.
+    `mode` defaults to "paper" (this is backtest/historical data, not real
+    trading) but can be set to "live" - this only ever calls
+    qualifyContracts/reqHistoricalData, never places an order, so pointing
+    it at the live Gateway is safe; useful when paper's data farms are
+    degraded (confirmed via live A/B testing: paper timed out while live
+    answered the identical request in ~11s) but live's are fine."""
     env = dotenv_values(PROJECT_DIR / ".env")
     ibkr = IBKRClient(
         env.get("IBKR_HOST", "127.0.0.1"),
-        mode_config.ibkr_port(env, account_id, "paper"),
+        mode_config.ibkr_port(env, account_id, mode),
         int(env.get("IBKR_BACKTEST_CLIENT_ID", 4)),
     )
     # ib.RequestTimeout wraps EVERY blocking call on this client (including
@@ -252,13 +260,17 @@ def main():
     parser.add_argument("--duration", default=DEFAULT_INITIAL_DURATION,
                          help="Initial backfill depth for a symbol with no cache yet, e.g. '2 Y'")
     parser.add_argument("--limit", type=int, default=None, help="Cap symbols fetched (testing only)")
+    parser.add_argument("--mode", choices=["paper", "live"], default="paper",
+                         help="Which IBKR Gateway to connect through for this read-only historical-data "
+                              "fetch (never places an order either way) - 'live' if paper's data farms "
+                              "are degraded and live's aren't.")
     args = parser.parse_args()
     account_id = args.account_id if args.account_id is not None else db.get_default_account_id()
     symbols = args.symbols or list(SP500_TICKERS)
     if args.limit:
         symbols = symbols[: args.limit]
 
-    summary = run_fetch(account_id, symbols, args.duration)
+    summary = run_fetch(account_id, symbols, args.duration, args.mode)
     print({k: v for k, v in summary.items() if k != "results"})
     if summary["errors"]:
         print("errors (first 10):", [r for r in summary["results"] if r["status"] == "error"][:10])
