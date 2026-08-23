@@ -108,8 +108,8 @@ async function loadStrategyPicker() {
   strategiesById = Object.fromEntries(rows.map(s => [s.id, s]));
   const el = document.getElementById("backtest-strategy-list");
   el.innerHTML = rows.map(s => `
-    <label class="btn btn-outline-secondary btn-sm strategy-pick">
-      <input type="checkbox" class="btn-check bt-strategy-checkbox" value="${s.id}" autocomplete="off">
+    <input type="checkbox" class="btn-check bt-strategy-checkbox" id="bt-strategy-${s.id}" value="${s.id}" autocomplete="off">
+    <label class="btn btn-outline-secondary btn-sm strategy-pick" for="bt-strategy-${s.id}">
       ${s.name} ${sideBadge(s.direction)}
       <span class="badge ${RISK_BADGE_CLASS[s.risk_rating] || 'bg-secondary'}">${s.risk_rating}</span>
     </label>`).join("");
