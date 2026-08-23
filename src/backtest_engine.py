@@ -64,6 +64,12 @@ _DAILY_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 # this symbol" exactly like the yfinance-side exceptions already handled
 # below.
 _YF_TIMEOUT_SECONDS = 45
+# Bounded rather than "one thread per symbol" so a fully-throttled Yahoo
+# session doesn't just turn N sequential 45s stalls into N concurrent
+# ones - a handful of workers still gets real parallelism on the common
+# case (network latency, not CPU) without hammering Yahoo harder than a
+# person clicking around would.
+_DAILY_FETCH_WORKERS = 6
 
 
 def _yf_history(yf_symbol: str, **kwargs) -> pd.DataFrame:
@@ -188,17 +194,32 @@ def simulate_strategy(
     daily_by_symbol: dict[str, pd.DataFrame] = {}
     intraday_by_symbol: dict[str, pd.DataFrame] = {}
     skipped = []
+    daily_candidates = {}  # symbol -> already-loaded intraday df, pending a daily fetch
     for symbol in symbols:
         intraday = backtest_data.load_cached_bars(symbol, BAR_SIZE)
         if intraday is None or intraday.empty:
             skipped.append({"symbol": symbol, "reason": "no cached intraday bars"})
             continue
-        daily = fetch_daily_bars(symbol)
-        if daily is None:
-            skipped.append({"symbol": symbol, "reason": "no daily bars"})
-            continue
-        daily_by_symbol[symbol] = daily
-        intraday_by_symbol[symbol] = intraday
+        daily_candidates[symbol] = intraday
+
+    # `symbols` is the whole cached universe regardless of the requested
+    # date range or strategy count (a 1-day backtest still needs every
+    # symbol's 200+ days of daily history for the SMA filters), and any
+    # symbol whose daily bars aren't cached yet costs a real yfinance call
+    # - up to fetch_daily_bars' own _YF_TIMEOUT_SECONDS ceiling apiece if
+    # Yahoo is throttling this box. Fetching those concurrently (bounded
+    # pool) instead of one-by-one is what actually cuts wall-clock time;
+    # the per-call timeout still protects each individual fetch.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_DAILY_FETCH_WORKERS) as pool:
+        future_to_symbol = {pool.submit(fetch_daily_bars, symbol): symbol for symbol in daily_candidates}
+        for future in concurrent.futures.as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            daily = future.result()
+            if daily is None:
+                skipped.append({"symbol": symbol, "reason": "no daily bars"})
+                continue
+            daily_by_symbol[symbol] = daily
+            intraday_by_symbol[symbol] = daily_candidates[symbol]
 
     if not intraday_by_symbol:
         return {"trades": [], "skipped_symbols": skipped}
