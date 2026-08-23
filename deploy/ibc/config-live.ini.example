@@ -30,7 +30,9 @@ SecondFactorAuthenticationTimeout=180
 
 # Staggered a few minutes from the paper instance's restart so both don't
 # reconnect (and both potentially need 2FA approval) at the exact same
-# moment.
+# moment. Same server-timezone caveat as config-paper.ini.example's fuller
+# note applies here too - this fires in the server's own system timezone,
+# not ET, unless the server's timezone is set to America/New_York.
 AutoRestartTime=11:50 PM
 
 # ---- logging ----

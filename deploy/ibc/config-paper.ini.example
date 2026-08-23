@@ -48,6 +48,18 @@ ExistingSessionDetectedAction=primary
 # up immediately.
 SecondFactorAuthenticationTimeout=180
 
+# AutoRestartTime is interpreted in the SERVER's system timezone, not ET -
+# IBC has no separate timezone setting for it. If the server runs UTC (the
+# usual default on cloud VMs, confirmed via `timedatectl`), "11:55 PM" here
+# fires at 23:55 UTC (~7:55pm ET, mid-session), not near IBKR's own ~11:45pm
+# ET reset as intended. Either convert this value to ET's current UTC
+# offset yourself and accept it drifting an hour off twice a year at DST
+# transitions, or (recommended) set the server's system timezone to
+# America/New_York (`sudo timedatectl set-timezone America/New_York`) so
+# this value and every server timestamp/log/cron just means ET directly and
+# DST is handled automatically - verify with `timedatectl` before relying
+# on either approach.
+#
 # AutoRestartTime makes IBC restart the Gateway session gracefully once a
 # day (near IBKR's own server reset, ~11:45pm ET) WITHOUT a full logout, so
 # in practice this avoids needing 2FA every single day. It does not

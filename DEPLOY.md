@@ -282,19 +282,20 @@ many times the Gateway is restarted — this is expected and not a bug in
 this script or the Gateway config. Don't run (or debug failures of) this
 job over the weekend; retry once markets are back.
 
-IBKR silently rejects (or hangs on) a single `reqHistoricalData` request
-for 5-minute bars spanning more than a few days, even though its own docs
-advertise "months per request" — so a symbol's first-ever backfill is
-paged backward in small (`CHUNK_DAYS`, currently 5-day) requests, paced
-2 seconds apart, rather than one big ask. That makes an initial full S&P
-500 backfill (6 months of history per symbol) genuinely slow — expect it
-to run for several hours, not minutes — so always run it in the
+Each symbol's first-ever backfill is a single `reqHistoricalData` request
+for the full 6 months (confirmed: IBKR returns ~21.7k 5-minute bars for
+that in under a minute, no chunking needed) — but a full S&P 500 backfill
+is still slow at ~500 sequential requests, so always run it in the
 background (`nohup ... &` or `screen`/`tmux`) rather than waiting on it,
 and check on it later via its per-symbol progress output. Re-running it
 later (by hand or via the weekly schedule) is much faster since it's
 always incremental — it only fetches the gap since each symbol's last
-cached bar (typically 1-2 chunk requests), never re-downloads what's
-already cached.
+cached bar, never re-downloads what's already cached. Don't reintroduce
+chunking here even if a request seems slow: splitting each symbol's fetch
+into many small requests multiplies total request volume and is what
+caused the Gateway to drop the connection entirely the one time this was
+tried (IBKR's paper Gateway punishes request *count* over a short window,
+not request size).
 
 If `ibgateway-paper.service` or `ibgateway-live.service` restarts (nightly
 `AutoRestartTime`, a crash, a server reboot) and IBKR forces a fresh 2FA

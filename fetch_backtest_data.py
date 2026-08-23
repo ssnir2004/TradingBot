@@ -1,15 +1,17 @@
 """Fetches/refreshes the local historical-bars cache backtest_engine.py
 reads from (see src/backtest_data.py) — pulls 5-minute bars (including
 premarket/after-hours, via useRTH=False) per symbol from IBKR's own
-reqHistoricalData, which — unlike yfinance's ~60-day intraday cap — has
-no real ceiling on total history available. It does, however, silently
-reject/hang on a single request spanning more than a few days at this
-bar size, so each symbol's target span is paged backward in small
-(CHUNK_DAYS) chunks rather than asked for in one request (see
-_fetch_span). Always incremental: a symbol already cached is only
-topped up with the gap since its last cached bar, so running this again
-later (see run_service.py's weekly schedule) just extends the cache
-forward, never re-fetches what's already there.
+reqHistoricalData, which — unlike yfinance's ~60-day intraday cap — happily
+returns 6 months of 5-minute bars in a single request (confirmed: ~21.7k
+bars in under a minute). A single request per symbol also keeps total
+request volume low, which matters more than it sounds: IBKR's paper
+Gateway will drop the whole connection (not just reject one request) if
+hit with too many historical-data requests in a short window - this bit
+us once already from an earlier version of this script that split each
+symbol's fetch into many small requests. Always incremental: a symbol
+already cached is only topped up with the gap since its last cached bar,
+so running this again later (see run_service.py's weekly schedule) just
+extends the cache forward, never re-fetches what's already there.
 
 Needs a live IB Gateway connection — connects with its own dedicated
 client ID (IBKR_BACKTEST_CLIENT_ID), same pattern as trade.py — so run
@@ -39,16 +41,7 @@ BAR_SIZE = "5 mins"
 DEFAULT_INITIAL_DURATION = "6 M"  # total depth for a symbol with no cache yet
 MAX_GAP_FILL_DAYS = 180  # cap a single incremental fetch even if the cache is very stale
 REQUEST_PAUSE_SECONDS = 2.0  # stay well under IBKR's historical-data pacing limits
-CHUNK_DAYS = 5  # IBKR silently rejects/hangs on a single 5-min-bar request spanning
-# more than a few days (confirmed: "5 D" returns instantly, "6 M" doesn't) - so any
-# multi-day span is paged backward in CHUNK_DAYS-sized reqHistoricalData calls.
-
-_DURATION_UNIT_DAYS = {"D": 1, "W": 7, "M": 30, "Y": 365}
-
-
-def _duration_to_days(duration: str) -> int:
-    amount, unit = duration.strip().split()
-    return int(amount) * _DURATION_UNIT_DAYS[unit.upper()[0]]
+REQUEST_TIMEOUT_SECONDS = 180  # a 6-month request alone took ~60s in testing; leave headroom
 
 
 def _bars_to_df(bars) -> pd.DataFrame:
@@ -68,48 +61,25 @@ def _bars_to_df(bars) -> pd.DataFrame:
     return df
 
 
-def _fetch_span(ib, qualified, total_days: int) -> pd.DataFrame:
-    """Pages backward from now in CHUNK_DAYS-sized reqHistoricalData calls
-    until `total_days` of history is covered (see CHUNK_DAYS above for why
-    a single request can't just ask for the whole span directly)."""
-    frames = []
-    remaining = total_days
-    cursor = ""  # "" means "now" for IBKR's endDateTime; a datetime after that
-    while remaining > 0:
-        step = min(remaining, CHUNK_DAYS)
-        bars = ib.reqHistoricalData(
-            qualified, endDateTime=cursor, durationStr=f"{step} D",
-            barSizeSetting=BAR_SIZE, whatToShow="TRADES", useRTH=False, formatDate=2,
-        )
-        df = _bars_to_df(bars)
-        if df.empty:
-            break
-        frames.append(df)
-        cursor = df.index.min().tz_convert("UTC").to_pydatetime()
-        remaining -= step
-        if remaining > 0:
-            time.sleep(REQUEST_PAUSE_SECONDS)
-    if not frames:
-        return pd.DataFrame()
-    combined = pd.concat(frames).sort_index()
-    return combined[~combined.index.duplicated(keep="last")]
-
-
 def fetch_symbol(ib, symbol: str, initial_duration: str) -> dict:
     contract = Stock(symbol, "SMART", "USD")
     (qualified,) = ib.qualifyContracts(contract)
     existing = load_cached_bars(symbol, BAR_SIZE)
 
+    duration = initial_duration
     if existing is not None and not existing.empty:
         last_cached = existing.index.max()
         gap_days = (datetime.now(ET) - last_cached).days
         if gap_days < 1:
             return {"symbol": symbol, "status": "up_to_date", "new_bars": 0, "total_bars": len(existing)}
-        total_days = min(gap_days + 2, MAX_GAP_FILL_DAYS)
-    else:
-        total_days = _duration_to_days(initial_duration)
+        duration = f"{min(gap_days + 2, MAX_GAP_FILL_DAYS)} D"
 
-    df = _fetch_span(ib, qualified, total_days)
+    bars = ib.reqHistoricalData(
+        qualified, endDateTime="", durationStr=duration,
+        barSizeSetting=BAR_SIZE, whatToShow="TRADES", useRTH=False, formatDate=2,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    df = _bars_to_df(bars)
     if df.empty:
         return {"symbol": symbol, "status": "no_data", "new_bars": 0}
 
@@ -131,17 +101,20 @@ def run_fetch(account_id: int, symbols: list[str], duration: str = DEFAULT_INITI
         mode_config.ibkr_port(env, account_id, "paper"),
         int(env.get("IBKR_BACKTEST_CLIENT_ID", 4)),
     )
-    # reqHistoricalData has no timeout of its own and can hang forever if
-    # the Gateway stops responding mid-request. RequestTimeout guarantees
-    # a stuck request raises instead, which fetch_symbol's caller already
-    # catches and logs as "error" so the run moves on to the next symbol.
+    # ib.RequestTimeout wraps EVERY blocking call on this client (including
+    # qualifyContracts, not just reqHistoricalData) with an outer wait_for -
+    # it must be at least REQUEST_TIMEOUT_SECONDS or it would cut off a
+    # large reqHistoricalData request before that request's own (larger)
+    # internal timeout ever gets a chance to apply. Without either timeout,
+    # a stuck request hangs forever if the Gateway stops responding
+    # mid-request; with it, fetch_symbol's caller already catches the
+    # resulting error and logs it so the run moves on to the next symbol.
     # Do NOT switch to delayed data (reqMarketDataType(3)) here - it was
-    # tried as a fix for an unrelated hang (actually caused by requesting
-    # too many months of 5-min bars in one call, see CHUNK_DAYS above) and
-    # turned out to silently break reqHistoricalData for this account,
-    # which already has live data entitlements: confirmed by isolated
-    # testing that the exact same request succeeds instantly without it.
-    ibkr.ib.RequestTimeout = 30
+    # tried as a fix for an unrelated hang and turned out to silently break
+    # reqHistoricalData for this account, which already has live data
+    # entitlements: confirmed by isolated testing that the exact same
+    # request succeeds without it.
+    ibkr.ib.RequestTimeout = REQUEST_TIMEOUT_SECONDS + 20
     results = []
     try:
         for i, symbol in enumerate(symbols, start=1):
