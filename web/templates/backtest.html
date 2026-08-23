@@ -35,12 +35,12 @@
 
       <div class="row g-2 mb-3">
         <div class="col-6 col-md-3">
-          <label class="form-label small">Start date</label>
-          <input type="date" id="bt-start-date" class="form-control form-control-sm">
+          <label class="form-label small">Start date (DD/MM/YYYY)</label>
+          <input type="text" id="bt-start-date" class="form-control form-control-sm" placeholder="DD/MM/YYYY" inputmode="numeric" maxlength="10">
         </div>
         <div class="col-6 col-md-3">
-          <label class="form-label small">End date</label>
-          <input type="date" id="bt-end-date" class="form-control form-control-sm">
+          <label class="form-label small">End date (DD/MM/YYYY)</label>
+          <input type="text" id="bt-end-date" class="form-control form-control-sm" placeholder="DD/MM/YYYY" inputmode="numeric" maxlength="10">
         </div>
         <div class="col-6 col-md-2">
           <label class="form-label small">Portfolio value ($)</label>
@@ -99,6 +99,33 @@ function sideBadge(direction) {
   return direction === "short" ? '<span class="badge bg-danger">SHORT</span>' : '<span class="badge bg-primary">LONG</span>';
 }
 function fmtMoney(v) { return (v === null || v === undefined || v === "") ? "-" : `$${Number(v).toFixed(2)}`; }
+
+// Plain-text DD/MM/YYYY date fields, not <input type="date">, since that
+// renders in whatever format the browser's OS locale picks (commonly
+// MM/DD/YYYY) regardless of this page's own language - silently swapping
+// day and month for anyone not on that locale. A fixed, explicit format
+// here removes the ambiguity entirely rather than depending on a setting
+// this page has no control over.
+function attachDateMask(input) {
+  input.addEventListener("input", () => {
+    const digits = input.value.replace(/\D/g, "").slice(0, 8);
+    input.value = digits.length > 4 ? `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`
+      : digits.length > 2 ? `${digits.slice(0, 2)}/${digits.slice(2)}`
+      : digits;
+  });
+}
+
+function parseDDMMYYYY(str) {
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec((str || "").trim());
+  if (!m) return null;
+  const [, dd, mm, yyyy] = m;
+  const day = Number(dd), month = Number(mm), year = Number(yyyy);
+  const d = new Date(Date.UTC(year, month - 1, day));
+  // Date normalizes an invalid day/month (e.g. 31/02) into a different
+  // date instead of raising - reject anything that didn't round-trip.
+  if (d.getUTCFullYear() !== year || d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day) return null;
+  return `${yyyy}-${mm}-${dd}`;
+}
 
 let strategiesById = {};
 let pollHandle = null;
@@ -235,9 +262,9 @@ document.getElementById("btn-run-backtest").addEventListener("click", async () =
   errorEl.textContent = "";
   const strategyIds = Array.from(document.querySelectorAll(".bt-strategy-checkbox:checked")).map(el => Number(el.value));
   if (!strategyIds.length) { errorEl.textContent = "Pick at least one strategy."; return; }
-  const startDate = document.getElementById("bt-start-date").value;
-  const endDate = document.getElementById("bt-end-date").value;
-  if (!startDate || !endDate) { errorEl.textContent = "Pick a start and end date."; return; }
+  const startDate = parseDDMMYYYY(document.getElementById("bt-start-date").value);
+  const endDate = parseDDMMYYYY(document.getElementById("bt-end-date").value);
+  if (!startDate || !endDate) { errorEl.textContent = "Enter both dates as DD/MM/YYYY."; return; }
 
   const payload = {
     strategy_ids: strategyIds,
@@ -258,6 +285,8 @@ document.getElementById("btn-run-backtest").addEventListener("click", async () =
 });
 
 document.addEventListener("DOMContentLoaded", async () => {
+  attachDateMask(document.getElementById("bt-start-date"));
+  attachDateMask(document.getElementById("bt-end-date"));
   await loadStrategyPicker();
   loadUniverseInfo();
   refreshHistory();
