@@ -102,6 +102,7 @@ function fmtMoney(v) { return (v === null || v === undefined || v === "") ? "-" 
 
 let strategiesById = {};
 let pollHandle = null;
+let currentBacktestId = null;
 
 async function loadStrategyPicker() {
   const rows = await api("/api/strategies");
@@ -179,6 +180,7 @@ function renderResults(detail) {
 
 async function pollBacktest(id) {
   if (pollHandle) clearInterval(pollHandle);
+  currentBacktestId = id;
   const tick = async () => {
     const detail = await api(`/api/backtests/${id}`);
     renderResults(detail);
@@ -204,9 +206,23 @@ async function refreshHistory() {
       <td class="small mono">${r.params.start_date} → ${r.params.end_date}</td>
       <td><span class="badge ${badgeClass}">${r.status}</span></td>
       <td class="small">${r.created_at}</td>
-      <td><button class="btn btn-sm btn-outline-secondary" onclick="pollBacktest(${r.id})">View</button></td>
+      <td>
+        <button class="btn btn-sm btn-outline-secondary" onclick="pollBacktest(${r.id})">View</button>
+        <button class="btn btn-sm btn-outline-danger" onclick="deleteBacktest(${r.id})">Delete</button>
+      </td>
     </tr>`;
   }).join("");
+}
+
+async function deleteBacktest(id) {
+  if (!confirm(`Delete backtest #${id}? This can't be undone.`)) return;
+  await api(`/api/backtests/${id}`, { method: "DELETE" });
+  if (id === currentBacktestId) {
+    if (pollHandle) clearInterval(pollHandle);
+    currentBacktestId = null;
+    document.getElementById("bt-results-card").classList.add("d-none");
+  }
+  refreshHistory();
 }
 
 document.getElementById("btn-run-backtest").addEventListener("click", async () => {

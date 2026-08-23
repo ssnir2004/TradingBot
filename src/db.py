@@ -1421,6 +1421,16 @@ def get_backtest(backtest_id: int) -> dict | None:
         return result
 
 
+def delete_backtest(backtest_id: int, account_id: int) -> bool:
+    """Scoped to account_id so one account can't delete another's backtest.
+    Returns whether a row was actually deleted."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM backtests WHERE id = ? AND account_id = ?", (backtest_id, account_id)
+        )
+        return cur.rowcount > 0
+
+
 def list_backtests(account_id: int, limit: int = 20) -> list[dict]:
     """Summary rows only (no results_json - can be large with several
     strategies' full trade logs) for the history list; fetch a single

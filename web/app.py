@@ -952,6 +952,13 @@ def api_get_backtest(backtest_id: int, account_id: int = Depends(require_account
     return result
 
 
+@app.delete("/api/backtests/{backtest_id}")
+def api_delete_backtest(backtest_id: int, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    if not db.delete_backtest(backtest_id, account_id):
+        raise HTTPException(status_code=404, detail="Backtest not found")
+    return {"ok": True}
+
+
 @app.get("/api/backtest_universe")
 def api_backtest_universe(user: str = Depends(require_user)):
     symbols = backtest_data.cached_symbols(backtest_engine.BAR_SIZE)
