@@ -216,7 +216,12 @@ async function refreshHistory() {
 
 async function deleteBacktest(id) {
   if (!confirm(`Delete backtest #${id}? This can't be undone.`)) return;
-  await api(`/api/backtests/${id}`, { method: "DELETE" });
+  try {
+    await api(`/api/backtests/${id}`, { method: "DELETE" });
+  } catch (e) {
+    alert("Could not delete backtest: " + e.message);
+    return;
+  }
   if (id === currentBacktestId) {
     if (pollHandle) clearInterval(pollHandle);
     currentBacktestId = null;
