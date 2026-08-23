@@ -55,6 +55,28 @@ MAX_GAP_FILL_DAYS = CHUNK_DAYS  # an incremental top-up is always a single reque
 # must stay within the same per-request ceiling as one initial-backfill chunk
 REQUEST_PAUSE_SECONDS = 2.0  # stay well under IBKR's historical-data pacing limits
 REQUEST_TIMEOUT_SECONDS = 180  # a 6-month request alone took ~60s in testing; leave headroom
+# ib.connect() returns as soon as the socket is up, but its own internal
+# account-state sync (positions/open orders/account updates/executions) can
+# still be catching up in the background for a few seconds after that -
+# confirmed via repeated live runs: the very first reqHistoricalData call,
+# fired immediately after connect(), reliably fails while later ones (same
+# connection, seconds later) succeed. A short pause here before the first
+# real request is cheaper than losing symbol 1 on every run.
+CONNECT_WARMUP_SECONDS = 5
+# IBKR's documented HARD pacing cap ("no more than 60 historical-data
+# requests per rolling 10 minutes") is explicitly lifted for bar sizes of
+# "1 min" and up (ours is "5 mins" - see interactivebrokers.github.io/
+# tws-api/historical_limitations.html), so the repeated Error 162 /
+# Timeout clusters seen in this account are NOT that fixed 60-per-10-min
+# wall - they're IBKR's undocumented "soft" throttle that dynamically
+# load-balances client requests against server load. That means: no fixed
+# safe request count exists to design around, but the throttle is often
+# transient and clears within seconds to low minutes (unlike a real
+# 10-minute hard-limit reset) - so retrying a failed symbol a couple of
+# times with a short backoff, right here, recovers most of what a full
+# stop-the-script-and-wait-25-minutes cycle was fixing by brute force.
+RETRY_ATTEMPTS = 3  # 1 initial try + 2 retries
+RETRY_BACKOFF_SECONDS = [15, 45]
 
 _DURATION_UNIT_DAYS = {"D": 1, "W": 7, "M": 30, "Y": 365}
 
@@ -161,6 +183,7 @@ def run_fetch(account_id: int, symbols: list[str], duration: str = DEFAULT_INITI
     # entitlements: confirmed by isolated testing that the exact same
     # request succeeds without it.
     ibkr.ib.RequestTimeout = REQUEST_TIMEOUT_SECONDS + 20
+    time.sleep(CONNECT_WARMUP_SECONDS)
     results = []
     try:
         for i, symbol in enumerate(symbols, start=1):
@@ -170,12 +193,19 @@ def run_fetch(account_id: int, symbols: list[str], duration: str = DEFAULT_INITI
             # since IBKR historical-data calls have no built-in timeout of
             # their own and can hang if the Gateway stops responding.
             print(f"[{i}/{len(symbols)}] {symbol} ...", end=" ", flush=True)
-            try:
-                result = fetch_symbol(ibkr.ib, symbol, duration)
+            for attempt in range(RETRY_ATTEMPTS):
+                try:
+                    result = fetch_symbol(ibkr.ib, symbol, duration)
+                except Exception as exc:  # noqa: BLE001 - one bad symbol must not kill the run
+                    result = {"symbol": symbol, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
+                if result["status"] not in ("error", "no_data") or attempt == RETRY_ATTEMPTS - 1:
+                    break
+                print(f"{result['status']} (retry {attempt + 1}/{RETRY_ATTEMPTS - 1}) ...", end=" ", flush=True)
+                time.sleep(RETRY_BACKOFF_SECONDS[attempt])
+            if result["status"] == "error":
+                print(f"error: {result['error']}", flush=True)
+            else:
                 print(result["status"], flush=True)
-            except Exception as exc:  # noqa: BLE001 - one bad symbol must not kill the run
-                result = {"symbol": symbol, "status": "error", "error": str(exc)}
-                print(f"error: {exc}", flush=True)
             results.append(result)
             time.sleep(REQUEST_PAUSE_SECONDS)
     finally:
