@@ -55,14 +55,16 @@ MAX_GAP_FILL_DAYS = CHUNK_DAYS  # an incremental top-up is always a single reque
 # must stay within the same per-request ceiling as one initial-backfill chunk
 REQUEST_PAUSE_SECONDS = 2.0  # stay well under IBKR's historical-data pacing limits
 REQUEST_TIMEOUT_SECONDS = 180  # a 6-month request alone took ~60s in testing; leave headroom
-# ib.connect() returns as soon as the socket is up, but its own internal
-# account-state sync (positions/open orders/account updates/executions) can
-# still be catching up in the background for a few seconds after that -
-# confirmed via repeated live runs: the very first reqHistoricalData call,
-# fired immediately after connect(), reliably fails while later ones (same
-# connection, seconds later) succeed. A short pause here before the first
-# real request is cheaper than losing symbol 1 on every run.
-CONNECT_WARMUP_SECONDS = 5
+# ib.connect() returns as soon as the socket is up, but the very first
+# reqHistoricalData call fired right after that reliably fails while later
+# ones (same connection, seconds later) succeed - confirmed via repeated
+# live runs, including with a blind few-second sleep inserted here first,
+# which did NOT fix it (so this isn't just "give the socket a moment").
+# _warm_up_connection() below fires one throwaway reqHistoricalData call
+# through the real code path instead of sleeping, so whatever's actually
+# unready gets exercised (and its failure absorbed) before a real symbol
+# from the list pays for it.
+_WARMUP_SYMBOL = "SPY"
 # IBKR's documented HARD pacing cap ("no more than 60 historical-data
 # requests per rolling 10 minutes") is explicitly lifted for bar sizes of
 # "1 min" and up (ours is "5 mins" - see interactivebrokers.github.io/
@@ -133,6 +135,24 @@ def _fetch_span(ib, qualified, total_days: int) -> pd.DataFrame:
     return combined[~combined.index.duplicated(keep="last")]
 
 
+def _warm_up_connection(ib):
+    """One throwaway historical-data request, right after connect(), through
+    the exact same reqHistoricalData path the real loop uses - see the
+    _WARMUP_SYMBOL comment above for why. Any failure here is expected and
+    silently discarded; it exists purely to be the request that eats
+    whatever's still settling, not to produce usable data."""
+    try:
+        contract = Stock(_WARMUP_SYMBOL, "SMART", "USD")
+        (qualified,) = ib.qualifyContracts(contract)
+        ib.reqHistoricalData(
+            qualified, endDateTime="", durationStr="1 D",
+            barSizeSetting=BAR_SIZE, whatToShow="TRADES", useRTH=False, formatDate=2,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        pass
+
+
 def fetch_symbol(ib, symbol: str, initial_duration: str) -> dict:
     contract = Stock(symbol, "SMART", "USD")
     (qualified,) = ib.qualifyContracts(contract)
@@ -183,7 +203,7 @@ def run_fetch(account_id: int, symbols: list[str], duration: str = DEFAULT_INITI
     # entitlements: confirmed by isolated testing that the exact same
     # request succeeds without it.
     ibkr.ib.RequestTimeout = REQUEST_TIMEOUT_SECONDS + 20
-    time.sleep(CONNECT_WARMUP_SECONDS)
+    _warm_up_connection(ibkr.ib)
     results = []
     try:
         for i, symbol in enumerate(symbols, start=1):
