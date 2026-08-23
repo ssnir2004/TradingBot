@@ -36,6 +36,7 @@ unused in the live bot too, so reproducing that exactly (not silently
 "fixing" it) is what makes this a faithful replay rather than a nicer-
 but-different simulation.
 """
+import concurrent.futures
 import math
 from datetime import date, timedelta
 from datetime import time as dt_time
@@ -50,6 +51,31 @@ BAR_SIZE = "5 mins"
 DAILY_BAR_SIZE = "1 day"
 INTRADAY_LOOKBACK_DAYS = 5  # matches _evaluate_entry_filters' own "5d" yfinance window
 _DAILY_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
+
+# yfinance's own `timeout=` kwarg only bounds a single HTTP request; its
+# internal retry/backoff (and Yahoo occasionally sending a large
+# Retry-After on a 429, which cloud-datacenter IPs like this server's draw
+# far more often than home IPs) can still stall one .history() call for a
+# very long time. simulate_strategy calls fetch_daily_bars sequentially
+# for every symbol in a background thread, so one throttled/hung symbol
+# would otherwise freeze an entire backtest run with nothing to show for
+# it - not even an error, just stuck on "running" - so every call here
+# gets a hard wall-clock ceiling of its own, timing out to "no data for
+# this symbol" exactly like the yfinance-side exceptions already handled
+# below.
+_YF_TIMEOUT_SECONDS = 45
+
+
+def _yf_history(yf_symbol: str, **kwargs) -> pd.DataFrame:
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(yf.Ticker(yf_symbol).history, **kwargs)
+        return future.result(timeout=_YF_TIMEOUT_SECONDS)
+    finally:
+        # wait=False: a genuinely hung call can't be cancelled mid-flight,
+        # so don't block here re-waiting on it - just abandon this
+        # executor and move on to the next symbol.
+        executor.shutdown(wait=False)
 
 
 def fetch_daily_bars(symbol: str) -> pd.DataFrame | None:
@@ -69,7 +95,7 @@ def fetch_daily_bars(symbol: str) -> pd.DataFrame | None:
         if cached.index.max().date() >= date.today() - timedelta(days=1):
             return cached
         try:
-            fresh = yf.Ticker(yf_symbol).history(start=cached.index.max().date(), interval="1d")
+            fresh = _yf_history(yf_symbol, start=cached.index.max().date(), interval="1d")
         except Exception:
             return cached
         if fresh.empty:
@@ -79,7 +105,7 @@ def fetch_daily_bars(symbol: str) -> pd.DataFrame | None:
         return merged
 
     try:
-        bars = yf.Ticker(yf_symbol).history(period="max", interval="1d")
+        bars = _yf_history(yf_symbol, period="max", interval="1d")
     except Exception:
         return None
     if bars.empty:
