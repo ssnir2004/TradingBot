@@ -1,16 +1,20 @@
-"""Local cache of historical IBKR bars for the backtest engine.
-
-Unlike yfinance (capped at ~60 days of intraday history), IBKR's own
-reqHistoricalData can pull months of 5-minute bars per request — and once
-fetched, a bar is cached here FOREVER, so the usable backtest window only
-ever grows (bounded by how far back has been fetched so far, not by any
-rolling data-provider window). fetch_backtest_data.py is what actually
-calls IBKR and writes here; this module only knows how to read/merge/save
-what's already on disk, so it has no IBKR dependency and is safe to import
+"""Local cache of historical bars for the backtest engine, from either of
+its two data sources: IBKR's own reqHistoricalData (5-minute intraday
+bars, via fetch_backtest_data.py — unlike yfinance's ~60-day intraday
+cap, IBKR can pull months per request) or yfinance (daily bars, fetched
+directly by backtest_engine.py itself since no broker connection is
+needed for those). Either way, once a bar is fetched it's cached here
+FOREVER, so the usable backtest window only ever grows (bounded by how
+far back has been fetched so far, not by any rolling data-provider
+window). This module only knows how to read/merge/save what's already on
+disk — no IBKR or yfinance dependency of its own — so it's safe to import
 from the dashboard process (which never talks to IBKR directly) too.
 
 One file per symbol+bar-size under data/backtest_bars/, holding every bar
-ever fetched for that symbol, deduplicated and sorted by timestamp.
+ever fetched for that symbol, deduplicated and sorted by timestamp. The
+bar-size string is just a cache key, not validated against any real
+source — "5 mins" (IBKR intraday) and "1 day" (yfinance daily) coexist
+as separate files for the same symbol.
 """
 import pandas as pd
 from pathlib import Path

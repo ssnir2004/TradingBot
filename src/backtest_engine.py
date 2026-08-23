@@ -7,8 +7,16 @@ drift from what the live bot actually does; only the data source and the
 "place a real order" step are different.
 
 Daily bars (D1-D3, SMA200/50) come from yfinance, same as the live bot —
-that history isn't limited the way intraday is. Intraday bars (I1-I3,
-entry timing, exit management) come from the local IBKR cache (see
+that history isn't limited the way intraday is, and deliberately isn't
+aggregated from the cached IBKR intraday bars instead: doing that would
+risk quietly drifting from the live bot's actual daily-bar values
+(vendor differences in split/dividend adjustment, rounding) and could
+run short of the 200 days SMA200 needs near the start of the cached
+intraday window, defeating the "faithful replay" the whole engine exists
+for. Cached to disk on first use (see fetch_daily_bars, src/backtest_
+data.py) purely to avoid re-downloading yfinance's full history on every
+run, not to change where it comes from. Intraday bars (I1-I3, entry
+timing, exit management) come from the local IBKR cache (see
 src/backtest_data.py), which is what lets this go back further than
 yfinance's ~60-day intraday window.
 
@@ -29,6 +37,7 @@ unused in the live bot too, so reproducing that exactly (not silently
 but-different simulation.
 """
 import math
+from datetime import date, timedelta
 from datetime import time as dt_time
 
 import pandas as pd
@@ -38,18 +47,46 @@ import cycle
 from src import backtest_data
 
 BAR_SIZE = "5 mins"
+DAILY_BAR_SIZE = "1 day"
 INTRADAY_LOOKBACK_DAYS = 5  # matches _evaluate_entry_filters' own "5d" yfinance window
+_DAILY_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 
 
 def fetch_daily_bars(symbol: str) -> pd.DataFrame | None:
-    """Full daily history via yfinance, fetched once per symbol per
-    backtest run then sliced per evaluation day — not the constrained
-    resource, unlike intraday."""
+    """Daily history via yfinance, cached to disk forever (same cache as
+    the intraday IBKR bars, keyed by DAILY_BAR_SIZE) so repeat backtest
+    runs - across strategies in the same batch, or on a later day - don't
+    re-download yfinance's full "period=max" history from scratch every
+    time. yfinance stays the source of truth for daily bars (matching
+    what the live bot itself reads - see module docstring on why this
+    can't just be aggregated from the cached IBKR intraday bars instead);
+    this only avoids re-asking it for data it already gave us, by
+    re-fetching just the gap since the last cached day instead of
+    everything."""
+    yf_symbol = symbol.replace(" ", "-")
+    cached = backtest_data.load_cached_bars(symbol, DAILY_BAR_SIZE)
+    if cached is not None and not cached.empty:
+        if cached.index.max().date() >= date.today() - timedelta(days=1):
+            return cached
+        try:
+            fresh = yf.Ticker(yf_symbol).history(start=cached.index.max().date(), interval="1d")
+        except Exception:
+            return cached
+        if fresh.empty:
+            return cached
+        merged = backtest_data.merge_bars(cached, fresh[_DAILY_COLUMNS])
+        backtest_data.save_cached_bars(symbol, DAILY_BAR_SIZE, merged)
+        return merged
+
     try:
-        bars = yf.Ticker(symbol.replace(" ", "-")).history(period="max", interval="1d")
-        return bars if not bars.empty else None
+        bars = yf.Ticker(yf_symbol).history(period="max", interval="1d")
     except Exception:
         return None
+    if bars.empty:
+        return None
+    bars = bars[_DAILY_COLUMNS]
+    backtest_data.save_cached_bars(symbol, DAILY_BAR_SIZE, bars)
+    return bars
 
 
 def _trading_days(intraday: pd.DataFrame, start_date, end_date) -> list:

@@ -254,14 +254,20 @@ real historical bars — daily bars come from yfinance (unlimited-ish
 history, same as the live bot), but the intraday (5-minute) bars it needs
 for entry timing and exit management come from IBKR's own historical-data
 API instead of yfinance, since yfinance only keeps ~60 days of intraday
-history while IBKR gives months per request. `fetch_backtest_data.py`
-pulls and locally caches those bars (`data/backtest_bars/`) — once a bar
-is fetched it's kept forever, so the usable backtest window only grows
-over time. `trading-bot-paper.service`'s scheduler already runs it
-automatically every Sunday 09:00 ET for the full S&P 500 universe, but —
-same as the custom-universe builder — it needs one manual run right after
-this feature is first deployed, or the Backtest page has nothing to test
-against for up to a week:
+history while IBKR gives months per request. Both live in the same local
+cache (`data/backtest_bars/`, one file per symbol per bar size) — once a
+bar is fetched it's kept forever, so the usable backtest window only
+grows over time, and re-running a backtest never re-downloads what it
+already has. The intraday side needs `fetch_backtest_data.py` (an IBKR
+connection); the daily side is fetched directly by the dashboard process
+itself the first time a symbol is backtested (no broker connection
+needed for yfinance), so it needs no separate setup step. Only the
+intraday cache needs seeding before the Backtest page has anything to
+test against — `trading-bot-paper.service`'s scheduler already runs
+`fetch_backtest_data.py` automatically every Sunday 09:00 ET for the full
+S&P 500 universe, but — same as the custom-universe builder — it needs
+one manual run right after this feature is first deployed, or the
+Backtest page has nothing to test against for up to a week:
 
 ```bash
 sudo -iu tradingbot bash -c "cd /opt/tradingbot && .venv/bin/python fetch_backtest_data.py"
