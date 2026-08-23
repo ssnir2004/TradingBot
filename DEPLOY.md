@@ -282,20 +282,34 @@ many times the Gateway is restarted — this is expected and not a bug in
 this script or the Gateway config. Don't run (or debug failures of) this
 job over the weekend; retry once markets are back.
 
-Each symbol's first-ever backfill is a single `reqHistoricalData` request
-for the full 6 months (confirmed: IBKR returns ~21.7k 5-minute bars for
-that in under a minute, no chunking needed) — but a full S&P 500 backfill
-is still slow at ~500 sequential requests, so always run it in the
-background (`nohup ... &` or `screen`/`tmux`) rather than waiting on it,
-and check on it later via its per-symbol progress output. Re-running it
-later (by hand or via the weekly schedule) is much faster since it's
-always incremental — it only fetches the gap since each symbol's last
-cached bar, never re-downloads what's already cached. Don't reintroduce
-chunking here even if a request seems slow: splitting each symbol's fetch
-into many small requests multiplies total request volume and is what
-caused the Gateway to drop the connection entirely the one time this was
-tried (IBKR's paper Gateway punishes request *count* over a short window,
-not request size).
+IBKR happily returns 6 months of 5-minute bars in a single
+`reqHistoricalData` request (~21.7k bars in under a minute), but reliably
+*cancels* a single request for 1 year or more after ~5 minutes
+(`Error 162: API historical data query cancelled`) — confirmed live for
+1 Y, 3 Y, and 10 Y, regardless of client-side timeout. So a symbol's
+first-ever backfill (`DEFAULT_INITIAL_DURATION`, 2 years by default) is
+paged backward in `CHUNK_DAYS`-sized (180-day / ~6-month) chunks — the
+largest span confirmed to work in one request — rather than asked for
+all at once. Don't shrink `CHUNK_DAYS` even if a request seems slow:
+many small requests is what caused the Gateway to drop the connection
+entirely the one time this was tried (IBKR's paper Gateway punishes
+request *count* over a short window, not request size); few large
+chunks avoids that while still respecting the ~6-month per-request
+ceiling.
+
+A full S&P 500 backfill at the 2-year default is ~5 chunk requests per
+symbol × ~500 symbols — expect it to run for the better part of **1-2
+days**, not hours, so always run it in the background (`nohup ... &` or
+`screen`/`tmux`) rather than waiting on it, and check on it later via its
+per-symbol progress output. Re-running it later (by hand or via the
+weekly schedule) is much faster since it's always incremental — it only
+fetches the gap since each symbol's last cached bar (a single request,
+never chunked, since a top-up gap is capped at `MAX_GAP_FILL_DAYS` = one
+chunk's worth) — never re-downloads what's already cached, and never
+backfills further into the past for a symbol that already has some
+cache. At the default settings, expect on the order of a few GB total
+under `data/backtest_bars/` for the full S&P 500 — check available disk
+with `df -h` before kicking off a much deeper backfill than the default.
 
 If `ibgateway-paper.service` or `ibgateway-live.service` restarts (nightly
 `AutoRestartTime`, a crash, a server reboot) and IBKR forces a fresh 2FA
