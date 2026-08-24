@@ -723,6 +723,83 @@ def api_cancel_broker_order(symbol: str, order_id: int, confirm: str | None = No
     return {"ok": True, "stdout": proc.stdout}
 
 
+@app.get("/api/orders")
+def api_list_orders(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    """Every real resting order in this mode's account, independent of
+    order type or whether it's tied to a currently-held position - unlike
+    /api/broker_positions' stop_orders/take_profit_orders (which only
+    surface STP/LMT orders in the closing direction of an already-open
+    position), this also shows a not-yet-filled entry order (e.g. the
+    LIMIT half of open_position.py's bracket) and TRAIL stops, neither of
+    which appear anywhere else in the dashboard today."""
+    return db.get_broker_orders(account_id, mode)
+
+
+@app.put("/api/orders/{order_id}")
+async def api_edit_order(order_id: int, request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    """Modifies an existing resting order in place (same order ID - IBKR
+    treats this as a live modification, not cancel+replace). Works for any
+    order type (LMT entry, STP, TRAIL, take-profit)."""
+    body = await request.json()
+    symbol = str(body.get("symbol", "")).strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    try:
+        price = float(body.get("price"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="price must be a number")
+    if price <= 0:
+        raise HTTPException(status_code=400, detail="price must be positive")
+    qty = body.get("qty")
+    if qty is not None:
+        try:
+            qty = int(qty)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="qty must be a whole number")
+        if qty <= 0:
+            raise HTTPException(status_code=400, detail="qty must be positive")
+
+    if mode == "live" and body.get("confirm") != MODIFY_BROKER_ORDER_LIVE_CONFIRM_PHRASE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Type '{MODIFY_BROKER_ORDER_LIVE_CONFIRM_PHRASE}' to confirm editing a LIVE order.",
+        )
+
+    cmd = [sys.executable, str(PROJECT_DIR / "modify_broker_order.py"), "--mode", mode,
+           "--account-id", str(account_id), "--symbol", symbol, "--action", "edit",
+           "--order-id", str(order_id), "--price", str(price)]
+    if qty is not None:
+        cmd += ["--qty", str(qty)]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT)
+    db.log_decision(account_id, mode, "dashboard_control", user=user, action="edit_order",
+                     symbol=symbol, order_id=order_id, price=price, qty=qty, stdout=proc.stdout, returncode=proc.returncode)
+    if proc.returncode != 0:
+        raise HTTPException(status_code=400, detail=proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "Edit failed")
+    return {"ok": True, "stdout": proc.stdout}
+
+
+@app.delete("/api/orders/{order_id}")
+def api_cancel_order(order_id: int, symbol: str, confirm: str | None = None, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    """Cancels any resting order by ID, independent of order type or
+    whether it's tied to a currently-held position."""
+    if mode == "live" and confirm != MODIFY_BROKER_ORDER_LIVE_CONFIRM_PHRASE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Pass ?confirm={MODIFY_BROKER_ORDER_LIVE_CONFIRM_PHRASE} to confirm cancelling a LIVE order.",
+        )
+    symbol = symbol.strip().upper()
+    proc = subprocess.run(
+        [sys.executable, str(PROJECT_DIR / "modify_broker_order.py"), "--mode", mode,
+         "--account-id", str(account_id), "--symbol", symbol, "--action", "cancel", "--order-id", str(order_id)],
+        capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
+    )
+    db.log_decision(account_id, mode, "dashboard_control", user=user, action="cancel_order",
+                     symbol=symbol, order_id=order_id, stdout=proc.stdout, returncode=proc.returncode)
+    if proc.returncode != 0:
+        raise HTTPException(status_code=400, detail=proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "Cancel failed")
+    return {"ok": True, "stdout": proc.stdout}
+
+
 @app.post("/api/broker_positions/close")
 async def api_broker_positions_close(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
     body = await request.json()

@@ -83,6 +83,27 @@
     <div class="col-12">
       <div class="card">
         <div class="card-header d-flex justify-content-between align-items-center">
+          <span>Pending Orders <span class="badge bg-secondary fw-normal">every resting order, any type</span></span>
+          <span class="text-muted small">Updated: <span id="orders-updated" class="mono">-</span></span>
+        </div>
+        <div class="small text-muted px-3 pt-2">
+          Every order still working at the broker — LIMIT entries not yet filled, protective stops (including ATR trailing stops), take-profits. "Edit" modifies the order in place (same order ID, not cancel+replace); "Cancel" removes it. Refreshes every 5 minutes alongside Account Holdings below, or use "Refresh now" above.
+        </div>
+        <div id="orders-error" class="text-danger small px-3"></div>
+        <div class="card-body p-0">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Symbol</th><th>Type</th><th>Side</th><th>Qty</th><th>Price</th><th>Status</th><th></th></tr></thead>
+            <tbody id="orders-body"><tr><td colspan="7" class="text-center text-muted">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3 mb-3">
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
           <span>Account Holdings <span class="badge bg-secondary fw-normal">every real IBKR position, not just the bot's</span></span>
           <span class="text-muted small">Updated: <span id="broker-positions-updated" class="mono">-</span></span>
         </div>
@@ -164,6 +185,96 @@ function extendedHoursCell(eh) {
   // the % alone (pre-market uses yesterday's, after-hours uses today's).
   return `${fmtPnl(eh.pnl)}<br><span class="small text-muted">${label}: ${fmtMoney(eh.price)}${pctText}${refText}</span>`;
 }
+
+function orderTypeBadge(orderType) {
+  return `<span class="mono small">${orderType}</span>`;
+}
+
+async function refreshOrders() {
+  const data = await modeApi("/api/orders");
+  document.getElementById("orders-updated").textContent = data.updated_at || "not refreshed yet";
+  const rows = data.orders || [];
+  const body = document.getElementById("orders-body");
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No pending orders</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(o => `<tr>
+    <td>${symbolLink(o.symbol)}</td>
+    <td>${orderTypeBadge(o.order_type)}</td>
+    <td>${o.action === "BUY" ? '<span class="badge bg-primary">BUY</span>' : '<span class="badge bg-danger">SELL</span>'}</td>
+    <td>${o.qty}</td>
+    <td>${fmtMoney(o.price)}</td>
+    <td class="small text-muted">${o.status}</td>
+    <td>
+      <button class="btn btn-sm btn-outline-secondary order-edit-btn" data-order-id="${o.order_id}" data-symbol="${o.symbol}" data-price="${o.price}" data-qty="${o.qty}">Edit</button>
+      <button class="btn btn-sm btn-outline-danger order-cancel-btn" data-order-id="${o.order_id}" data-symbol="${o.symbol}">Cancel</button>
+    </td>
+  </tr>`).join("");
+}
+
+document.getElementById("orders-body").addEventListener("click", async (e) => {
+  const errorEl = document.getElementById("orders-error");
+
+  const editBtn = e.target.closest(".order-edit-btn");
+  if (editBtn) {
+    errorEl.textContent = "";
+    const orderId = editBtn.dataset.orderId;
+    const symbol = editBtn.dataset.symbol;
+
+    const priceTyped = prompt(`New price for order ${orderId} (${symbol}):`, editBtn.dataset.price);
+    if (priceTyped === null) return;
+    const price = Number(priceTyped);
+    if (!Number.isFinite(price) || price <= 0) { alert("Enter a valid positive price."); return; }
+
+    const qtyTyped = prompt(`Quantity for order ${orderId} (${symbol}) — leave as-is or change:`, editBtn.dataset.qty);
+    if (qtyTyped === null) return;
+    const qty = parseInt(qtyTyped, 10);
+    if (!Number.isFinite(qty) || qty <= 0) { alert("Enter a valid positive quantity."); return; }
+
+    const payload = { symbol, price, qty };
+    if (currentMode === "live") {
+      const confirmTyped = prompt(
+        `This edits a real LIVE order (${orderId}, ${symbol}) to $${price.toFixed(2)} ×${qty}. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
+      );
+      if (confirmTyped !== CLOSE_LIVE_CONFIRM_PHRASE) return;
+      payload.confirm = confirmTyped;
+    }
+    editBtn.disabled = true;
+    try {
+      await modeApi(`/api/orders/${orderId}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      });
+      refreshOrders();
+    } catch (err) {
+      errorEl.textContent = "Edit failed: " + err.message;
+      editBtn.disabled = false;
+    }
+    return;
+  }
+
+  const cancelBtn = e.target.closest(".order-cancel-btn");
+  if (cancelBtn) {
+    errorEl.textContent = "";
+    const orderId = cancelBtn.dataset.orderId;
+    const symbol = cancelBtn.dataset.symbol;
+    if (!confirm(`Cancel order ${orderId} for ${symbol}?`)) return;
+    let url = `/api/orders/${orderId}?symbol=${encodeURIComponent(symbol)}`;
+    if (currentMode === "live") {
+      const confirmTyped = prompt(`Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm cancelling this LIVE order:`);
+      if (confirmTyped !== CLOSE_LIVE_CONFIRM_PHRASE) return;
+      url += `&confirm=${encodeURIComponent(confirmTyped)}`;
+    }
+    cancelBtn.disabled = true;
+    try {
+      await modeApi(url, { method: "DELETE" });
+      refreshOrders();
+    } catch (err) {
+      errorEl.textContent = "Cancel failed: " + err.message;
+      cancelBtn.disabled = false;
+    }
+  }
+});
 
 async function refreshBrokerPositions() {
   const data = await modeApi("/api/broker_positions");
@@ -391,7 +502,7 @@ document.getElementById("btn-place-order").addEventListener("click", async () =>
 });
 
 function refreshAll() {
-  refreshStatus(); refreshAccount(); refreshGatewayStatus(); refreshBrokerPositions(); refreshIbkrCredentials(); refreshMyGateway();
+  refreshStatus(); refreshAccount(); refreshGatewayStatus(); refreshOrders(); refreshBrokerPositions(); refreshIbkrCredentials(); refreshMyGateway();
 }
 </script>
 </body>

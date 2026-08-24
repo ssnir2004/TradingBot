@@ -1,16 +1,20 @@
-"""Adds or cancels a protective stop or take-profit (limit) order for ANY
-real IBKR holding — independent of whether the bot itself opened it or is
+"""Adds, edits, or cancels resting orders for ANY real IBKR holding or
+pending order — independent of whether the bot itself opened it or is
 tracking it in its own `positions` table — spawned as a subprocess by the
-dashboard (web/app.py's POST/DELETE /api/broker_positions/{symbol}/order*).
-Runs on its own IBKR client ID so it never collides with the orchestrator's
-connection or any of the other dashboard-spawned scripts (trade.py,
-close_position.py, modify_stop.py). --mode selects which IB Gateway
-process (paper on 4002, live on 4001) it connects to.
+dashboard (web/app.py's POST/PUT/DELETE /api/broker_positions/{symbol}/
+order* and /api/orders/*). Runs on its own IBKR client ID so it never
+collides with the orchestrator's connection or any of the other
+dashboard-spawned scripts (trade.py, close_position.py, modify_stop.py).
+--mode selects which IB Gateway process (paper on 4002, live on 4001) it
+connects to.
 
 A symbol can carry several stop and/or take-profit orders at once, each
-covering its own slice of the position (scaling out) — this script only
-ever adds a brand-new order or cancels one specific existing order by ID;
-"moving" an order is the dashboard doing a cancel followed by an add.
+covering its own slice of the position (scaling out) — --action add
+always creates a brand-new order rather than touching an existing one.
+--action edit modifies ONE existing order (any type — LMT entry, STP,
+TRAIL, take-profit) in place by resubmitting with its same order ID,
+which IBKR treats as a live modification rather than cancel+replace.
+--action cancel works on any order type/ID too, not just stop/take-profit.
 
 Deliberately does NOT touch this bot's own `positions` table even when the
 symbol happens to also be a bot-tracked position: this edits the account's
@@ -38,11 +42,11 @@ def main():
     parser.add_argument("--account-id", type=int, default=None,
                          help="Defaults to the admin account when omitted (manual/dev use).")
     parser.add_argument("--symbol", required=True)
-    parser.add_argument("--action", required=True, choices=["add", "cancel"])
+    parser.add_argument("--action", required=True, choices=["add", "edit", "cancel"])
     parser.add_argument("--order-type", choices=["stop", "take_profit"], help="Required for --action add.")
-    parser.add_argument("--price", type=float, help="Required for --action add.")
-    parser.add_argument("--qty", type=int, help="Required for --action add.")
-    parser.add_argument("--order-id", type=int, help="Required for --action cancel.")
+    parser.add_argument("--price", type=float, help="Required for --action add; new price for --action edit.")
+    parser.add_argument("--qty", type=int, help="Required for --action add; new qty for --action edit.")
+    parser.add_argument("--order-id", type=int, help="Required for --action edit/cancel.")
     args = parser.parse_args()
     symbol = args.symbol.upper()
     account_id = args.account_id if args.account_id is not None else db.get_default_account_id()
@@ -70,6 +74,33 @@ def main():
                 sys.exit(1)
             ib.cancelOrder(match.order)
             print(f"[{args.mode}] {symbol}: order {args.order_id} cancelled")
+            return
+
+        if args.action == "edit":
+            if args.order_id is None or args.price is None:
+                print(f"[{args.mode}] --order-id and --price are required for --action edit")
+                sys.exit(1)
+            ib.reqAllOpenOrders()
+            ib.sleep(1)
+            match = next((t for t in ib.openTrades() if t.order.orderId == args.order_id), None)
+            if match is None:
+                print(f"[{args.mode}] {symbol}: order {args.order_id} not found among open orders "
+                      f"(already filled or cancelled?)")
+                sys.exit(1)
+            order = match.order
+            # STP and TRAIL both carry their distance/price in auxPrice -
+            # only a plain LMT order uses lmtPrice (see cycle.py's own
+            # refresh_account_info, which reads the same field this way).
+            if order.orderType in ("STP", "TRAIL"):
+                order.auxPrice = round(args.price, 2)
+            else:
+                order.lmtPrice = round(args.price, 2)
+            if args.qty is not None:
+                order.totalQuantity = args.qty
+            ib.placeOrder(match.contract, order)
+            ib.sleep(1)
+            print(f"[{args.mode}] {symbol}: order {args.order_id} ({order.orderType}) updated to "
+                  f"${args.price:.2f}" + (f", qty {args.qty}" if args.qty is not None else ""))
             return
 
         # action == "add"

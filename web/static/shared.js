@@ -109,6 +109,7 @@ document.getElementById("btn-refresh-account").addEventListener("click", async (
     await refreshAccount();
     // Only defined on pages (trading.html) that render the broker positions
     // table - bot.html shares this header/button but has no such table.
+    if (typeof refreshOrders === "function") await refreshOrders();
     if (typeof refreshBrokerPositions === "function") await refreshBrokerPositions();
   } catch (e) {
     errorEl.textContent = e.message;

@@ -958,7 +958,12 @@ def refresh_account_info(account_id: int, mode: str):
                 "order_type": t.order.orderType,
                 "action": t.order.action,
                 "qty": t.order.totalQuantity,
-                "price": t.order.auxPrice if t.order.orderType == "STP" else t.order.lmtPrice,
+                # TRAIL orders (the ATR bracket's stop - see open_position.py)
+                # carry their distance in auxPrice too, same as STP - only
+                # LMT orders actually use lmtPrice. Getting this wrong means
+                # showing IBKR's "unset" sentinel (a huge float) instead of
+                # the real trail amount.
+                "price": t.order.auxPrice if t.order.orderType in ("STP", "TRAIL") else t.order.lmtPrice,
                 "order_id": t.order.orderId,
                 "status": t.orderStatus.status,
             }
