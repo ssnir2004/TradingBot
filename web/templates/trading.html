@@ -92,14 +92,14 @@
         <div id="broker-positions-error" class="text-danger small px-3"></div>
         <div class="card-body p-0">
           <table class="table table-sm mb-0">
-            <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Current</th><th data-bs-toggle="tooltip" title="שינוי ערך מאז סגירת אתמול">Daily P&amp;L</th><th>Unrealized P&amp;L</th><th data-bs-toggle="tooltip" title="הזמנת Stop אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש">Stop</th><th data-bs-toggle="tooltip" title="הזמנת Limit (Take Profit) אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש">Take Profit</th><th>Close</th></tr></thead>
-            <tbody id="broker-positions-body"><tr><td colspan="9" class="text-center text-muted">Loading…</td></tr></tbody>
+            <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Current</th><th data-bs-toggle="tooltip" title="שינוי ערך מאז סגירת אתמול">Daily P&amp;L</th><th>Unrealized P&amp;L</th><th data-bs-toggle="tooltip" title="מחיר טרום-פתיחה (04:00-09:30 ET) או אפטר-מרקט (16:00-20:00 ET), אם קיים כרגע - ריק בשעות המסחר הרגילות">Pre/Post</th><th data-bs-toggle="tooltip" title="הזמנת Stop אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש">Stop</th><th data-bs-toggle="tooltip" title="הזמנת Limit (Take Profit) אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש">Take Profit</th><th>Close</th></tr></thead>
+            <tbody id="broker-positions-body"><tr><td colspan="10" class="text-center text-muted">Loading…</td></tr></tbody>
             <tfoot id="broker-positions-totals" class="d-none">
               <tr class="table-light fw-bold">
                 <td colspan="4" class="text-end">Total</td>
                 <td id="broker-positions-total-daily"></td>
                 <td id="broker-positions-total-unrealized"></td>
-                <td colspan="3"></td>
+                <td colspan="4"></td>
               </tr>
             </tfoot>
           </table>
@@ -147,6 +147,14 @@ function ordersCell(symbol, orders, orderType, remaining) {
   return rows + addBtn;
 }
 
+function extendedHoursCell(eh) {
+  if (!eh || !eh.session || eh.price === null || eh.price === undefined) return '<span class="text-muted">-</span>';
+  const label = eh.session === "pre" ? "Pre" : "Post";
+  const pctText = (eh.change_pct === null || eh.change_pct === undefined) ? "" : ` (${eh.change_pct >= 0 ? "+" : ""}${eh.change_pct.toFixed(2)}%)`;
+  const cls = eh.change_pct > 0 ? "text-success" : (eh.change_pct < 0 ? "text-danger" : "");
+  return `<span class="small text-muted">${label}:</span> <span class="${cls}">${fmtMoney(eh.price)}${pctText}</span>`;
+}
+
 async function refreshBrokerPositions() {
   const data = await modeApi("/api/broker_positions");
   document.getElementById("broker-positions-updated").textContent = data.updated_at || "not refreshed yet";
@@ -154,7 +162,7 @@ async function refreshBrokerPositions() {
   const body = document.getElementById("broker-positions-body");
   const totals = document.getElementById("broker-positions-totals");
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No holdings</td></tr>';
+    body.innerHTML = '<tr><td colspan="10" class="text-center text-muted">No holdings</td></tr>';
     totals.classList.add("d-none");
     return;
   }
@@ -168,6 +176,7 @@ async function refreshBrokerPositions() {
     return `<tr>
       <td>${symbolLink(p.symbol)}</td><td>${p.qty}</td><td>${fmtMoney(p.avg_cost)}</td>
       <td>${fmtMoney(p.current_price)}</td><td>${fmtPnl(p.daily_pnl)}</td><td>${fmtPnl(p.unrealized_pnl)}</td>
+      <td>${extendedHoursCell(p.extended_hours)}</td>
       <td>${ordersCell(p.symbol, p.stop_orders, "stop", stopRemaining)}</td>
       <td>${ordersCell(p.symbol, p.take_profit_orders, "take_profit", tpRemaining)}</td>
       <td>

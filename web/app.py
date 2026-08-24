@@ -600,6 +600,11 @@ def api_broker_positions(mode: str = Depends(require_mode), account_id: int = De
         pos["unrealized_pnl"] = ((price - pos["avg_cost"]) * pos["qty"]) if price is not None else None
         pos["daily_pnl"] = ((price - prior_close) * pos["qty"]) if price is not None and prior_close is not None else None
 
+        try:
+            pos["extended_hours"] = cycle.get_extended_hours_quote(pos["symbol"])
+        except Exception:
+            pos["extended_hours"] = {"session": None, "price": None, "change_pct": None}
+
         # A stop/take-profit that actually protects/exits THIS position
         # must trade in the closing direction (SELL for a long, BUY for a
         # short) - an STP or LMT order on the same symbol going the other

@@ -286,6 +286,45 @@ def _current_price(symbol: str) -> float | None:
     return float(bars["Close"].iloc[-1])
 
 
+def get_extended_hours_quote(symbol: str) -> dict:
+    """Pre-market or after-hours price for the dashboard's Account Holdings
+    table - _current_price/_get_5min_bars deliberately fetch regular-session
+    bars only (prepost=False), so outside 9:30-16:00 ET that "Current"
+    column is frozen at the last regular close, not the live extended-hours
+    price. Returns {"session": "pre"|"post"|None, "price": float|None,
+    "change_pct": float|None} - session/price/change_pct are all None
+    during regular hours (nothing extended to show) or on a fetch failure.
+    change_pct is relative to yesterday's regular close for "pre" (the
+    natural pre-market reference) and to TODAY's regular-session close for
+    "post" (after-hours moves off the day's actual close, not yesterday's)."""
+    now_et = datetime.now(ET)
+    try:
+        bars = yf.Ticker(symbol.replace(" ", "-")).history(period="1d", interval="1m", prepost=True)
+    except Exception:
+        return {"session": None, "price": None, "change_pct": None}
+    if bars.empty:
+        return {"session": None, "price": None, "change_pct": None}
+    bars.index = bars.index.tz_convert(ET)
+    last_ts = bars.index[-1]
+    if last_ts.date() != now_et.date():
+        return {"session": None, "price": None, "change_pct": None}
+    last_price = float(bars["Close"].iloc[-1])
+    last_time = last_ts.time()
+
+    if last_time < dt_time(9, 30):
+        session = "pre"
+        ref = get_prior_close(symbol)
+    elif last_time >= dt_time(16, 0):
+        session = "post"
+        regular = bars[bars.index.time < dt_time(16, 0)]
+        ref = float(regular["Close"].iloc[-1]) if not regular.empty else get_prior_close(symbol)
+    else:
+        return {"session": None, "price": None, "change_pct": None}
+
+    change_pct = ((last_price - ref) / ref * 100) if ref else None
+    return {"session": session, "price": last_price, "change_pct": change_pct}
+
+
 def _compute_rsi_series(closes: pd.Series, period: int) -> pd.Series:
     """Wilder's RSI (the standard definition — smoothed via an EWMA with
     alpha=1/period) at every bar of `closes`, not just the latest — NaN
