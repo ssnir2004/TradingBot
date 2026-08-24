@@ -151,8 +151,13 @@ function extendedHoursCell(eh) {
   if (!eh || !eh.session || eh.price === null || eh.price === undefined) return '<span class="text-muted">-</span>';
   const label = eh.session === "pre" ? "Pre" : "Post";
   const pctText = (eh.change_pct === null || eh.change_pct === undefined) ? "" : ` (${eh.change_pct >= 0 ? "+" : ""}${eh.change_pct.toFixed(2)}%)`;
-  const cls = eh.change_pct > 0 ? "text-success" : (eh.change_pct < 0 ? "text-danger" : "");
-  return `<span class="small text-muted">${label}:</span> <span class="${cls}">${fmtMoney(eh.price)}${pctText}</span>`;
+  // The $ figure (below) is qty/side-aware - already correct for a short
+  // (a price rise there is a loss). The raw price+% above it is the
+  // SYMBOL's own move, not the position's P&L, so it's shown muted/
+  // uncolored on purpose - coloring it by its own sign would repeat the
+  // exact bug this replaced (a short showing green on a price that's
+  // actually moving against it).
+  return `${fmtPnl(eh.pnl)}<br><span class="small text-muted">${label}: ${fmtMoney(eh.price)}${pctText}</span>`;
 }
 
 async function refreshBrokerPositions() {

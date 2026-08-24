@@ -292,22 +292,28 @@ def get_extended_hours_quote(symbol: str) -> dict:
     bars only (prepost=False), so outside 9:30-16:00 ET that "Current"
     column is frozen at the last regular close, not the live extended-hours
     price. Returns {"session": "pre"|"post"|None, "price": float|None,
-    "change_pct": float|None} - session/price/change_pct are all None
+    "change_pct": float|None, "ref_price": float|None} - all four are None
     during regular hours (nothing extended to show) or on a fetch failure.
-    change_pct is relative to yesterday's regular close for "pre" (the
-    natural pre-market reference) and to TODAY's regular-session close for
-    "post" (after-hours moves off the day's actual close, not yesterday's)."""
+    change_pct/ref_price use yesterday's regular close for "pre" (the
+    natural pre-market reference) and TODAY's regular-session close for
+    "post" (after-hours moves off the day's actual close, not yesterday's).
+    change_pct is the SYMBOL's raw move, not any position's P&L - a rising
+    price means nothing about gain/loss for a short position. ref_price is
+    exposed so a caller with pos["qty"] (already signed - negative for a
+    short) can compute (price - ref_price) * qty, naturally flipping to a
+    loss when a short's price rises, same as daily_pnl/unrealized_pnl do."""
     now_et = datetime.now(ET)
+    empty = {"session": None, "price": None, "change_pct": None, "ref_price": None}
     try:
         bars = yf.Ticker(symbol.replace(" ", "-")).history(period="1d", interval="1m", prepost=True)
     except Exception:
-        return {"session": None, "price": None, "change_pct": None}
+        return dict(empty)
     if bars.empty:
-        return {"session": None, "price": None, "change_pct": None}
+        return dict(empty)
     bars.index = bars.index.tz_convert(ET)
     last_ts = bars.index[-1]
     if last_ts.date() != now_et.date():
-        return {"session": None, "price": None, "change_pct": None}
+        return dict(empty)
     last_price = float(bars["Close"].iloc[-1])
     last_time = last_ts.time()
 
@@ -319,10 +325,10 @@ def get_extended_hours_quote(symbol: str) -> dict:
         regular = bars[bars.index.time < dt_time(16, 0)]
         ref = float(regular["Close"].iloc[-1]) if not regular.empty else get_prior_close(symbol)
     else:
-        return {"session": None, "price": None, "change_pct": None}
+        return dict(empty)
 
     change_pct = ((last_price - ref) / ref * 100) if ref else None
-    return {"session": session, "price": last_price, "change_pct": change_pct}
+    return {"session": session, "price": last_price, "change_pct": change_pct, "ref_price": ref}
 
 
 def _compute_rsi_series(closes: pd.Series, period: int) -> pd.Series:

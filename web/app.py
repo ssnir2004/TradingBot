@@ -601,9 +601,19 @@ def api_broker_positions(mode: str = Depends(require_mode), account_id: int = De
         pos["daily_pnl"] = ((price - prior_close) * pos["qty"]) if price is not None and prior_close is not None else None
 
         try:
-            pos["extended_hours"] = cycle.get_extended_hours_quote(pos["symbol"])
+            eh = cycle.get_extended_hours_quote(pos["symbol"])
         except Exception:
-            pos["extended_hours"] = {"session": None, "price": None, "change_pct": None}
+            eh = {"session": None, "price": None, "change_pct": None, "ref_price": None}
+        # eh["change_pct"] is the SYMBOL's raw move, direction-agnostic - a
+        # rising price is meaningless as "gain" or "loss" on its own for a
+        # short (pos["qty"] is already signed, negative for a short), so
+        # the dollar figure show here must go through qty like every other
+        # P&L column, not just mirror the raw price direction.
+        eh["pnl"] = (
+            (eh["price"] - eh["ref_price"]) * pos["qty"]
+            if eh.get("price") is not None and eh.get("ref_price") is not None else None
+        )
+        pos["extended_hours"] = eh
 
         # A stop/take-profit that actually protects/exits THIS position
         # must trade in the closing direction (SELL for a long, BUY for a
