@@ -23,13 +23,20 @@
   <div class="row g-3 mb-3">
     <div class="col-12">
       <div class="card">
-        <div class="card-header">Place Order <span class="badge bg-secondary fw-normal">market order, fires immediately</span></div>
+        <div class="card-header">Place Order</div>
         <div class="card-body">
-          <div class="small text-muted mb-2">
+          <div class="small text-muted mb-2" id="order-type-hint">
             Opens (or adds to) a real position at market price, independent of any strategy — it never gets a bot-managed stop. Once it shows up in Account Holdings below (can take a few minutes), use the Stop/Take Profit columns there to protect it.
           </div>
           <div class="row g-2 align-items-end">
-            <div class="col-6 col-md-3">
+            <div class="col-6 col-md-2">
+              <label class="form-label small">Order Type</label>
+              <select id="order-type" class="form-select form-select-sm">
+                <option value="market">Market (immediate, no stop)</option>
+                <option value="limit_atr">Limit + ATR trailing stop</option>
+              </select>
+            </div>
+            <div class="col-6 col-md-2">
               <label class="form-label small">Symbol</label>
               <input type="text" id="order-symbol" class="form-control form-control-sm text-uppercase" placeholder="AAPL">
             </div>
@@ -44,8 +51,25 @@
               <label class="form-label small">Quantity</label>
               <input type="number" min="1" step="1" id="order-qty" class="form-control form-control-sm">
             </div>
+            <div class="col-6 col-md-2 d-none" id="order-limit-price-wrap">
+              <label class="form-label small">Limit Price</label>
+              <input type="number" min="0" step="0.01" id="order-limit-price" class="form-control form-control-sm">
+            </div>
             <div class="col-6 col-md-2">
               <button id="btn-place-order" class="btn btn-primary btn-sm w-100">Place Order</button>
+            </div>
+          </div>
+          <div class="row g-2 align-items-end mt-1 d-none" id="order-atr-wrap">
+            <div class="col-6 col-md-2">
+              <label class="form-label small">ATR Period</label>
+              <input type="number" min="2" step="1" value="14" id="order-atr-period" class="form-control form-control-sm">
+            </div>
+            <div class="col-6 col-md-3">
+              <label class="form-label small">ATR Multiplier</label>
+              <input type="number" min="0.1" step="0.1" value="2.0" id="order-atr-multiplier" class="form-control form-control-sm">
+            </div>
+            <div class="col-12 col-md-7 small text-muted">
+              Stop distance = ATR(period, 5-min bars) &times; multiplier, computed once from fresh IBKR bars at submission. Placed as a real IBKR TRAIL order — broker-managed from then on, not recalculated by the bot. Not subject to end-of-day close; holds until the trail is hit or you close it yourself.
             </div>
           </div>
           <div id="order-error" class="text-danger small mt-2"></div>
@@ -256,18 +280,69 @@ document.getElementById("broker-positions-body").addEventListener("click", async
   }
 });
 
+const ORDER_TYPE_HINTS = {
+  market: "Opens (or adds to) a real position at market price, independent of any strategy — it never gets a bot-managed stop. Once it shows up in Account Holdings below (can take a few minutes), use the Stop/Take Profit columns there to protect it.",
+  limit_atr: "Places a LIMIT entry with an ATR-based trailing stop attached as a bracket — both orders submit together, and the stop only activates once the entry actually fills. Not tracked as a bot position and not subject to end-of-day close.",
+};
+
+document.getElementById("order-type").addEventListener("change", () => {
+  const isLimitAtr = document.getElementById("order-type").value === "limit_atr";
+  document.getElementById("order-limit-price-wrap").classList.toggle("d-none", !isLimitAtr);
+  document.getElementById("order-atr-wrap").classList.toggle("d-none", !isLimitAtr);
+  document.getElementById("order-type-hint").textContent = ORDER_TYPE_HINTS[document.getElementById("order-type").value];
+});
+
 document.getElementById("btn-place-order").addEventListener("click", async () => {
   const errorEl = document.getElementById("order-error");
   const successEl = document.getElementById("order-success");
   errorEl.textContent = ""; successEl.textContent = "";
+  const orderType = document.getElementById("order-type").value;
   const symbol = document.getElementById("order-symbol").value.trim().toUpperCase();
   const side = document.getElementById("order-side").value;
   const qty = parseInt(document.getElementById("order-qty").value, 10);
   if (!symbol) { errorEl.textContent = "Symbol is required."; return; }
   if (!Number.isFinite(qty) || qty <= 0) { errorEl.textContent = "Enter a valid positive quantity."; return; }
 
-  const payload = { symbol, side, qty };
   const actionLabel = side === "BUY" ? "buy" : "sell (short)";
+  const btn = document.getElementById("btn-place-order");
+
+  if (orderType === "limit_atr") {
+    const limitPrice = Number(document.getElementById("order-limit-price").value);
+    const atrPeriod = parseInt(document.getElementById("order-atr-period").value, 10);
+    const atrMultiplier = Number(document.getElementById("order-atr-multiplier").value);
+    if (!Number.isFinite(limitPrice) || limitPrice <= 0) { errorEl.textContent = "Enter a valid positive limit price."; return; }
+    if (!Number.isFinite(atrMultiplier) || atrMultiplier <= 0) { errorEl.textContent = "Enter a valid positive ATR multiplier."; return; }
+
+    const payload = { symbol, side, qty, limit_price: limitPrice, atr_period: atrPeriod, atr_multiplier: atrMultiplier };
+    if (currentMode === "live") {
+      const typed = prompt(
+        `This places a real LIVE bracket order: ${actionLabel} ${qty} share(s) of ${symbol} @ LIMIT $${limitPrice.toFixed(2)}, ` +
+        `with an ATR(${atrPeriod})×${atrMultiplier} trailing stop. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
+      );
+      if (typed !== CLOSE_LIVE_CONFIRM_PHRASE) { errorEl.textContent = "Not confirmed — nothing was ordered."; return; }
+      payload.confirm = typed;
+    } else if (!confirm(`Place a ${actionLabel} LIMIT $${limitPrice.toFixed(2)} order with ATR(${atrPeriod})×${atrMultiplier} trailing stop for ${qty} share(s) of ${symbol} (PAPER)?`)) {
+      return;
+    }
+
+    btn.disabled = true;
+    try {
+      const res = await modeApi("/api/positions/open", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      });
+      successEl.textContent = res.stdout ? res.stdout.trim() : "Bracket order placed.";
+      document.getElementById("order-symbol").value = "";
+      document.getElementById("order-qty").value = "";
+      document.getElementById("order-limit-price").value = "";
+    } catch (err) {
+      errorEl.textContent = "Order failed: " + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+    return;
+  }
+
+  const payload = { symbol, side, qty };
   if (currentMode === "live") {
     const typed = prompt(
       `This immediately places a LIVE market order to ${actionLabel} ${qty} share(s) of ${symbol}. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
@@ -278,7 +353,6 @@ document.getElementById("btn-place-order").addEventListener("click", async () =>
     return;
   }
 
-  const btn = document.getElementById("btn-place-order");
   btn.disabled = true;
   try {
     await modeApi("/api/trading/order", {

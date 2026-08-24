@@ -386,6 +386,55 @@ def api_gateway_resume_engine(mode: str = Depends(require_mode), account_id: int
     return {"ok": True}
 
 
+# Placing a real LIVE order to open a brand-new position is the biggest
+# single action available from this screen, so it gets the same speed
+# bump as every other LIVE-affecting control.
+OPEN_POSITION_LIVE_CONFIRM_PHRASE = "ok"
+
+
+@app.post("/api/positions/open")
+async def api_open_position(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    """Manual LIMIT entry with an ATR-based native IBKR trailing stop
+    attached as a bracket child - see open_position.py. This is a plain
+    broker action: the resulting position is never written to the bot's
+    own positions/trades table, isn't subject to force_close_et, and isn't
+    managed by cycle.py at all going forward - both orders live entirely
+    in TWS/IBKR from here, same as if placed there by hand."""
+    body = await request.json()
+    symbol = str(body.get("symbol", "")).strip().upper()
+    side = body.get("side")
+    if not symbol or side not in ("BUY", "SELL"):
+        raise HTTPException(status_code=400, detail="symbol and side ('BUY' or 'SELL') are required")
+    try:
+        qty = int(body.get("qty"))
+        limit_price = float(body.get("limit_price"))
+        atr_multiplier = float(body.get("atr_multiplier"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="qty, limit_price, and atr_multiplier must be numbers")
+    if qty <= 0 or limit_price <= 0 or atr_multiplier <= 0:
+        raise HTTPException(status_code=400, detail="qty, limit_price, and atr_multiplier must be positive")
+    atr_period = int(body.get("atr_period", 14))
+
+    if mode == "live" and body.get("confirm") != OPEN_POSITION_LIVE_CONFIRM_PHRASE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Type '{OPEN_POSITION_LIVE_CONFIRM_PHRASE}' to confirm placing a real LIVE order.",
+        )
+
+    proc = subprocess.run(
+        [sys.executable, str(PROJECT_DIR / "open_position.py"), "--mode", mode,
+         "--account-id", str(account_id), "--symbol", symbol, "--side", side, "--qty", str(qty),
+         "--limit-price", str(limit_price), "--atr-period", str(atr_period), "--atr-multiplier", str(atr_multiplier)],
+        capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
+    )
+    db.log_decision(account_id, mode, "dashboard_control", user=user, action="open_position",
+                     symbol=symbol, side=side, qty=qty, limit_price=limit_price, atr_multiplier=atr_multiplier,
+                     stdout=proc.stdout, returncode=proc.returncode)
+    if proc.returncode != 0:
+        raise HTTPException(status_code=400, detail=proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "Order failed")
+    return {"ok": True, "stdout": proc.stdout}
+
+
 @app.get("/api/positions")
 def api_positions(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
     positions = db.get_open_positions(account_id, mode)
