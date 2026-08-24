@@ -113,7 +113,7 @@
         <div id="broker-positions-error" class="text-danger small px-3"></div>
         <div class="card-body p-0">
           <table class="table table-sm mb-0">
-            <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Current</th><th data-bs-toggle="tooltip" title="שינוי ערך מאז סגירת אתמול">Daily P&amp;L</th><th>Unrealized P&amp;L</th><th data-bs-toggle="tooltip" data-bs-html="true" title="מחיר טרום-פתיחה (04:00-09:30 ET) או אפטר-מרקט (16:00-20:00 ET), אם קיים כרגע - ריק בשעות המסחר הרגילות.<br>הסכום ($) מחושב לפי (מחיר טרום/אפטר &minus; מחיר ייחוס) &times; כמות: ביחס לסגירת <u>אתמול</u> בטרום-פתיחה, וביחס לסגירת <u>היום</u> באפטר-מרקט.">Pre/Post</th><th data-bs-toggle="tooltip" title="הזמנת Stop אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש">Stop</th><th data-bs-toggle="tooltip" title="הזמנת Limit (Take Profit) אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש">Take Profit</th><th>Close</th></tr></thead>
+            <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Current</th><th data-bs-toggle="tooltip" title="שינוי ערך מאז סגירת אתמול">Daily P&amp;L</th><th>Unrealized P&amp;L</th><th data-bs-toggle="tooltip" data-bs-html="true" title="מחיר טרום-פתיחה (04:00-09:30 ET) או אפטר-מרקט (16:00-20:00 ET), אם קיים כרגע - ריק בשעות המסחר הרגילות.<br>הסכום ($) מחושב לפי (מחיר טרום/אפטר &minus; מחיר ייחוס) &times; כמות: ביחס לסגירת <u>אתמול</u> בטרום-פתיחה, וביחס לסגירת <u>היום</u> באפטר-מרקט.">Pre/Post</th><th data-bs-toggle="tooltip" title="הזמנת Stop אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש. אפשר להוסיף Stop קבוע (+ Add) או Stop נגרר לפי ATR (+ ATR trail) שנגזר מ-IBKR ומנוהל אוטומטית על ידי הברוקר.">Stop</th><th data-bs-toggle="tooltip" title="הזמנת Limit (Take Profit) אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש">Take Profit</th><th>Close</th></tr></thead>
             <tbody id="broker-positions-body"><tr><td colspan="10" class="text-center text-muted">Loading…</td></tr></tbody>
             <tfoot id="broker-positions-totals" class="d-none">
               <tr class="table-light fw-bold">
@@ -160,13 +160,22 @@
 <script>
 function ordersCell(symbol, orders, orderType, remaining) {
   const label = orderType === "stop" ? "stop" : "take-profit";
-  const rows = (orders || []).map(o => `
+  const rows = (orders || []).map(o => {
+    // A TRAIL order's "price" (see cycle.py's refresh_account_info) is
+    // the trail $ distance, not a fixed stop level - tagged so it isn't
+    // mistaken for one.
+    const trailTag = o.order_type === "TRAIL" ? '<span class="badge bg-info-subtle text-info-emphasis">trail</span> ' : "";
+    return `
     <div class="d-flex align-items-center gap-1 mb-1">
-      <span class="small">${fmtMoney(o.price)} &times;${o.qty}</span>
+      <span class="small">${trailTag}${fmtMoney(o.price)} &times;${o.qty}</span>
       <button class="btn btn-sm btn-outline-danger py-0 px-1 broker-order-cancel-btn" data-symbol="${symbol}" data-order-id="${o.order_id}" title="Cancel this ${label}">&times;</button>
-    </div>`).join("");
+    </div>`;
+  }).join("");
   const addBtn = `<button class="btn btn-sm btn-outline-secondary broker-order-add-btn" data-symbol="${symbol}" data-order-type="${orderType}" data-remaining="${remaining}" title="Add another ${label}">+ Add</button>`;
-  return rows + addBtn;
+  const atrBtn = orderType === "stop"
+    ? ` <button class="btn btn-sm btn-outline-secondary broker-order-add-btn" data-symbol="${symbol}" data-order-type="atr_trailing_stop" data-remaining="${remaining}" title="Add an ATR-based trailing stop">+ ATR trail</button>`
+    : "";
+  return rows + addBtn + atrBtn;
 }
 
 function extendedHoursCell(eh) {
@@ -340,22 +349,41 @@ document.getElementById("broker-positions-body").addEventListener("click", async
     const symbol = addBtn.dataset.symbol;
     const orderType = addBtn.dataset.orderType;
     const remaining = addBtn.dataset.remaining;
-    const label = orderType === "stop" ? "stop" : "take-profit";
+    const isAtrTrail = orderType === "atr_trailing_stop";
+    const label = orderType === "stop" ? "stop" : orderType === "take_profit" ? "take-profit" : "ATR trailing stop";
 
-    const priceTyped = prompt(`${label[0].toUpperCase()}${label.slice(1)} price for ${symbol}:`);
-    if (priceTyped === null) return;
-    const price = Number(priceTyped);
-    if (!Number.isFinite(price) || price <= 0) { alert("Enter a valid positive price."); return; }
+    const payload = { order_type: orderType };
+    let confirmDetail;
+    if (isAtrTrail) {
+      const multTyped = prompt(`ATR multiplier for the trailing stop on ${symbol} (trail distance = ATR(14, 5-min bars) × multiplier):`, "2.0");
+      if (multTyped === null) return;
+      const atrMultiplier = Number(multTyped);
+      if (!Number.isFinite(atrMultiplier) || atrMultiplier <= 0) { alert("Enter a valid positive multiplier."); return; }
+      const periodTyped = prompt(`ATR period for ${symbol}:`, "14");
+      if (periodTyped === null) return;
+      const atrPeriod = parseInt(periodTyped, 10);
+      if (!Number.isFinite(atrPeriod) || atrPeriod < 2) { alert("Enter a valid ATR period (2 or more)."); return; }
+      payload.atr_multiplier = atrMultiplier;
+      payload.atr_period = atrPeriod;
+      confirmDetail = `an ATR(${atrPeriod}) × ${atrMultiplier} trailing stop`;
+    } else {
+      const priceTyped = prompt(`${label[0].toUpperCase()}${label.slice(1)} price for ${symbol}:`);
+      if (priceTyped === null) return;
+      const price = Number(priceTyped);
+      if (!Number.isFinite(price) || price <= 0) { alert("Enter a valid positive price."); return; }
+      payload.price = price;
+      confirmDetail = `a new ${label} order @ $${price.toFixed(2)}`;
+    }
 
     const qtyTyped = prompt(`Quantity for this ${label} (${remaining} share(s) not yet covered by an existing stop/take-profit order):`, remaining);
     if (qtyTyped === null) return;
     const qty = parseInt(qtyTyped, 10);
     if (!Number.isFinite(qty) || qty <= 0) { alert("Enter a valid positive quantity."); return; }
+    payload.qty = qty;
 
-    const payload = { order_type: orderType, price, qty };
     if (currentMode === "live") {
       const confirmTyped = prompt(
-        `This adds a new ${label} order for ${qty} share(s) @ $${price.toFixed(2)} for ${symbol} in your LIVE account. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
+        `This adds ${confirmDetail} for ${qty} share(s) of ${symbol} in your LIVE account. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
       );
       if (confirmTyped !== CLOSE_LIVE_CONFIRM_PHRASE) return;
       payload.confirm = confirmTyped;

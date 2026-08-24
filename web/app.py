@@ -624,13 +624,15 @@ def api_broker_positions(mode: str = Depends(require_mode), account_id: int = De
 
         # A stop/take-profit that actually protects/exits THIS position
         # must trade in the closing direction (SELL for a long, BUY for a
-        # short) - an STP or LMT order on the same symbol going the other
-        # way isn't a stop or take-profit at all (e.g. a separate limit
-        # buy order averaging into a long), and showing it as one would be
-        # actively misleading about what protects the position.
+        # short) - an STP/TRAIL/LMT order on the same symbol going the
+        # other way isn't a stop or take-profit at all (e.g. a separate
+        # limit buy order averaging into a long), and showing it as one
+        # would be actively misleading about what protects the position.
+        # STP and TRAIL both count as "stop" here - a TRAIL is just a stop
+        # that follows price instead of sitting at a fixed level.
         closing_action = "SELL" if pos["qty"] > 0 else "BUY"
         symbol_orders = orders_by_symbol.get(pos["symbol"], [])
-        pos["stop_orders"] = [o for o in symbol_orders if o["order_type"] == "STP" and o["action"] == closing_action]
+        pos["stop_orders"] = [o for o in symbol_orders if o["order_type"] in ("STP", "TRAIL") and o["action"] == closing_action]
         pos["take_profit_orders"] = [o for o in symbol_orders if o["order_type"] == "LMT" and o["action"] == closing_action]
     return data
 
@@ -641,26 +643,51 @@ def api_broker_positions(mode: str = Depends(require_mode), account_id: int = De
 MODIFY_BROKER_ORDER_LIVE_CONFIRM_PHRASE = "ok"
 
 
+ORDER_TYPE_LABELS = {"stop": "stop", "take_profit": "take-profit", "atr_trailing_stop": "ATR trailing stop"}
+
+
 @app.post("/api/broker_positions/{symbol}/order")
 async def api_add_broker_order(symbol: str, request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
-    """Adds a NEW stop or take-profit order for `symbol` — a position can
-    carry several of each at once, each covering its own slice (scaling
-    out); this never touches an existing order. See the DELETE endpoint
-    below to cancel one."""
+    """Adds a NEW stop, take-profit, or ATR trailing stop order for
+    `symbol` — a position can carry several of each at once, each
+    covering its own slice (scaling out); this never touches an existing
+    order. An atr_trailing_stop is a real IBKR TRAIL order sized from a
+    fresh ATR read (same math open_position.py uses for a brand-new
+    entry), computed by modify_broker_order.py itself rather than here.
+    See the DELETE endpoint below to cancel one."""
     body = await request.json()
     order_type = body.get("order_type")
-    if order_type not in ("stop", "take_profit"):
-        raise HTTPException(status_code=400, detail="order_type must be 'stop' or 'take_profit'")
+    if order_type not in ORDER_TYPE_LABELS:
+        raise HTTPException(status_code=400, detail="order_type must be 'stop', 'take_profit', or 'atr_trailing_stop'")
+    label = ORDER_TYPE_LABELS[order_type]
     try:
-        price = float(body.get("price"))
         qty = int(body.get("qty"))
     except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="price and qty must be numbers")
-    if price <= 0 or qty <= 0:
-        raise HTTPException(status_code=400, detail="price and qty must be positive")
+        raise HTTPException(status_code=400, detail="qty must be a number")
+    if qty <= 0:
+        raise HTTPException(status_code=400, detail="qty must be positive")
+
+    price = None
+    atr_period = 14
+    atr_multiplier = None
+    if order_type == "atr_trailing_stop":
+        try:
+            atr_multiplier = float(body.get("atr_multiplier"))
+            if body.get("atr_period") is not None:
+                atr_period = int(body.get("atr_period"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="atr_multiplier (and atr_period, if given) must be numbers")
+        if atr_multiplier <= 0 or atr_period <= 1:
+            raise HTTPException(status_code=400, detail="atr_multiplier must be positive and atr_period must be at least 2")
+    else:
+        try:
+            price = float(body.get("price"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="price must be a number")
+        if price <= 0:
+            raise HTTPException(status_code=400, detail="price must be positive")
 
     if mode == "live" and body.get("confirm") != MODIFY_BROKER_ORDER_LIVE_CONFIRM_PHRASE:
-        label = "stop" if order_type == "stop" else "take-profit"
         raise HTTPException(
             status_code=400,
             detail=f"Type '{MODIFY_BROKER_ORDER_LIVE_CONFIRM_PHRASE}' to confirm adding a LIVE {label} order.",
@@ -680,30 +707,36 @@ async def api_add_broker_order(symbol: str, request: Request, mode: str = Depend
     # A stop and a take-profit for the SAME shares is the normal bracket
     # pattern (protect the whole position both ways at once — if one
     # fills, the other is simply left to cancel manually since these
-    # aren't OCO-linked), so only orders of the SAME type compete for the
+    # aren't OCO-linked), so only orders of the SAME class compete for the
     # share count: two stops together can't cover more than what's held,
-    # but a full stop plus a full take-profit both can.
-    ibkr_order_type = "STP" if order_type == "stop" else "LMT"
+    # but a full stop plus a full take-profit both can. A plain stop and
+    # an ATR trailing stop are the same class (STP and TRAIL both just
+    # protect the position) and compete against each other too.
+    ibkr_order_types = ("STP", "TRAIL") if order_type in ("stop", "atr_trailing_stop") else ("LMT",)
     allocated = sum(
         o["qty"] for o in db.get_broker_orders(account_id, mode)["orders"]
-        if o["symbol"] == symbol and o["order_type"] == ibkr_order_type
+        if o["symbol"] == symbol and o["order_type"] in ibkr_order_types
     )
     if allocated + qty > held_qty:
-        label = "stop" if order_type == "stop" else "take-profit"
         raise HTTPException(
             status_code=400,
             detail=f"{allocated} share(s) already allocated across existing {label} orders for {symbol} — "
                    f"adding {qty} more would exceed the {held_qty} actually held.",
         )
 
-    proc = subprocess.run(
-        [sys.executable, str(PROJECT_DIR / "modify_broker_order.py"), "--mode", mode,
-         "--account-id", str(account_id), "--symbol", symbol, "--action", "add",
-         "--order-type", order_type, "--price", str(price), "--qty", str(qty)],
-        capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
-    )
+    args = [sys.executable, str(PROJECT_DIR / "modify_broker_order.py"), "--mode", mode,
+            "--account-id", str(account_id), "--symbol", symbol, "--action", "add",
+            "--order-type", order_type, "--qty", str(qty)]
+    if order_type == "atr_trailing_stop":
+        args += ["--atr-multiplier", str(atr_multiplier), "--atr-period", str(atr_period)]
+    else:
+        args += ["--price", str(price)]
+
+    proc = subprocess.run(args, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT)
     db.log_decision(account_id, mode, "dashboard_control", user=user, action="add_broker_order",
-                     symbol=symbol, order_type=order_type, price=price, qty=qty, stdout=proc.stdout, returncode=proc.returncode)
+                     symbol=symbol, order_type=order_type, price=price, qty=qty,
+                     atr_period=atr_period if order_type == "atr_trailing_stop" else None,
+                     atr_multiplier=atr_multiplier, stdout=proc.stdout, returncode=proc.returncode)
     if proc.returncode != 0:
         raise HTTPException(status_code=400, detail=proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "Add failed")
     return {"ok": True, "stdout": proc.stdout}
