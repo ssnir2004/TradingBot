@@ -105,8 +105,12 @@
   <div class="row g-3 mb-3">
     <div class="col-12">
       <div class="card">
-        <div class="card-header">Account (IBKR)</div>
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span>Account (IBKR)</span>
+          <button id="btn-refresh-account" class="btn btn-outline-secondary btn-sm">Refresh now</button>
+        </div>
         <div class="card-body" id="account-summary">Loading…</div>
+        <div id="refresh-account-error" class="text-danger small px-3 pb-2"></div>
       </div>
     </div>
   </div>

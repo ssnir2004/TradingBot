@@ -98,6 +98,26 @@ async function refreshAccount() {
     <div class="text-muted small mt-2">Updated: ${a.updated_at}</div>`;
 }
 
+document.getElementById("btn-refresh-account").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-refresh-account");
+  const errorEl = document.getElementById("refresh-account-error");
+  errorEl.textContent = "";
+  btn.disabled = true;
+  btn.textContent = "Refreshing…";
+  try {
+    await modeApi("/api/account/refresh", { method: "POST" });
+    await refreshAccount();
+    // Only defined on pages (trading.html) that render the broker positions
+    // table - bot.html shares this header/button but has no such table.
+    if (typeof refreshBrokerPositions === "function") await refreshBrokerPositions();
+  } catch (e) {
+    errorEl.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Refresh now";
+  }
+});
+
 // ----------------------------------------------------- gateway connection
 async function refreshGatewayStatus() {
   const s = await modeApi("/api/gateway/status");

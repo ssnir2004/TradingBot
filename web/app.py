@@ -503,11 +503,34 @@ async def api_set_hold_overnight(symbol: str, request: Request, mode: str = Depe
     return {"ok": True}
 
 
+@app.post("/api/account/refresh")
+def api_refresh_account(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    """On-demand account/positions/orders sync - the same thing
+    run_service.py's scheduler already does every 5 minutes for this mode,
+    triggered right now instead of waiting for the next tick. Spawned as a
+    subprocess (like every other IBKR-touching dashboard action) rather
+    than calling cycle.refresh_account_info in-process - the dashboard
+    process itself never talks to IBKR directly."""
+    proc = subprocess.run(
+        [sys.executable, str(PROJECT_DIR / "refresh_account.py"), "--mode", mode, "--account-id", str(account_id)],
+        capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
+    )
+    db.log_decision(account_id, mode, "dashboard_control", user=user, action="refresh_account_now",
+                     stdout=proc.stdout, returncode=proc.returncode)
+    if proc.returncode != 0:
+        raise HTTPException(
+            status_code=400,
+            detail=proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "Refresh failed",
+        )
+    return {"ok": True}
+
+
 @app.get("/api/broker_positions")
 def api_broker_positions(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
     """Every real IBKR holding in this mode's account, independent of
     whether the bot opened it or is tracking it — refreshed every 5 minutes
-    by cycle.refresh_account_info alongside the account summary."""
+    by cycle.refresh_account_info alongside the account summary, or
+    on-demand via POST /api/account/refresh."""
     data = db.get_broker_positions(account_id, mode)
     orders_by_symbol = {}
     for o in db.get_broker_orders(account_id, mode)["orders"]:
