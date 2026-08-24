@@ -390,6 +390,46 @@ def get_sma(symbol: str, period: int) -> float | None:
         return None
 
 
+def get_chart_ma_series(symbol: str, bars: pd.DataFrame, interval: str) -> dict:
+    """20-day and 200-day moving-average lines for the dashboard's chart
+    modal — an indicator that actually moves over time, unlike get_sma's
+    single latest-value threshold (left untouched; it serves a separate
+    purpose, showing what D2 checks against). On the daily interval this
+    is the plain rolling mean of the visible closes themselves — the
+    standard definition traders expect on a daily chart. On intraday
+    intervals a day-based average can't move mid-session, so each
+    trading day is held flat at the average through its prior close
+    (today's own still-forming daily bar is excluded, same convention
+    as get_sma), stepping only once a day actually closes."""
+    empty = {"sma20_series": [], "sma200_series": []}
+    try:
+        daily = yf.Ticker(symbol.replace(" ", "-")).history(period="600d", interval="1d")
+    except Exception:
+        return empty
+    if daily.empty:
+        return empty
+
+    def series_for(period):
+        if len(daily) < period + 1:
+            return []
+        if interval == "1d":
+            sma = bars["Close"].rolling(period).mean()
+            return [
+                {"time": int(ts.timestamp()), "value": round(float(v), 4)}
+                for ts, v in sma.items() if pd.notna(v)
+            ]
+        by_date = {
+            ts.date(): float(v)
+            for ts, v in daily["Close"].rolling(period).mean().shift(1).items() if pd.notna(v)
+        }
+        return [
+            {"time": int(ts.timestamp()), "value": round(by_date[ts.date()], 4)}
+            for ts in bars.index if ts.date() in by_date
+        ]
+
+    return {"sma20_series": series_for(20), "sma200_series": series_for(200)}
+
+
 # ---------------------------------------------------------------- Step 4 ---
 def _breakeven_or_partial_decision(pos: dict, exit_cfg: dict, r_multiple: float) -> dict:
     """Pure decision logic for manage_position's "pre_breakeven" stage —

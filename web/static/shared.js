@@ -300,6 +300,7 @@ document.getElementById("btn-save-ibkr-creds").addEventListener("click", async (
 
 // ------------------------------------------------------------- chart ---
 let chartModal = null, chartInstance = null, candleSeries = null, volumeSeries = null, rsiSeries = null;
+let sma20LineSeries = null, sma200LineSeries = null;
 let chartRefreshTimer = null, chartResizeHandler = null, pendingChartSymbol = null, chartSmaLines = [];
 let currentChartInterval = "5m";
 const CHART_INTERVAL_CAPTIONS = {
@@ -315,7 +316,7 @@ function updateChartCaption() {
   const base = CHART_INTERVAL_CAPTIONS[currentChartInterval] || "";
   const prepost = currentChartInterval === "1d" ? "" : " (includes pre/post market)";
   document.getElementById("chart-caption").textContent =
-    `${base}${prepost}. Volume and RSI(14) below the price; SMA50/SMA200 (dashed lines, when available) are the daily thresholds D2 actually checks. Refreshes every 30s while open.`;
+    `${base}${prepost}. Volume and RSI(14) below the price; MA20/MA200 (solid lines) track the moving average over time; SMA50/SMA200 (dashed flat lines, when available) are the daily thresholds D2 actually checks. Refreshes every 30s while open.`;
 }
 
 async function loadChartData(symbol) {
@@ -335,6 +336,8 @@ async function loadChartData(symbol) {
     }
 
     if (rsiSeries) rsiSeries.setData(data.rsi || []);
+    if (sma20LineSeries) sma20LineSeries.setData(data.sma20_series || []);
+    if (sma200LineSeries) sma200LineSeries.setData(data.sma200_series || []);
 
     // Reference price lines don't update in place - clear last load's and
     // redraw so a stale SMA doesn't linger after refresh/interval switch.
@@ -400,6 +403,11 @@ document.getElementById("chart-modal").addEventListener("shown.bs.modal", () => 
   // volume, bottom: RSI).
   candleSeries = chartInstance.addCandlestickSeries();
 
+  // Shares the price pane's own scale (no priceScaleId override) so both
+  // moving averages overlay directly on the candles, not a separate band.
+  sma20LineSeries = chartInstance.addLineSeries({ color: "#16a085", lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: "MA20" });
+  sma200LineSeries = chartInstance.addLineSeries({ color: "#2980b9", lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: "MA200" });
+
   volumeSeries = chartInstance.addHistogramSeries({ priceFormat: { type: "volume" }, priceScaleId: "volume" });
   chartInstance.priceScale("volume").applyOptions({ scaleMargins: { top: 0.58, bottom: 0.30 } });
 
@@ -421,6 +429,8 @@ document.getElementById("chart-modal").addEventListener("hidden.bs.modal", () =>
   candleSeries = null;
   volumeSeries = null;
   rsiSeries = null;
+  sma20LineSeries = null;
+  sma200LineSeries = null;
   chartSmaLines = [];
   pendingChartSymbol = null;
 });

@@ -496,17 +496,21 @@ async def api_modify_stop(symbol: str, request: Request, mode: str = Depends(req
 
 @app.get("/api/candles")
 def api_candles(symbol: str, interval: str = "5m", mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
-    """Candles (plus volume, RSI, and the SMA50/SMA200 reference levels D2
-    actually checks against) for the dashboard's chart modal, at the
-    requested interval (one of cycle.CHART_INTERVAL_PERIODS) - pure
-    yfinance, no IBKR connection needed (mode/account_id are only here so
-    the endpoint follows the same auth/scoping shape as everything else)."""
+    """Candles (plus volume, RSI, the SMA50/SMA200 reference levels D2
+    actually checks against, and full MA20/MA200 moving-average lines)
+    for the dashboard's chart modal, at the requested interval (one of
+    cycle.CHART_INTERVAL_PERIODS) - pure yfinance, no IBKR connection
+    needed (mode/account_id are only here so the endpoint follows the
+    same auth/scoping shape as everything else)."""
     if interval not in cycle.CHART_INTERVAL_PERIODS:
         raise HTTPException(status_code=400, detail=f"interval must be one of {sorted(cycle.CHART_INTERVAL_PERIODS)}")
     symbol = symbol.strip().upper()
     bars = cycle.get_chart_bars(symbol, interval)
     if bars is None:
-        return {"candles": [], "volume": [], "rsi": [], "sma50": None, "sma200": None}
+        return {
+            "candles": [], "volume": [], "rsi": [], "sma50": None, "sma200": None,
+            "sma20_series": [], "sma200_series": [],
+        }
     candles = [
         {
             "time": int(ts.timestamp()),
@@ -517,12 +521,15 @@ def api_candles(symbol: str, interval: str = "5m", mode: str = Depends(require_m
         }
         for ts, row in bars.iterrows()
     ]
+    ma = cycle.get_chart_ma_series(symbol, bars, interval)
     return {
         "candles": candles,
         "volume": cycle.get_chart_volume(bars),
         "rsi": cycle.get_chart_rsi(bars),
         "sma50": cycle.get_sma(symbol, 50),
         "sma200": cycle.get_sma(symbol, 200),
+        "sma20_series": ma["sma20_series"],
+        "sma200_series": ma["sma200_series"],
     }
 
 
