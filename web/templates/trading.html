@@ -92,14 +92,15 @@
         <div id="broker-positions-error" class="text-danger small px-3"></div>
         <div class="card-body p-0">
           <table class="table table-sm mb-0">
-            <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Current</th><th data-bs-toggle="tooltip" title="שינוי ערך מאז סגירת אתמול">Daily P&amp;L</th><th>Unrealized P&amp;L</th><th data-bs-toggle="tooltip" title="מחיר טרום-פתיחה (04:00-09:30 ET) או אפטר-מרקט (16:00-20:00 ET), אם קיים כרגע - ריק בשעות המסחר הרגילות">Pre/Post</th><th data-bs-toggle="tooltip" title="הזמנת Stop אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש">Stop</th><th data-bs-toggle="tooltip" title="הזמנת Limit (Take Profit) אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש">Take Profit</th><th>Close</th></tr></thead>
+            <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Current</th><th data-bs-toggle="tooltip" title="שינוי ערך מאז סגירת אתמול">Daily P&amp;L</th><th>Unrealized P&amp;L</th><th data-bs-toggle="tooltip" data-bs-html="true" title="מחיר טרום-פתיחה (04:00-09:30 ET) או אפטר-מרקט (16:00-20:00 ET), אם קיים כרגע - ריק בשעות המסחר הרגילות.<br>הסכום ($) מחושב לפי (מחיר טרום/אפטר &minus; מחיר ייחוס) &times; כמות: ביחס לסגירת <u>אתמול</u> בטרום-פתיחה, וביחס לסגירת <u>היום</u> באפטר-מרקט.">Pre/Post</th><th data-bs-toggle="tooltip" title="הזמנת Stop אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש">Stop</th><th data-bs-toggle="tooltip" title="הזמנת Limit (Take Profit) אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש">Take Profit</th><th>Close</th></tr></thead>
             <tbody id="broker-positions-body"><tr><td colspan="10" class="text-center text-muted">Loading…</td></tr></tbody>
             <tfoot id="broker-positions-totals" class="d-none">
               <tr class="table-light fw-bold">
                 <td colspan="4" class="text-end">Total</td>
                 <td id="broker-positions-total-daily"></td>
                 <td id="broker-positions-total-unrealized"></td>
-                <td colspan="4"></td>
+                <td id="broker-positions-total-extended"></td>
+                <td colspan="3"></td>
               </tr>
             </tfoot>
           </table>
@@ -150,14 +151,18 @@ function ordersCell(symbol, orders, orderType, remaining) {
 function extendedHoursCell(eh) {
   if (!eh || !eh.session || eh.price === null || eh.price === undefined) return '<span class="text-muted">-</span>';
   const label = eh.session === "pre" ? "Pre" : "Post";
+  const refLabel = eh.session === "pre" ? "vs yesterday's close" : "vs today's close";
   const pctText = (eh.change_pct === null || eh.change_pct === undefined) ? "" : ` (${eh.change_pct >= 0 ? "+" : ""}${eh.change_pct.toFixed(2)}%)`;
+  const refText = (eh.ref_price === null || eh.ref_price === undefined) ? "" : ` ${refLabel} ${fmtMoney(eh.ref_price)}`;
   // The $ figure (below) is qty/side-aware - already correct for a short
   // (a price rise there is a loss). The raw price+% above it is the
   // SYMBOL's own move, not the position's P&L, so it's shown muted/
   // uncolored on purpose - coloring it by its own sign would repeat the
   // exact bug this replaced (a short showing green on a price that's
-  // actually moving against it).
-  return `${fmtPnl(eh.pnl)}<br><span class="small text-muted">${label}: ${fmtMoney(eh.price)}${pctText}</span>`;
+  // actually moving against it). The reference price is spelled out here
+  // too, since "which close is this measured against" isn't obvious from
+  // the % alone (pre-market uses yesterday's, after-hours uses today's).
+  return `${fmtPnl(eh.pnl)}<br><span class="small text-muted">${label}: ${fmtMoney(eh.price)}${pctText}${refText}</span>`;
 }
 
 async function refreshBrokerPositions() {
@@ -195,6 +200,9 @@ async function refreshBrokerPositions() {
 
   const sum = (key) => rows.reduce((s, p) => s + (p[key] !== null && p[key] !== undefined ? p[key] : 0), 0);
   const hasAny = (key) => rows.some(p => p[key] !== null && p[key] !== undefined);
+  const extendedPnls = rows.map(p => p.extended_hours && p.extended_hours.pnl).filter(v => v !== null && v !== undefined);
+  document.getElementById("broker-positions-total-extended").innerHTML =
+    extendedPnls.length ? fmtPnl(extendedPnls.reduce((s, v) => s + v, 0)) : "-";
   document.getElementById("broker-positions-total-daily").innerHTML = hasAny("daily_pnl") ? fmtPnl(sum("daily_pnl")) : "-";
   document.getElementById("broker-positions-total-unrealized").innerHTML = hasAny("unrealized_pnl") ? fmtPnl(sum("unrealized_pnl")) : "-";
   totals.classList.remove("d-none");
