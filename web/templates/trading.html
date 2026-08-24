@@ -213,6 +213,21 @@ async function refreshOrders() {
   </tr>`).join("");
 }
 
+// A cancel/edit/close/add succeeding at the broker doesn't change the
+// dashboard's cached account snapshot by itself - refreshOrders()/
+// refreshBrokerPositions() just re-read that same cache. Trigger a real
+// live resync first so the tables reflect the action immediately instead
+// of waiting up to 5 minutes for the next scheduled sync.
+async function refreshAccountAndOrders() {
+  try {
+    await modeApi("/api/account/refresh", { method: "POST" });
+  } catch (err) {
+    // Best-effort - fall through to refreshing from whatever is cached.
+  }
+  await refreshOrders();
+  await refreshBrokerPositions();
+}
+
 document.getElementById("orders-body").addEventListener("click", async (e) => {
   const errorEl = document.getElementById("orders-error");
 
@@ -245,7 +260,7 @@ document.getElementById("orders-body").addEventListener("click", async (e) => {
       await modeApi(`/api/orders/${orderId}`, {
         method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
       });
-      refreshOrders();
+      refreshAccountAndOrders();
     } catch (err) {
       errorEl.textContent = "Edit failed: " + err.message;
       editBtn.disabled = false;
@@ -268,7 +283,7 @@ document.getElementById("orders-body").addEventListener("click", async (e) => {
     cancelBtn.disabled = true;
     try {
       await modeApi(url, { method: "DELETE" });
-      refreshOrders();
+      refreshAccountAndOrders();
     } catch (err) {
       errorEl.textContent = "Cancel failed: " + err.message;
       cancelBtn.disabled = false;
@@ -350,7 +365,7 @@ document.getElementById("broker-positions-body").addEventListener("click", async
       await modeApi(`/api/broker_positions/${symbol}/order`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
       });
-      refreshBrokerPositions();
+      refreshAccountAndOrders();
     } catch (err) {
       alert("Failed: " + err.message);
       addBtn.disabled = false;
@@ -372,7 +387,7 @@ document.getElementById("broker-positions-body").addEventListener("click", async
     cancelBtn.disabled = true;
     try {
       await modeApi(url, { method: "DELETE" });
-      refreshBrokerPositions();
+      refreshAccountAndOrders();
     } catch (err) {
       alert("Failed: " + err.message);
       cancelBtn.disabled = false;
@@ -405,7 +420,7 @@ document.getElementById("broker-positions-body").addEventListener("click", async
     await modeApi("/api/broker_positions/close", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
     });
-    refreshBrokerPositions();
+    refreshAccountAndOrders();
   } catch (err) {
     errorEl.textContent = "Close failed: " + err.message;
   } finally {
@@ -467,6 +482,7 @@ document.getElementById("btn-place-order").addEventListener("click", async () =>
       document.getElementById("order-symbol").value = "";
       document.getElementById("order-qty").value = "";
       document.getElementById("order-limit-price").value = "";
+      refreshAccountAndOrders();
     } catch (err) {
       errorEl.textContent = "Order failed: " + err.message;
     } finally {
@@ -491,9 +507,10 @@ document.getElementById("btn-place-order").addEventListener("click", async () =>
     await modeApi("/api/trading/order", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
     });
-    successEl.textContent = `Order filled — ${symbol} may take a few minutes to appear in Account Holdings below.`;
+    successEl.textContent = `Order filled — ${symbol} may take a moment to appear in Account Holdings below.`;
     document.getElementById("order-symbol").value = "";
     document.getElementById("order-qty").value = "";
+    refreshAccountAndOrders();
   } catch (err) {
     errorEl.textContent = "Order failed: " + err.message;
   } finally {
