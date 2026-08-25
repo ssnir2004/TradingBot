@@ -154,7 +154,7 @@ async function loadStrategyPicker() {
   el.innerHTML = rows.map(s => `
     <input type="checkbox" class="btn-check bt-strategy-checkbox" id="bt-strategy-${s.id}" value="${s.id}" autocomplete="off">
     <label class="btn btn-outline-secondary btn-sm strategy-pick" for="bt-strategy-${s.id}">
-      ${s.name} ${sideBadge(s.direction)}
+      ${s.key ? `<span class="badge bg-light text-dark border me-1">${s.key}</span>` : ""}${s.name} ${sideBadge(s.direction)}
       <span class="badge ${RISK_BADGE_CLASS[s.risk_rating] || 'bg-secondary'}">${s.risk_rating}</span>
     </label>`).join("");
 }
@@ -256,8 +256,9 @@ function renderStrategyResult(strategyId, result) {
   }
   const a = result.aggregate;
   const skipped = result.skipped_symbols || [];
+  const key = (strategiesById[strategyId] || {}).key;
   return `<div class="col-12 col-lg-6 mb-3"><div class="card h-100">
-    <div class="card-header">${result.strategy_name} ${sideBadge(result.direction)}</div>
+    <div class="card-header">${key ? `<span class="badge bg-light text-dark border me-1">${key}</span>` : ""}${result.strategy_name} ${sideBadge(result.direction)}</div>
     <div class="card-body">
       <p>Trades: <strong>${a.total_trades}</strong> (${a.wins}W / ${a.losses}L, ${a.win_rate_pct}%)</p>
       <p>Gross P&amp;L: <strong>${fmtMoney(a.gross_pnl_usd)}</strong></p>
@@ -322,7 +323,11 @@ async function refreshHistory() {
   const body = document.getElementById("bt-history-body");
   if (!rows.length) { body.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No backtests yet</td></tr>'; return; }
   body.innerHTML = rows.map(r => {
-    const names = r.params.strategy_ids.map(sid => (strategiesById[sid] || {}).name || `#${sid}`).join(", ");
+    const names = r.params.strategy_ids.map(sid => {
+      const s = strategiesById[sid];
+      if (!s) return `#${sid}`;
+      return s.key ? `${s.key} (${s.name})` : s.name;
+    }).join(", ");
     const badgeClass = r.status === "done" ? "bg-success" : r.status === "failed" ? "bg-danger" : "bg-secondary";
     const duration = fmtDuration(r.created_at, r.finished_at);
     return `<tr>

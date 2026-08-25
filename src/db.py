@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
 CREATE TABLE IF NOT EXISTS strategies (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
+    key TEXT NOT NULL DEFAULT '',
     direction TEXT NOT NULL DEFAULT 'long',
     rules_json TEXT NOT NULL,
     risk_rating TEXT NOT NULL DEFAULT 'moderate',
@@ -184,6 +185,9 @@ INDEXES_SCHEMA = """
 CREATE INDEX IF NOT EXISTS idx_trades_account_mode_timestamp ON trades(account_id, mode, timestamp_iso);
 CREATE INDEX IF NOT EXISTS idx_decision_log_account_mode_timestamp ON decision_log(account_id, mode, timestamp_iso);
 CREATE INDEX IF NOT EXISTS idx_backtests_account_created ON backtests(account_id, created_at);
+-- Blank ('') is the "no key set yet" default and can repeat across many
+-- rows - only an actually-chosen key (e.g. "L1", "S1") needs to be unique.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_strategies_key ON strategies(key) WHERE key != '';
 """
 
 # Two extra presets seeded alongside the conservative default (rules.json),
@@ -662,6 +666,7 @@ def init_db(seed_rules_path: Path | None = None):
         _migrate_add_column(conn, "strategies", "risk_rating", "TEXT NOT NULL DEFAULT 'moderate'")
         _migrate_add_column(conn, "strategies", "direction", "TEXT NOT NULL DEFAULT 'long'")
         _migrate_add_column(conn, "strategies", "description", "TEXT NOT NULL DEFAULT ''")
+        _migrate_add_column(conn, "strategies", "key", "TEXT NOT NULL DEFAULT ''")
         _migrate_add_column(conn, "positions", "side", "TEXT NOT NULL DEFAULT 'long'")
         _migrate_add_column(conn, "positions", "hold_overnight", "INTEGER NOT NULL DEFAULT 0")
         _migrate_add_column(conn, "watchlist", "universe", "TEXT NOT NULL DEFAULT ',default,'")
@@ -1311,7 +1316,7 @@ def _check_direction(direction: str):
 def list_strategies(account_id: int) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT s.id, s.name, s.direction, s.risk_rating, s.description, s.created_at, s.updated_at, "
+            "SELECT s.id, s.name, s.key, s.direction, s.risk_rating, s.description, s.created_at, s.updated_at, "
             "(a.strategy_id IS NOT NULL) AS is_active "
             "FROM strategies s "
             "LEFT JOIN account_active_strategy a ON a.strategy_id = s.id AND a.account_id = ? "
@@ -1344,20 +1349,25 @@ def get_strategy(strategy_id: int) -> dict | None:
         return dict(row) if row else None
 
 
-def create_strategy(name: str, rules: dict, direction: str, risk_rating: str = "moderate", description: str = "") -> int:
+def create_strategy(name: str, rules: dict, direction: str, risk_rating: str = "moderate", description: str = "", key: str = "") -> int:
     _check_direction(direction)
     _check_risk_rating(risk_rating)
     now = datetime.now(ET).isoformat(timespec="seconds")
     with get_conn() as conn:
-        cur = conn.execute(
-            "INSERT INTO strategies (name, direction, rules_json, risk_rating, description, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (name, direction, json.dumps(rules, indent=2), risk_rating, description, now, now),
-        )
+        try:
+            cur = conn.execute(
+                "INSERT INTO strategies (name, key, direction, rules_json, risk_rating, description, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (name, key, direction, json.dumps(rules, indent=2), risk_rating, description, now, now),
+            )
+        except sqlite3.IntegrityError as exc:
+            if "strategies.key" in str(exc):
+                raise ValueError(f"Key '{key}' is already used by another strategy") from exc
+            raise
         return cur.lastrowid
 
 
-def update_strategy(strategy_id: int, rules: dict, risk_rating: str | None = None, description: str | None = None):
+def update_strategy(strategy_id: int, rules: dict, risk_rating: str | None = None, description: str | None = None, key: str | None = None):
     # direction is intentionally not editable here — it defines what the
     # rules JSON's fields even mean (D1_above_prior_day_high vs
     # D1_below_prior_day_low, etc), so changing it on an existing strategy
@@ -1374,8 +1384,16 @@ def update_strategy(strategy_id: int, rules: dict, risk_rating: str | None = Non
         if description is not None:
             sets.append("description = ?")
             params.append(description)
+        if key is not None:
+            sets.append("key = ?")
+            params.append(key)
         params.append(strategy_id)
-        conn.execute(f"UPDATE strategies SET {', '.join(sets)} WHERE id = ?", params)
+        try:
+            conn.execute(f"UPDATE strategies SET {', '.join(sets)} WHERE id = ?", params)
+        except sqlite3.IntegrityError as exc:
+            if "strategies.key" in str(exc):
+                raise ValueError(f"Key '{key}' is already used by another strategy") from exc
+            raise
 
 
 def activate_strategy(account_id: int, strategy_id: int):

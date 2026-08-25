@@ -169,8 +169,8 @@
     </div>
     <div class="card-body p-0">
       <table class="table table-sm mb-0">
-        <thead><tr><th>Name</th><th>Side</th><th>Risk</th><th>Active</th><th>Updated</th><th></th></tr></thead>
-        <tbody id="strategies-body"><tr><td colspan="6" class="text-center text-muted">Loading…</td></tr></tbody>
+        <thead><tr><th>Key</th><th>Name</th><th>Side</th><th>Risk</th><th>Active</th><th>Updated</th><th></th></tr></thead>
+        <tbody id="strategies-body"><tr><td colspan="7" class="text-center text-muted">Loading…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -189,6 +189,10 @@
         <div class="mb-2">
           <label class="form-label">Name</label>
           <input type="text" id="strategy-name" class="form-control">
+        </div>
+        <div class="mb-2">
+          <label class="form-label">Key <span class="text-muted small">(short label, e.g. L1, S1 — editable any time)</span></label>
+          <input type="text" id="strategy-key" class="form-control" style="max-width:160px" maxlength="20">
         </div>
         <div class="mb-2">
           <label class="form-label">Direction</label>
@@ -524,6 +528,7 @@ async function refreshStrategies() {
   strategiesCache = Object.fromEntries(rows.map(s => [s.id, s]));
   const body = document.getElementById("strategies-body");
   body.innerHTML = rows.map(s => `<tr>
+    <td>${s.key ? `<span class="badge bg-light text-dark border">${escapeHtml(s.key)}</span>` : '<span class="text-muted small">—</span>'}</td>
     <td>${s.name} ${s.description ? `<button class="btn btn-sm btn-link p-0 ms-1 strategy-info-btn" data-id="${s.id}" title="הצג הסבר מלא">&#8505;&#65039;</button>` : ""}</td>
     <td>${sideBadge(s.direction)}</td>
     <td><span class="badge ${RISK_BADGE_CLASS[s.risk_rating] || "bg-secondary"}">${s.risk_rating}</span></td>
@@ -604,6 +609,7 @@ async function editStrategy(id) {
   editingStrategyId = id;
   document.getElementById("strategy-name").value = s.name;
   document.getElementById("strategy-name").disabled = true;
+  document.getElementById("strategy-key").value = s.key || "";
   document.getElementById("strategy-direction").value = s.direction;
   document.getElementById("strategy-direction").disabled = true;
   document.getElementById("strategy-risk-rating").value = s.risk_rating;
@@ -628,6 +634,7 @@ document.getElementById("btn-new-strategy").addEventListener("click", async () =
   editingStrategyId = null;
   document.getElementById("strategy-name").value = "";
   document.getElementById("strategy-name").disabled = false;
+  document.getElementById("strategy-key").value = "";
   document.getElementById("strategy-direction").disabled = false;
   document.getElementById("strategy-direction").value = "long";
   document.getElementById("strategy-risk-rating").value = "moderate";
@@ -644,12 +651,13 @@ document.getElementById("btn-save-strategy").addEventListener("click", async () 
   catch (e) { errorEl.textContent = "Invalid JSON: " + e.message; return; }
   const riskRating = document.getElementById("strategy-risk-rating").value;
   const description = document.getElementById("strategy-description").value;
+  const key = document.getElementById("strategy-key").value.trim();
 
   try {
     if (editingStrategyId) {
       await api(`/api/strategies/${editingStrategyId}`, {
         method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rules, risk_rating: riskRating, description }),
+        body: JSON.stringify({ rules, risk_rating: riskRating, description, key }),
       });
     } else {
       const name = document.getElementById("strategy-name").value.trim();
@@ -657,7 +665,7 @@ document.getElementById("btn-save-strategy").addEventListener("click", async () 
       const direction = document.getElementById("strategy-direction").value;
       await api("/api/strategies", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, rules, direction, risk_rating: riskRating, description }),
+        body: JSON.stringify({ name, rules, direction, risk_rating: riskRating, description, key }),
       });
     }
     strategyModal.hide();
