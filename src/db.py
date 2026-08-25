@@ -22,6 +22,7 @@ engines) run at the same time without locking each other out.
 """
 import json
 import os
+import signal
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -1520,12 +1521,39 @@ def get_backtest(backtest_id: int) -> dict | None:
 
 def delete_backtest(backtest_id: int, account_id: int) -> bool:
     """Scoped to account_id so one account can't delete another's backtest.
-    Returns whether a row was actually deleted."""
+    Returns whether a row was actually deleted. Deleting a still-running
+    backtest does NOT stop it - the row just disappears out from under a
+    subprocess that has no idea it happened, which keeps computing until
+    it finishes (or crashes) and then finds nothing left to write its
+    result into. See cancel_backtest for what actually stops it."""
     with get_conn() as conn:
         cur = conn.execute(
             "DELETE FROM backtests WHERE id = ? AND account_id = ?", (backtest_id, account_id)
         )
         return cur.rowcount > 0
+
+
+def cancel_backtest(backtest_id: int, account_id: int) -> bool:
+    """Actually stops a still-running (or not-yet-started) backtest,
+    unlike delete_backtest - kills the subprocess by its recorded pid
+    (see set_backtest_pid) and marks the row failed, instead of leaving
+    an orphaned process to compute for nothing. Scoped to account_id like
+    delete_backtest. Returns False if there's no matching row for this
+    account in a cancellable state ('pending'/'running') - already-
+    finished runs have nothing to cancel."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT pid, status FROM backtests WHERE id = ? AND account_id = ?", (backtest_id, account_id)
+        ).fetchone()
+    if row is None or row["status"] not in ("pending", "running"):
+        return False
+    if row["pid"]:
+        try:
+            os.kill(row["pid"], signal.SIGTERM)
+        except ProcessLookupError:
+            pass  # already exited on its own - still fine to mark it failed below
+    fail_backtest(backtest_id, "Cancelled by user")
+    return True
 
 
 def list_backtests(account_id: int, limit: int = 20) -> list[dict]:

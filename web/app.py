@@ -1170,6 +1170,14 @@ def api_delete_backtest(backtest_id: int, account_id: int = Depends(require_acco
     return {"ok": True}
 
 
+@app.post("/api/backtests/{backtest_id}/cancel")
+def api_cancel_backtest(backtest_id: int, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    if not db.cancel_backtest(backtest_id, account_id):
+        raise HTTPException(status_code=404, detail="Backtest not found, or already finished")
+    _log_account_action(account_id, user, action="cancel_backtest", backtest_id=backtest_id)
+    return {"ok": True}
+
+
 @app.get("/api/backtest_universe")
 def api_backtest_universe(user: str = Depends(require_user)):
     symbols = backtest_data.cached_symbols(backtest_engine.BAR_SIZE)

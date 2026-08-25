@@ -65,6 +65,7 @@
       <span>Results</span>
       <span>
         <span id="bt-duration" class="small text-muted me-2"></span>
+        <button id="btn-cancel-current" class="btn btn-sm btn-outline-warning me-2 d-none">Cancel</button>
         <span id="bt-status-badge" class="badge bg-secondary">...</span>
       </span>
     </div>
@@ -304,6 +305,10 @@ function renderResults(detail) {
   badge.textContent = detail.status;
   badge.className = "badge " + (detail.status === "done" ? "bg-success" : detail.status === "failed" ? "bg-danger" : "bg-secondary");
 
+  const cancelBtn = document.getElementById("btn-cancel-current");
+  cancelBtn.classList.toggle("d-none", detail.status !== "running" && detail.status !== "pending");
+  cancelBtn.dataset.backtestId = detail.id;
+
   const durationEl = document.getElementById("bt-duration");
   const duration = fmtDuration(detail.created_at, detail.finished_at);
   durationEl.textContent = duration ? `Took ${duration}` : "";
@@ -368,7 +373,9 @@ async function refreshHistory() {
       <td class="small">${duration || (r.status === "running" || r.status === "pending" ? "…" : "-")}</td>
       <td>
         <button class="btn btn-sm btn-outline-secondary" onclick="pollBacktest(${r.id})">View</button>
-        <button class="btn btn-sm btn-outline-danger" onclick="deleteBacktest(${r.id})">Delete</button>
+        ${r.status === "running" || r.status === "pending"
+          ? `<button class="btn btn-sm btn-outline-warning" onclick="cancelBacktest(${r.id})">Cancel</button>`
+          : `<button class="btn btn-sm btn-outline-danger" onclick="deleteBacktest(${r.id})">Delete</button>`}
       </td>
     </tr>`;
   }).join("");
@@ -389,6 +396,28 @@ async function deleteBacktest(id) {
   }
   refreshHistory();
 }
+
+async function cancelBacktest(id) {
+  if (!confirm(`Cancel backtest #${id}? This kills it immediately - any progress is lost.`)) return;
+  try {
+    await api(`/api/backtests/${id}/cancel`, { method: "POST" });
+  } catch (e) {
+    alert("Could not cancel backtest: " + e.message);
+    return;
+  }
+  if (id === currentBacktestId) {
+    // Re-poll once rather than just clearing - the panel should show the
+    // "failed / Cancelled by user" state, not silently vanish, so a
+    // cancel from the History table stays visible on the open panel too.
+    pollBacktest(id);
+  }
+  refreshHistory();
+}
+
+document.getElementById("btn-cancel-current").addEventListener("click", (e) => {
+  const id = Number(e.target.dataset.backtestId);
+  if (id) cancelBacktest(id);
+});
 
 document.getElementById("btn-run-backtest").addEventListener("click", async () => {
   const errorEl = document.getElementById("bt-run-error");
