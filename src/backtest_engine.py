@@ -454,6 +454,7 @@ def simulate_strategy(
                     trades.append({
                         "id": trade_id, "symbol": symbol, "side": action,
                         "fill_price": price, "size": size, "timestamp_iso": bar_ts.isoformat(),
+                        "initial_stop": initial_stop,
                     })
                     open_positions[symbol] = {
                         "side": side, "entry_price": price, "initial_stop": initial_stop,

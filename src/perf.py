@@ -64,6 +64,7 @@ def pair_trades(rows: list[dict]) -> list[dict]:
                 "buy_time": open_row["timestamp_iso"] if side == "long" else row["timestamp_iso"],
                 "sell_time": row["timestamp_iso"] if side == "long" else open_row["timestamp_iso"],
                 "exit_reason": row.get("exit_reason"),
+                "initial_stop": open_row.get("initial_stop"),
             })
         else:
             pending.append(row)
