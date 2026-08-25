@@ -425,6 +425,7 @@ def simulate_strategy(
                     detail = cycle._evaluate_filters_from_bars(
                         daily_slice, intraday_slice, strategy_rules, side,
                         prior_day_bars=prior_day_bars_by_symbol[symbol],
+                        signal_side=strategy_rules.get("signal_side"),
                     )
                     if "error" in detail:
                         filter_stats["insufficient_data"] += 1

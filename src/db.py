@@ -541,6 +541,147 @@ EXTRA_STRATEGY_PRESETS = [
         "זהה לגמרי לגרסה הבסיסית: סטופ 1% מתחת לשפל היום, מימוש חלקי ב-0.75R, Breakeven ב-1R, "
         "טריילינג לפי שפל 5 דקות. דירוג conservative, סיכון 1% לעסקה, מקס' 10% לפוזיציה, עד 5 פוזיציות.",
     ),
+    (
+        # Experimental "fade" pair, born from a real conversation: a
+        # single day's backtest showed Long Breakout Conservative and
+        # Short Breakdown Conservative BOTH losing on every trade, and the
+        # question was "what if we took the opposite side of the exact
+        # same signal instead." That's a genuinely different, unvalidated
+        # thesis (bet against continuation instead of on it) - NOT a
+        # statistically sound conclusion from one bad day (9 trades) for
+        # two trend-following strategies, which is explicitly called out
+        # in both descriptions below and is exactly why risk_rating is
+        # 'aggressive' (requires the typed-confirmation speed bump before
+        # either can go live, on top of extensive backtesting the
+        # descriptions insist on first).
+        #
+        # signal_side (new top-level rules field, see cycle._evaluate_
+        # filters_from_bars) is what makes this possible without
+        # duplicating or forking the shared filter-evaluation engine: D1-
+        # D3/I1-I3 here are LITERALLY Long Breakout Conservative's own
+        # long-style definitions, copied verbatim (same signal, unchanged)
+        # - only `direction` (short) and the exit block's stop/trail
+        # mechanics (hod_plus_1pct / swing_high, a short's own, not
+        # Long Breakout's) describe the actual trade being placed.
+        "Long Breakout Fade (Short)",
+        {
+            "strategy_name": "Long Breakout Fade (Short)",
+            "direction": "short_only",
+            "trade_timeframe": "5m",
+            "universe_filters": {"index": "S&P 500", "min_price_usd": 3.0},
+            "signal_side": "long",
+            "daily_filters": {
+                "D1_above_prior_day_high": True,
+                "D2_prior_close_above_sma200": True,
+                "D3_min_gap_pct_from_prior_close": 3.0,
+            },
+            "intraday_filters": {
+                "I1_above_premarket_high": True,
+                "I2_above_today_hod": True,
+                "I3_rvol_min": 2.0,
+                "I3_rvol_lookback_days": 14,
+            },
+            "time_filter": {"earliest_entry_et": "10:05", "latest_entry_et": "15:30", "force_close_et": "15:51"},
+            "exit": {
+                "initial_stop_rule": "hod_plus_1pct",
+                "partial_profit_trigger_R": 0.75,
+                "partial_profit_fraction": 0.3333,
+                "breakeven_trigger_R": 1.0,
+                "post_breakeven_trail": "swing_high_5m_2_2",
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+            },
+        },
+        "aggressive",
+        "short",
+        "## מה זה עושה\n"
+        "אסטרטגיית מחקר ניסיונית: מזהה בדיוק את אותו איתות של Long Breakout Conservative (פריצה "
+        "כלפי מעלה עם נפח גבוה), אבל **מוכרת בשורט** נגד הפריצה במקום לקנות איתה - הימור שהפריצה "
+        "תיכשל ותתהפך, לא שהיא תמשיך.\n\n"
+        "## תנאי כניסה (זהים לחלוטין ל-Long Breakout Conservative)\n"
+        "D1: המחיר מעל השיא של אתמול\n"
+        "D2: סגירת אתמול מעל הממוצע הנע 200 יום\n"
+        "D3: פער של לפחות 3% מעלה מסגירת אתמול\n"
+        "I1: המחיר מעל שיא המסחר המוקדם\n"
+        "I2: שיא חדש תוך-יומי\n"
+        "I3: RVOL פי 2 לפחות מהממוצע\n\n"
+        "## יציאה וניהול פוזיציה (מותאם לפוזיציית שורט, לא ללונג)\n"
+        "סטופ התחלתי: 1% מעל השיא של היום (לא מתחת לשפל - זו פוזיציית שורט)\n"
+        "מימוש חלקי: ב-0.75R | Breakeven: ב-1R | טריילינג סטופ: לפי שיא נר 5 דקות\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive | סיכון לעסקה: 1% | גודל פוזיציה מקס': 10% | פוזיציות בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "זו לא אסטרטגיה שאומתה - היא נולדה משאלת מחקר על סמך יום מסחר בודד שבו Long Breakout "
+        "Conservative הפסידה בכל עסקה. הפיכת כיוון על סמך יום אחד (9 עסקאות) היא בדיוק סוג הטעות "
+        "הסטטיסטית ש-overfitting נראה כמוה - זה לא מוכיח יתרון אמיתי וחוזר בשוק. אל תפעיל LIVE לפני "
+        "בדיקה מקיפה על פני תקופה ארוכה בהרבה (שבועות-חודשים, מאות עסקאות). בנוסף, בפוזיציית Short "
+        "אין תקרה תיאורטית להפסד.",
+    ),
+    (
+        # Mirror-opposite of the fade above: Short Breakdown Conservative's
+        # own short-style D1-D3/I1-I3, unchanged, but traded LONG (betting
+        # a breakdown reverses instead of continues). Same signal_side
+        # mechanism, same 'aggressive' rating for the same reason - see the
+        # comment on "Long Breakout Fade (Short)" above.
+        "Short Breakdown Fade (Long)",
+        {
+            "strategy_name": "Short Breakdown Fade (Long)",
+            "direction": "long_only",
+            "trade_timeframe": "5m",
+            "universe_filters": {"index": "S&P 500", "min_price_usd": 3.0},
+            "signal_side": "short",
+            "daily_filters": {
+                "D1_below_prior_day_low": True,
+                "D2_prior_close_below_sma200": True,
+                "D3_min_gap_pct_down_from_prior_close": 3.0,
+            },
+            "intraday_filters": {
+                "I1_below_premarket_low": True,
+                "I2_below_today_lod": True,
+                "I3_rvol_min": 2.0,
+                "I3_rvol_lookback_days": 14,
+            },
+            "time_filter": {"earliest_entry_et": "10:05", "latest_entry_et": "15:30", "force_close_et": "15:51"},
+            "exit": {
+                "initial_stop_rule": "lod_minus_1pct",
+                "partial_profit_trigger_R": 0.75,
+                "partial_profit_fraction": 0.3333,
+                "breakeven_trigger_R": 1.0,
+                "post_breakeven_trail": "swing_low_5m_2_2",
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+            },
+        },
+        "aggressive",
+        "long",
+        "## מה זה עושה\n"
+        "אסטרטגיית מחקר ניסיונית: מזהה בדיוק את אותו איתות של Short Breakdown Conservative (שבירה "
+        "כלפי מטה עם נפח גבוה), אבל **קונה בלונג** נגד השבירה במקום למכור בשורט איתה - הימור שהשבירה "
+        "תיכשל ותתהפך כלפי מעלה, לא שהיא תמשיך.\n\n"
+        "## תנאי כניסה (זהים לחלוטין ל-Short Breakdown Conservative)\n"
+        "D1: המחיר מתחת לשפל של אתמול\n"
+        "D2: סגירת אתמול מתחת לממוצע הנע 200 יום\n"
+        "D3: פער של לפחות 3% מטה מסגירת אתמול\n"
+        "I1: המחיר מתחת לשפל המסחר המוקדם\n"
+        "I2: שפל חדש תוך-יומי\n"
+        "I3: RVOL פי 2 לפחות מהממוצע\n\n"
+        "## יציאה וניהול פוזיציה (מותאם לפוזיציית לונג, לא לשורט)\n"
+        "סטופ התחלתי: 1% מתחת לשפל של היום (לא מעל השיא - זו פוזיציית לונג)\n"
+        "מימוש חלקי: ב-0.75R | Breakeven: ב-1R | טריילינג סטופ: לפי שפל נר 5 דקות\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive | סיכון לעסקה: 1% | גודל פוזיציה מקס': 10% | פוזיציות בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "זו לא אסטרטגיה שאומתה - היא נולדה משאלת מחקר על סמך יום מסחר בודד שבו Short Breakdown "
+        "Conservative הפסידה בכל עסקה. הפיכת כיוון על סמך יום אחד (9 עסקאות) היא בדיוק סוג הטעות "
+        "הסטטיסטית ש-overfitting נראה כמוה - זה לא מוכיח יתרון אמיתי וחוזר בשוק. אל תפעיל LIVE לפני "
+        "בדיקה מקיפה על פני תקופה ארוכה בהרבה (שבועות-חודשים, מאות עסקאות).",
+    ),
 ]
 
 

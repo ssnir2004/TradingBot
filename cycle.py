@@ -633,7 +633,7 @@ def force_close_all(account_id: int, mode: str, ib, positions: list[dict]):
 # ---------------------------------------------------------------- Step 8 ---
 def _evaluate_filters_from_bars(
     daily: pd.DataFrame, intraday: pd.DataFrame, rules: dict, side: str,
-    prior_day_bars: dict | None = None,
+    prior_day_bars: dict | None = None, signal_side: str | None = None,
 ) -> dict:
     """The actual D1-D3/I1-I3 decision logic, pulled out of
     _evaluate_entry_filters as a pure function: no data fetching, no
@@ -661,9 +661,22 @@ def _evaluate_filters_from_bars(
     every call, which only matters for backtest_engine.py's per-simulated-
     tick calling pattern (hundreds of calls a day per symbol) - see its
     own precomputed prior_day_bars_by_symbol for why it bothers passing
-    this in."""
+    this in.
+
+    signal_side decouples WHICH setup fires entry from WHICH side the
+    trade actually executes on - e.g. detect a textbook long breakout
+    (D1-D3/I1-I3 evaluated exactly as they'd read for a long strategy)
+    but FADE it: short into the breakout instead of buying it. Defaults
+    to `side` (every existing strategy's rules omit it, so this is a
+    no-op for them - D1-D3/I1-I3 and the trade itself always agree,
+    unchanged). Only the signal-detection booleans read signal_side;
+    stop_ref (and therefore initial_stop/sizing/exits downstream) always
+    follows `side`, the real trade direction - a fade short still needs
+    a short's own stop (above price): same signal, opposite trade,
+    stop/target sized for the trade actually being placed."""
     daily_filters = rules["daily_filters"]
     intraday_filters = rules["intraday_filters"]
+    signal_side = signal_side or side
 
     if len(daily) < 201:
         return {"pass": False, "side": side, "error": "not enough daily history"}
@@ -686,8 +699,7 @@ def _evaluate_filters_from_bars(
     gap_pct = (current_price - prior_close) / prior_close * 100 if prior_close else 0.0
     rsi_value = None  # only set when this strategy's I2 is RSI-based (see below) - None otherwise
 
-    if side == "long":
-        stop_ref = float(regular_bars["Low"].min()) if not regular_bars.empty else float(today_bars["Low"].min())
+    if signal_side == "long":
         d1 = current_price > float(prior_day["High"])  # above yesterday's high
         d2 = float(prior_day["Close"]) > float(sma200)  # yesterday's close above the 200-day SMA
         d3 = gap_pct >= daily_filters["D3_min_gap_pct_from_prior_close"]  # gap up >= threshold
@@ -700,7 +712,6 @@ def _evaluate_filters_from_bars(
             extreme_so_far = float(today_bars["High"].iloc[:-1].max()) if len(today_bars) > 1 else float("-inf")
             i2 = current_price > extreme_so_far  # new high-of-day
     else:
-        stop_ref = float(regular_bars["High"].max()) if not regular_bars.empty else float(today_bars["High"].max())
         d1 = current_price < float(prior_day["Low"])  # below yesterday's low
         if "D2_prior_close_pct_above_sma50_min" in daily_filters:
             sma50 = daily["Close"].iloc[-51:-1].mean()
@@ -717,6 +728,15 @@ def _evaluate_filters_from_bars(
         else:
             extreme_so_far = float(today_bars["Low"].iloc[:-1].min()) if len(today_bars) > 1 else float("inf")
             i2 = current_price < extreme_so_far  # new low-of-day
+
+    # stop_ref always follows the real TRADE direction (side), never
+    # signal_side - a faded short still needs a short's own stop
+    # (above price), even when the entry signal itself was detected
+    # using the long-style D1-D3/I1-I3 definitions above.
+    if side == "long":
+        stop_ref = float(regular_bars["Low"].min()) if not regular_bars.empty else float(today_bars["Low"].min())
+    else:
+        stop_ref = float(regular_bars["High"].max()) if not regular_bars.empty else float(today_bars["High"].max())
 
     # I3: relative volume >= threshold (direction-agnostic) - today's
     # volume-so-far against the AVERAGE volume accumulated by this same
@@ -750,7 +770,7 @@ def _evaluate_filters_from_bars(
 
     passed = bool(d1 and d2 and d3 and i1 and i2 and i3)
     return {
-        "pass": passed, "side": side,
+        "pass": passed, "side": side, "signal_side": signal_side,
         "D1": bool(d1), "D2": bool(d2), "D3": bool(d3),
         "I1": bool(i1), "I2": bool(i2), "I3": bool(i3),
         "price": current_price, "rvol": rvol, "gap_pct": gap_pct,
@@ -778,7 +798,7 @@ def _evaluate_entry_filters(account_id: int, mode: str, ticker: str, rules: dict
         intraday = yf.Ticker(yahoo_symbol).history(period=f"{INTRADAY_FETCH_LOOKBACK_DAYS}d", interval="5m", prepost=True)
         if not intraday.empty:
             intraday.index = intraday.index.tz_convert(ET)
-        detail = _evaluate_filters_from_bars(daily, intraday, rules, side)
+        detail = _evaluate_filters_from_bars(daily, intraday, rules, side, signal_side=rules.get("signal_side"))
         detail["side"] = side
         event = "filter_eval" if "error" not in detail else "filter_eval_error"
         log_decision(account_id, mode, {"event": event, "symbol": ticker, **detail})
