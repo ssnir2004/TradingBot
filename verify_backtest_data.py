@@ -26,6 +26,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--min-days", type=int, default=200,
                          help="Expected minimum days of history each symbol should have cached.")
+    parser.add_argument("--out", type=str, default=None,
+                         help="Write every missing/thin symbol (one per line) to this file - "
+                              "for a targeted re-fetch of just what still needs it, e.g. "
+                              "fetch_backtest_data.py --symbols $(cat that-file).")
     args = parser.parse_args()
 
     expected = set(SP500_TICKERS)
@@ -77,6 +81,12 @@ def main():
     if extra:
         shown = ", ".join(extra[:20]) + (" ..." if len(extra) > 20 else "")
         print(f"Cached but not in the current S&P 500 list ({len(extra)}, informational only): {shown}")
+
+    if args.out:
+        needs_fetch = sorted(missing) + sorted(s for s, _, _ in thin)
+        with open(args.out, "w") as f:
+            f.write("\n".join(needs_fetch) + ("\n" if needs_fetch else ""))
+        print(f"Wrote {len(needs_fetch)} symbol(s) needing a fetch to {args.out}")
 
 
 if __name__ == "__main__":
