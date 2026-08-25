@@ -1725,7 +1725,7 @@ def cancel_backtest(backtest_id: int, account_id: int) -> bool:
     return True
 
 
-def list_backtests(account_id: int, limit: int = 20) -> list[dict]:
+def list_backtests(account_id: int, limit: int = 100) -> list[dict]:
     """Summary rows for the history list (fetch a single backtest's full
     detail, including its per-trade pairs, via get_backtest) - but each
     row DOES carry total_pnl_usd, a lightweight sum of every strategy's
