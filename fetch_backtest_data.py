@@ -188,6 +188,14 @@ DEPTH_SHORTFALL_SLACK_DAYS = 5  # weekends/holidays mean a full initial_duration
 def fetch_symbol(ib, symbol: str, initial_duration: str) -> dict:
     contract = Stock(symbol, "SMART", "USD")
     (qualified,) = ib.qualifyContracts(contract)
+    if qualified is None:
+        # ib_async returns None (not an exception) in this slot when IBKR's
+        # own contract lookup finds no match or an ambiguous one (logged
+        # separately as "Unknown contract"/"Ambiguous contract") - passing
+        # that None straight into reqHistoricalData would crash deep inside
+        # ib_async's own request-encoding with a confusing AttributeError
+        # instead of a clear, retryable status.
+        return {"symbol": symbol, "status": "no_security_definition", "new_bars": 0}
     existing = load_cached_bars(symbol, BAR_SIZE)
 
     if existing is None or existing.empty:
@@ -280,7 +288,7 @@ def run_fetch(
                     result = fetch_symbol(ibkr.ib, symbol, duration)
                 except Exception as exc:  # noqa: BLE001 - one bad symbol must not kill the run
                     result = {"symbol": symbol, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
-                if result["status"] not in ("error", "no_data") or attempt == RETRY_ATTEMPTS - 1:
+                if result["status"] not in ("error", "no_data", "no_security_definition") or attempt == RETRY_ATTEMPTS - 1:
                     break
                 print(f"{result['status']} (retry {attempt + 1}/{RETRY_ATTEMPTS - 1}) ...", end=" ", flush=True)
                 time.sleep(RETRY_BACKOFF_SECONDS[attempt])
@@ -295,7 +303,7 @@ def run_fetch(
 
     ok = sum(1 for r in results if r["status"] == "ok")
     up_to_date = sum(1 for r in results if r["status"] == "up_to_date")
-    errors = [r for r in results if r["status"] == "error"]
+    errors = [r for r in results if r["status"] in ("error", "no_security_definition")]
     summary = {"total": len(results), "ok": ok, "up_to_date": up_to_date, "errors": len(errors), "results": results}
     notify(
         "Backtest data fetch",
