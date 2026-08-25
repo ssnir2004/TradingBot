@@ -408,7 +408,40 @@ document.getElementById("btn-run-backtest").addEventListener("click", async () =
   }
 });
 
+// Remembers the last-typed risk sizing (portfolio value, max risk/trade,
+// max trades/day) across page loads via localStorage, purely so it isn't
+// retyped on every visit - it's a form default, not account data, so it
+// stays local to this browser rather than round-tripping to the server.
+// Wrapped in try/catch since localStorage can throw (private browsing,
+// disabled site data) - falling back to the HTML's own hardcoded value
+// attributes is a fine default either way.
+const BT_RISK_PARAM_STORAGE_KEYS = {
+  "bt-portfolio-value": "tradingbot.backtest.portfolio_value",
+  "bt-max-risk-pct": "tradingbot.backtest.max_risk_pct",
+  "bt-max-trades-per-day": "tradingbot.backtest.max_trades_per_day",
+};
+
+function restoreRiskParams() {
+  for (const [elId, storageKey] of Object.entries(BT_RISK_PARAM_STORAGE_KEYS)) {
+    try {
+      const saved = localStorage.getItem(storageKey);
+      if (saved !== null) document.getElementById(elId).value = saved;
+    } catch (e) { /* keep the HTML default */ }
+  }
+}
+
+function persistRiskParamsOnChange() {
+  for (const [elId, storageKey] of Object.entries(BT_RISK_PARAM_STORAGE_KEYS)) {
+    const input = document.getElementById(elId);
+    input.addEventListener("input", () => {
+      try { localStorage.setItem(storageKey, input.value); } catch (e) { /* won't persist this session - not fatal */ }
+    });
+  }
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
+  restoreRiskParams();
+  persistRiskParamsOnChange();
   dateRangePicker = flatpickr("#bt-date-range", {
     mode: "range", dateFormat: "d/m/Y", allowInput: false,
   });
