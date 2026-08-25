@@ -1740,7 +1740,7 @@ def list_backtests(account_id: int, limit: int = 20) -> list[dict]:
     total."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT id, account_id, status, params_json, results_json, error, execution_mode, created_at, finished_at FROM backtests "
+            "SELECT id, account_id, status, params_json, results_json, error, execution_mode, created_at, claimed_at, finished_at FROM backtests "
             "WHERE account_id = ? ORDER BY created_at DESC LIMIT ?",
             (account_id, limit),
         ).fetchall()
