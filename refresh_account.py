@@ -31,7 +31,10 @@ def main():
     try:
         cycle.refresh_account_info(account_id, args.mode)
     except Exception as exc:  # noqa: BLE001 - dashboard subprocess: report, don't traceback
-        print(f"[{args.mode}] refresh failed: {exc}")
+        # type(exc).__name__ matters - some exceptions (a bare Exception(),
+        # some ib_async internal errors) have an empty str(), which used to
+        # print as a completely blank, undiagnosable "refresh failed:".
+        print(f"[{args.mode}] refresh failed: {type(exc).__name__}: {exc}")
         sys.exit(1)
     print(f"[{args.mode}] account refreshed")
 
