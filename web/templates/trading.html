@@ -130,6 +130,23 @@
     </div>
   </div>
 
+  <div class="row g-3 mb-3">
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header">Trade History</div>
+        <div class="small text-muted px-3 pt-2" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="bottom" title="כולל: טריידים של הבוט (כניסה/יציאה אוטומטית), הזמנות Market מ-Place Order למעלה, וסגירות Market מ-Account Holdings.<br>לא כולל: מילוי בפועל של הזמנת LIMIT+ATR (Bracket), או של Stop/Take Profit/ATR trail כשהם מופעלים אצל הברוקר - אלה נראים ב-Pending Orders כל עוד הם ממתינים, אבל אין עדיין רישום כאן ברגע שהם מתמלאים.">
+          Fills recorded by the bot's own buy/sell actions, most recent first — hover for exact coverage.
+        </div>
+        <div class="card-body p-0" style="max-height:340px; overflow-y:auto;">
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Fill</th><th>Status</th></tr></thead>
+            <tbody id="trades-body"><tr><td colspan="6" class="text-center text-muted">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <div class="modal" id="chart-modal" tabindex="-1">
@@ -546,8 +563,18 @@ document.getElementById("btn-place-order").addEventListener("click", async () =>
   }
 });
 
+async function refreshTrades() {
+  const rows = await modeApi("/api/trades?limit=50");
+  const body = document.getElementById("trades-body");
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No trades yet</td></tr>'; return; }
+  body.innerHTML = rows.map(t => `<tr>
+    <td class="small">${t.timestamp_iso}</td><td>${symbolLink(t.symbol)}</td><td>${t.side}</td>
+    <td>${t.size}</td><td>${fmtMoney(t.fill_price)}</td><td class="small">${t.status}</td>
+  </tr>`).join("");
+}
+
 function refreshAll() {
-  refreshStatus(); refreshAccount(); refreshGatewayStatus(); refreshOrders(); refreshBrokerPositions(); refreshIbkrCredentials(); refreshMyGateway();
+  refreshStatus(); refreshAccount(); refreshGatewayStatus(); refreshOrders(); refreshBrokerPositions(); refreshTrades(); refreshIbkrCredentials(); refreshMyGateway();
 }
 </script>
 </body>
