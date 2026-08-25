@@ -63,6 +63,7 @@ def run_backtest(backtest_id: int):
                 "aggregate": aggregate,
                 "histogram": histogram,
                 "skipped_symbols": sim["skipped_symbols"],
+                "filter_stats": sim["filter_stats"],
             }
         db.finish_backtest(backtest_id, results)
         print(f"backtest {backtest_id}: done ({len(results)} strategy result(s))")

@@ -175,15 +175,19 @@ def simulate_strategy(
     max_trades_per_day: int,
 ) -> dict:
     """Runs one strategy over one date range against every symbol that has
-    cached intraday data, returns {"trades": [...], "skipped_symbols": [...]}
-    — trades in the same {symbol, side: "BUY"/"SELL", fill_price, size,
-    timestamp_iso} shape db.get_trades rows have, so src/perf.py's
-    pair_trades/aggregate/compute_r_multiples/histogram work on the result
-    completely unchanged - the backtest's stats come from the exact same
-    pipeline the live dashboard's Performance card already uses (including
-    its existing 1%-proxy R-multiple approximation, rather than the more
-    precise stop this engine actually simulated), so the two are always
-    directly comparable."""
+    cached intraday data, returns {"trades": [...], "skipped_symbols": [...],
+    "filter_stats": {...}} — trades in the same {symbol, side: "BUY"/"SELL",
+    fill_price, size, timestamp_iso} shape db.get_trades rows have, so
+    src/perf.py's pair_trades/aggregate/compute_r_multiples/histogram work
+    on the result completely unchanged - the backtest's stats come from the
+    exact same pipeline the live dashboard's Performance card already uses
+    (including its existing 1%-proxy R-multiple approximation, rather than
+    the more precise stop this engine actually simulated), so the two are
+    always directly comparable. filter_stats is {"evaluations": int,
+    "insufficient_data": int, "D1"|"D2"|"D3"|"I1"|"I2"|"I3": int} - a pass
+    count for each condition out of "evaluations", for surfacing WHY a
+    strategy found few or no trades (which specific condition(s) are
+    actually the bottleneck) instead of leaving that to guesswork."""
     exit_cfg = strategy_rules["exit"]
     max_concurrent = strategy_rules["risk"]["max_concurrent_positions"]
     max_position_pct = strategy_rules["risk"]["max_position_size_pct_of_portfolio"] / 100
@@ -239,8 +243,23 @@ def simulate_strategy(
             daily_by_symbol[symbol] = daily
             intraday_by_symbol[symbol] = daily_candidates[symbol]
 
+    # Every entry-scan check runs the FULL D1-I3 evaluation regardless of
+    # which condition(s) actually fail (_evaluate_filters_from_bars never
+    # short-circuits - see its own docstring), so every single check gives
+    # a complete picture of all six conditions, not just whichever one
+    # would have failed first. Aggregating that here answers "why are
+    # there so few/no trades" directly, instead of guessing - e.g. a
+    # strategy needing a rare gap AND high relative volume simultaneously
+    # can legitimately have a near-zero combined pass rate over a short
+    # date range even though no single condition is unreasonable on its
+    # own. "evaluations" excludes checks that bailed out early for
+    # insufficient daily/intraday history (counted separately) - those
+    # never got to compute D1-I3 at all.
+    filter_stats = {"evaluations": 0, "insufficient_data": 0,
+                     "D1": 0, "D2": 0, "D3": 0, "I1": 0, "I2": 0, "I3": 0}
+
     if not intraday_by_symbol:
-        return {"trades": [], "skipped_symbols": skipped}
+        return {"trades": [], "skipped_symbols": skipped, "filter_stats": filter_stats}
 
     all_days = sorted(set().union(*[
         set(_trading_days(intraday, start_date, end_date)) for intraday in intraday_by_symbol.values()
@@ -362,6 +381,13 @@ def simulate_strategy(
                     continue
                 intraday_slice = _intraday_window(intraday, bar_ts)
                 detail = cycle._evaluate_filters_from_bars(daily_slice, intraday_slice, strategy_rules, side)
+                if "error" in detail:
+                    filter_stats["insufficient_data"] += 1
+                    continue
+                filter_stats["evaluations"] += 1
+                for cond in ("D1", "D2", "D3", "I1", "I2", "I3"):
+                    if detail.get(cond):
+                        filter_stats[cond] += 1
                 if not detail.get("pass"):
                     continue
 
@@ -407,4 +433,4 @@ def simulate_strategy(
                 "timestamp_iso": day_bars.index[-1].isoformat(),
             })
 
-    return {"trades": trades, "skipped_symbols": skipped}
+    return {"trades": trades, "skipped_symbols": skipped, "filter_stats": filter_stats}
