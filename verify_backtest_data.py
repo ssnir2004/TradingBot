@@ -16,12 +16,6 @@ from src.sp500_tickers import SP500_TICKERS
 
 ET = ZoneInfo("America/New_York")
 BAR_SIZE = "5 mins"
-# ~78 5-min bars per regular session (6.5h) alone, well over that with
-# useRTH=False (premarket 4:00-9:30 + regular + after-hours 16:00-20:00
-# adds ~140 more bars/day) — anything drastically under this per cached
-# day is a sign that symbol's fetch got cut short (e.g. hit an Error 162
-# mid-chunk and only partially saved) rather than genuinely thin trading.
-BARS_PER_DAY_FLOOR = 100
 # A symbol not topped up in this long (run_service.py's weekly schedule
 # should keep every symbol within a few days of "now") flags a fetch that
 # silently stopped reaching it, not just normal incremental staleness.
@@ -50,7 +44,13 @@ def main():
             continue
         span_days = (cov["to"] - cov["from"]).days
         age_days = (now - cov["to"]).days
-        if span_days < args.min_days - 5 or cov["bar_count"] < span_days * BARS_PER_DAY_FLOOR:
+        # Bar count per day isn't a reliable signal on its own - a less
+        # actively-traded symbol legitimately gets fewer 5-min bars during
+        # premarket/after-hours (IBKR only returns a bar where a trade
+        # actually happened), so it varies a lot by symbol even when the
+        # fetch is completely fine. Span coverage - did the cache actually
+        # reach back min_days - is the real "did the fetch finish" signal.
+        if span_days < args.min_days - 5:
             thin.append((symbol, span_days, cov["bar_count"]))
         elif age_days > STALE_DAYS_FLOOR:
             stale.append((symbol, cov["to"].date(), age_days))
@@ -60,11 +60,11 @@ def main():
 
     print(f"Expected symbols (current S&P 500 list): {len(expected)}")
     print(f"Cached symbols found on disk:            {len(present)}")
-    print(f"OK (>= {args.min_days}d, dense, fresh):  {ok}")
+    print(f"OK (>= {args.min_days}d, fresh):          {ok}")
     print(f"Missing entirely:                        {len(missing)}")
     if missing:
         print("  " + ", ".join(missing))
-    print(f"Thin (short span or too few bars/day):   {len(thin)}")
+    print(f"Thin (span short of {args.min_days}d):     {len(thin)}")
     for symbol, span_days, bar_count in thin[:20]:
         print(f"  {symbol}: {span_days}d span, {bar_count} bars")
     if len(thin) > 20:

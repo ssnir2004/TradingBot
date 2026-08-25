@@ -17,12 +17,22 @@ chunks rather than asked for in one request. Keep chunks at this size,
 not smaller: many small requests is what caused the Gateway to drop the
 whole connection once already (IBKR's paper Gateway punishes request
 count over a short window, not request size) - few large chunks avoids
-that while still respecting the ~6-month per-request ceiling. Always
-incremental: a symbol already cached is only topped up with the gap
-since its last cached bar (never re-backfills further into the past for
-a symbol that already has some cache), so running this again later (see
-run_service.py's weekly schedule) just extends the cache forward, never
-re-fetches what's already there.
+that while still respecting the ~6-month per-request ceiling.
+
+Incremental, but depth-aware: a symbol already cached is topped up with
+the gap since its last cached bar (running this again later, e.g.
+run_service.py's weekly schedule, extends the cache forward without
+re-fetching what's already there) - AND, separately, backfilled further
+into the past if its cached span still falls short of what the initial
+backfill was supposed to reach. That second part matters because a
+transient chunk failure (a single reqHistoricalData call in the paging
+loop above coming back empty, even after _fetch_span's own in-place
+retry) used to leave a symbol permanently stuck at whatever partial
+depth its first chunk got - the forward-only top-up would then see a
+recent last-cached-bar and call it "up to date" forever, silently
+under-covering that symbol for every backtest from then on. Comparing
+cached span against the target depth on every run catches and repairs
+that, not just on the run that caused it.
 
 Needs a live IB Gateway connection — connects with its own dedicated
 client ID (IBKR_BACKTEST_CLIENT_ID), same pattern as trade.py — so run
@@ -105,23 +115,42 @@ def _bars_to_df(bars) -> pd.DataFrame:
     return df
 
 
-def _fetch_span(ib, qualified, total_days: int) -> pd.DataFrame:
-    """Pages backward from now in CHUNK_DAYS-sized reqHistoricalData calls
-    until `total_days` of history is covered (see module docstring for why
-    a single request can't just ask for the whole span directly). A
-    total_days at or under CHUNK_DAYS - the common case, an incremental
-    top-up - takes exactly one iteration, i.e. one request."""
+_CHUNK_RETRY_ATTEMPTS = 2  # 1 initial try + 1 retry, scoped to a single chunk request
+_CHUNK_RETRY_BACKOFF_SECONDS = 10
+
+
+def _fetch_span(ib, qualified, total_days: int, end_before: datetime | None = None) -> pd.DataFrame:
+    """Pages backward in CHUNK_DAYS-sized reqHistoricalData calls until
+    `total_days` of history is covered (see module docstring for why a
+    single request can't just ask for the whole span directly), ending at
+    `end_before` (default: now) - so this doubles as both "get me the last
+    N days" (the default) and "get me the N days right before what I
+    already have" (fetch_symbol's backward redeepen passes its oldest
+    cached bar here). A total_days at or under CHUNK_DAYS - the common
+    case, an incremental top-up - takes exactly one iteration, one request.
+
+    Each individual chunk request gets its own short in-place retry
+    (_CHUNK_RETRY_ATTEMPTS) before being accepted as empty - IBKR's data
+    farms dropping ONE request in an otherwise-successful multi-chunk
+    fetch is the same transient soft-throttle the module docstring
+    describes for whole-symbol failures, and used to silently truncate
+    the result at whatever the earlier chunk(s) already got."""
     frames = []
     remaining = total_days
-    cursor = ""  # "" means "now" for IBKR's endDateTime; a datetime after that
+    cursor = end_before if end_before is not None else ""  # "" means "now" for IBKR's endDateTime
     while remaining > 0:
         step = min(remaining, CHUNK_DAYS)
-        bars = ib.reqHistoricalData(
-            qualified, endDateTime=cursor, durationStr=f"{step} D",
-            barSizeSetting=BAR_SIZE, whatToShow="TRADES", useRTH=False, formatDate=2,
-            timeout=REQUEST_TIMEOUT_SECONDS,
-        )
-        df = _bars_to_df(bars)
+        df = pd.DataFrame()
+        for attempt in range(_CHUNK_RETRY_ATTEMPTS):
+            bars = ib.reqHistoricalData(
+                qualified, endDateTime=cursor, durationStr=f"{step} D",
+                barSizeSetting=BAR_SIZE, whatToShow="TRADES", useRTH=False, formatDate=2,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+            df = _bars_to_df(bars)
+            if not df.empty or attempt == _CHUNK_RETRY_ATTEMPTS - 1:
+                break
+            time.sleep(_CHUNK_RETRY_BACKOFF_SECONDS)
         if df.empty:
             break
         frames.append(df)
@@ -153,27 +182,52 @@ def _warm_up_connection(ib):
         pass
 
 
+DEPTH_SHORTFALL_SLACK_DAYS = 5  # weekends/holidays mean a full initial_duration is never hit exactly
+
+
 def fetch_symbol(ib, symbol: str, initial_duration: str) -> dict:
     contract = Stock(symbol, "SMART", "USD")
     (qualified,) = ib.qualifyContracts(contract)
     existing = load_cached_bars(symbol, BAR_SIZE)
 
-    if existing is not None and not existing.empty:
-        last_cached = existing.index.max()
-        gap_days = (datetime.now(ET) - last_cached).days
-        if gap_days < 1:
-            return {"symbol": symbol, "status": "up_to_date", "new_bars": 0, "total_bars": len(existing)}
-        total_days = min(gap_days + 2, MAX_GAP_FILL_DAYS)
-    else:
-        total_days = _duration_to_days(initial_duration)
+    if existing is None or existing.empty:
+        df = _fetch_span(ib, qualified, _duration_to_days(initial_duration))
+        if df.empty:
+            return {"symbol": symbol, "status": "no_data", "new_bars": 0}
+        merged = merge_bars(existing, df)
+        save_cached_bars(symbol, BAR_SIZE, merged)
+        return {"symbol": symbol, "status": "ok", "new_bars": len(merged), "total_bars": len(merged)}
 
-    df = _fetch_span(ib, qualified, total_days)
-    if df.empty:
-        return {"symbol": symbol, "status": "no_data", "new_bars": 0}
+    # Already has SOME cache - top it up forward (the ordinary case, run
+    # regularly by run_service.py's weekly schedule) and, separately,
+    # backward if its cached span still falls short of what the initial
+    # backfill was meant to reach (see the module docstring - a prior
+    # run's chunk failure can leave a symbol permanently under-covered
+    # otherwise, since "has a cache at all" isn't the same as "reached the
+    # target depth").
+    target_days = _duration_to_days(initial_duration)
+    gap_days = (datetime.now(ET) - existing.index.max()).days
+    cached_span_days = (existing.index.max() - existing.index.min()).days
+    depth_shortfall_days = target_days - cached_span_days
 
-    merged = merge_bars(existing, df)
+    new_frames = []
+    if gap_days >= 1:
+        forward_df = _fetch_span(ib, qualified, min(gap_days + 2, MAX_GAP_FILL_DAYS))
+        if not forward_df.empty:
+            new_frames.append(forward_df)
+    if depth_shortfall_days > DEPTH_SHORTFALL_SLACK_DAYS:
+        backward_df = _fetch_span(ib, qualified, depth_shortfall_days, end_before=existing.index.min())
+        if not backward_df.empty:
+            new_frames.append(backward_df)
+
+    if not new_frames:
+        return {"symbol": symbol, "status": "up_to_date", "new_bars": 0, "total_bars": len(existing)}
+
+    fetched = pd.concat(new_frames).sort_index()
+    fetched = fetched[~fetched.index.duplicated(keep="last")]
+    merged = merge_bars(existing, fetched)
     save_cached_bars(symbol, BAR_SIZE, merged)
-    new_count = len(merged) - (len(existing) if existing is not None else 0)
+    new_count = len(merged) - len(existing)
     return {"symbol": symbol, "status": "ok", "new_bars": new_count, "total_bars": len(merged)}
 
 
