@@ -25,6 +25,7 @@ see .gitignore).
 """
 import argparse
 import os
+import sys
 import time
 import traceback
 from pathlib import Path
@@ -41,6 +42,23 @@ DEFAULT_POLL_INTERVAL_SECONDS = 10
 # forever with no feedback.
 _CLAIM_TIMEOUT_SECONDS = 30
 _SUBMIT_TIMEOUT_SECONDS = 60
+
+
+def _prevent_system_sleep():
+    """Windows only: tell the OS not to sleep (which drops networking, and
+    with it this worker's poll loop / in-flight submissions) while this
+    process is running. Deliberately does NOT pass ES_DISPLAY_REQUIRED, so
+    screen lock / screensaver still behave normally - only full system
+    sleep is blocked. Works per-process via the Win32 API, so it applies
+    even when a stricter power plan (e.g. locked down by IT policy) can't
+    be changed through Settings. No-op on other platforms; the setting is
+    automatically released when this process exits."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    ES_CONTINUOUS = 0x80000000
+    ES_SYSTEM_REQUIRED = 0x00000001
+    ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
 
 
 def _headers(token: str) -> dict:
@@ -121,6 +139,7 @@ def main():
         )
     server_url = args.server_url.rstrip("/")
 
+    _prevent_system_sleep()
     print(f"[worker] polling {server_url} every {args.poll_interval}s (Ctrl+C to stop)")
     while True:
         did_work = run_once(server_url, args.token)
