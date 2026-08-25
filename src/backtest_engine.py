@@ -173,6 +173,7 @@ def simulate_strategy(
     portfolio_value: float,
     max_risk_pct: float,
     max_trades_per_day: int,
+    commission_per_trade: float = 0.0,
 ) -> dict:
     """Runs one strategy over one date range against every symbol that has
     cached intraday data, returns {"trades": [...], "skipped_symbols": [...],
@@ -187,7 +188,17 @@ def simulate_strategy(
     "insufficient_data": int, "D1"|"D2"|"D3"|"I1"|"I2"|"I3": int} - a pass
     count for each condition out of "evaluations", for surfacing WHY a
     strategy found few or no trades (which specific condition(s) are
-    actually the bottleneck) instead of leaving that to guesswork."""
+    actually the bottleneck) instead of leaving that to guesswork.
+
+    commission_per_trade is charged per FILL (every entry, every partial
+    close, every final close each cost it separately - a position closed
+    via one partial-profit fill plus one final fill costs 3x, not 2x),
+    recorded on each trade record as "commission" and only ever summed up
+    downstream in perf.pair_trades/aggregate - never subtracted from
+    fill_price itself, so it can't quietly distort stop/sizing math that
+    has nothing to do with transaction costs. Defaults to 0 (unchanged
+    behavior, matching every trade source that predates this - live/paper
+    trades never set this field at all)."""
     exit_cfg = strategy_rules["exit"]
     max_concurrent = strategy_rules["risk"]["max_concurrent_positions"]
     max_position_pct = strategy_rules["risk"]["max_position_size_pct_of_portfolio"] / 100
@@ -327,7 +338,7 @@ def simulate_strategy(
                         "fill_price": float(intraday_by_symbol[symbol].loc[bar_ts, "Close"])
                         if bar_ts in intraday_by_symbol[symbol].index else pos["entry_price"],
                         "size": pos["qty"], "timestamp_iso": bar_ts.isoformat(),
-                        "exit_reason": "eod_close",
+                        "exit_reason": "eod_close", "commission": commission_per_trade,
                     })
                 open_positions.clear()
                 break
@@ -348,6 +359,7 @@ def simulate_strategy(
                         "fill_price": pos["stop_price"], "size": pos["qty"],
                         "timestamp_iso": bar_ts.isoformat(),
                         "exit_reason": "stop_loss" if pos["state"] == "pre_breakeven" else "trailing_stop",
+                        "commission": commission_per_trade,
                     })
                     del open_positions[symbol]
                     continue
@@ -367,7 +379,7 @@ def simulate_strategy(
                         trades.append({
                             "id": trade_id, "symbol": symbol, "side": close_action,
                             "fill_price": price, "size": close_qty, "timestamp_iso": bar_ts.isoformat(),
-                            "exit_reason": "partial_profit",
+                            "exit_reason": "partial_profit", "commission": commission_per_trade,
                         })
                         pos["qty"] -= close_qty
                         pos["stop_price"] = decision["new_stop_price"]
@@ -455,7 +467,7 @@ def simulate_strategy(
                     trades.append({
                         "id": trade_id, "symbol": symbol, "side": action,
                         "fill_price": price, "size": size, "timestamp_iso": bar_ts.isoformat(),
-                        "initial_stop": initial_stop,
+                        "initial_stop": initial_stop, "commission": commission_per_trade,
                     })
                     open_positions[symbol] = {
                         "side": side, "entry_price": price, "initial_stop": initial_stop,
@@ -478,7 +490,7 @@ def simulate_strategy(
                 "id": trade_id, "symbol": symbol, "side": close_action,
                 "fill_price": float(last_bar["Close"]), "size": pos["qty"],
                 "timestamp_iso": day_bars.index[-1].isoformat(),
-                "exit_reason": "eod_close",
+                "exit_reason": "eod_close", "commission": commission_per_trade,
             })
 
     return {"trades": trades, "skipped_symbols": skipped, "filter_stats": filter_stats}

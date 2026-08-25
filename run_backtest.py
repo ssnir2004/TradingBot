@@ -51,6 +51,7 @@ def run_backtest(backtest_id: int):
             sim = backtest_engine.simulate_strategy(
                 rules, strategy["direction"], symbols, start_date, end_date,
                 params["portfolio_value"], params["max_risk_pct"], params["max_trades_per_day"],
+                commission_per_trade=params.get("commission_per_trade", 0.0),
             )
             pairs = perf.pair_trades(sim["trades"])
             aggregate = perf.aggregate(pairs)

@@ -1102,6 +1102,13 @@ def api_delete_strategy(strategy_id: int, account_id: int = Depends(require_acco
 DEFAULT_BACKTEST_PORTFOLIO_VALUE = 100_000.0
 DEFAULT_BACKTEST_MAX_RISK_PCT = 1.0
 DEFAULT_BACKTEST_MAX_TRADES_PER_DAY = 5
+# Real per-fill commission (e.g. IBKR's own rate) - modeled per execution,
+# not per round-trip, so a partial-profit trade (entry + partial close +
+# final close = 3 fills) correctly costs 3x, not 2x. Small position sizes
+# on a small portfolio can show a "profitable" gross P&L that's actually a
+# net loser once this is subtracted - see simulate_strategy/pair_trades/
+# aggregate for where it's actually applied.
+DEFAULT_BACKTEST_COMMISSION_PER_TRADE = 1.5
 
 
 @app.post("/api/backtests")
@@ -1138,6 +1145,7 @@ async def api_create_backtest(request: Request, account_id: int = Depends(requir
         "portfolio_value": float(body.get("portfolio_value", DEFAULT_BACKTEST_PORTFOLIO_VALUE)),
         "max_risk_pct": float(body.get("max_risk_pct", DEFAULT_BACKTEST_MAX_RISK_PCT)),
         "max_trades_per_day": int(body.get("max_trades_per_day", DEFAULT_BACKTEST_MAX_TRADES_PER_DAY)),
+        "commission_per_trade": float(body.get("commission_per_trade", DEFAULT_BACKTEST_COMMISSION_PER_TRADE)),
     }
     backtest_id = db.create_backtest(account_id, params)
     _log_account_action(account_id, user, action="create_backtest", backtest_id=backtest_id, strategy_ids=strategy_ids)

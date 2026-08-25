@@ -1701,12 +1701,15 @@ def list_backtests(account_id: int, limit: int = 20) -> list[dict]:
     """Summary rows for the history list (fetch a single backtest's full
     detail, including its per-trade pairs, via get_backtest) - but each
     row DOES carry total_pnl_usd, a lightweight sum of every strategy's
-    own aggregate.gross_pnl_usd within that run's results, so the list
-    can mark a run profitable/unprofitable at a glance without the
-    caller pulling every row's full trade log just to find that out.
-    results_json itself (which can be large, with several strategies'
-    full trade logs) is parsed here to compute that sum but never
-    included in the returned dict - only the derived total."""
+    own aggregate.net_pnl_usd (falling back to the older gross_pnl_usd
+    for a result stored before commission modeling added that field)
+    within that run's results, so the list can mark a run profitable/
+    unprofitable - after realistic transaction costs, not just on paper -
+    at a glance, without the caller pulling every row's full trade log
+    just to find that out. results_json itself (which can be large, with
+    several strategies' full trade logs) is parsed here to compute that
+    sum but never included in the returned dict - only the derived
+    total."""
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT id, account_id, status, params_json, results_json, error, created_at, finished_at FROM backtests "
@@ -1723,9 +1726,11 @@ def list_backtests(account_id: int, limit: int = 20) -> list[dict]:
                 try:
                     parsed = json.loads(raw_results)
                     pnls = [
-                        s["aggregate"]["gross_pnl_usd"] for s in parsed.values()
+                        s["aggregate"].get("net_pnl_usd", s["aggregate"].get("gross_pnl_usd"))
+                        for s in parsed.values()
                         if isinstance(s, dict) and "aggregate" in s
                     ]
+                    pnls = [p for p in pnls if p is not None]
                     if pnls:
                         result["total_pnl_usd"] = round(sum(pnls), 2)
                 except (json.JSONDecodeError, KeyError, TypeError):

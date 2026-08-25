@@ -27,20 +27,35 @@ def pair_trades(rows: list[dict]) -> list[dict]:
     a short. pnl_usd = (sell_price - buy_price) * size holds unchanged for
     both — a short's SELL is its (higher, ideally) opening price and its
     BUY is its (lower, ideally) closing price, so the same subtraction
-    still yields the profit."""
-    open_trades = defaultdict(list)
+    still yields the profit.
+
+    A single open fill can be closed across SEVERAL opposite-side fills
+    (a partial-profit take followed by a later final close is the normal
+    case here, since every strategy preset configures one) - each pending
+    open row tracks its own unfilled remaining size, and a closing row
+    walks through pending open rows (oldest first) consuming from each
+    until its own size is exhausted, producing one pair per matched slice.
+    An earlier version of this function popped the WHOLE open row on the
+    first opposite-side match regardless of quantity - correct only when
+    a position closes in exactly one fill, but for a partial-then-final
+    close it silently left the final closing fill unmatched (dropped from
+    every pair, along with its own P&L and commission) once the entry was
+    already fully consumed by the smaller partial fill. A trade closed via
+    2+ fills is correctly split into that many pairs now, not 1."""
+    open_trades = defaultdict(list)  # symbol -> pending open rows, each carrying its own "_remaining" unfilled size
     pairs = []
     for row in sorted(rows, key=lambda r: (r["timestamp_iso"], r.get("id", 0))):
         symbol = row["symbol"]
         pending = open_trades[symbol]
-        if pending and pending[0]["side"] != row["side"]:
-            open_row = pending.pop(0)
+        remaining = int(row["size"])
+        while remaining > 0 and pending and pending[0]["side"] != row["side"]:
+            open_row = pending[0]
+            matched = min(open_row["_remaining"], remaining)
             side = "long" if open_row["side"] == "BUY" else "short"
             open_price = float(open_row["fill_price"] or 0)
             close_price = float(row["fill_price"] or 0)
             buy_price, sell_price = (open_price, close_price) if side == "long" else (close_price, open_price)
-            size = min(int(open_row["size"]), int(row["size"]))
-            pnl_usd = (sell_price - buy_price) * size
+            pnl_usd = (sell_price - buy_price) * matched
             move_pct = ((close_price - open_price) / open_price * 100) if open_price else 0.0
             pnl_pct = move_pct if side == "long" else -move_pct
             try:
@@ -50,6 +65,11 @@ def pair_trades(rows: list[dict]) -> list[dict]:
                 ).total_seconds() / 60
             except ValueError:
                 hold_minutes = None
+            # The open leg's own commission was paid once, at entry - only
+            # attribute it to the slice that finally exhausts open_row's
+            # remaining size, so splitting one entry across several closing
+            # pairs doesn't charge that same commission again on each one.
+            open_commission = float(open_row.get("commission") or 0) if matched == open_row["_remaining"] else 0.0
             pairs.append({
                 "symbol": symbol,
                 "side": side,
@@ -57,7 +77,7 @@ def pair_trades(rows: list[dict]) -> list[dict]:
                 "sell_price": sell_price,
                 "open_price": open_price,
                 "close_price": close_price,
-                "size": size,
+                "size": matched,
                 "pnl_usd": pnl_usd,
                 "pnl_pct": pnl_pct,
                 "hold_minutes": hold_minutes,
@@ -65,9 +85,16 @@ def pair_trades(rows: list[dict]) -> list[dict]:
                 "sell_time": row["timestamp_iso"] if side == "long" else open_row["timestamp_iso"],
                 "exit_reason": row.get("exit_reason"),
                 "initial_stop": open_row.get("initial_stop"),
+                "commission_usd": open_commission + float(row.get("commission") or 0),
             })
-        else:
-            pending.append(row)
+            open_row["_remaining"] -= matched
+            remaining -= matched
+            if open_row["_remaining"] <= 0:
+                pending.pop(0)
+        if remaining > 0:
+            leftover = dict(row)
+            leftover["_remaining"] = remaining
+            pending.append(leftover)
     return pairs
 
 
@@ -75,7 +102,8 @@ def aggregate(pairs: list[dict]) -> dict:
     if not pairs:
         return {
             "total_trades": 0, "wins": 0, "losses": 0, "win_rate_pct": 0.0,
-            "gross_pnl_usd": 0.0, "largest_winner": None, "largest_loser": None,
+            "gross_pnl_usd": 0.0, "total_commission_usd": 0.0, "net_pnl_usd": 0.0,
+            "largest_winner": None, "largest_loser": None,
             "avg_winner": 0.0, "avg_loser": 0.0, "profit_factor": "n/a",
         }
 
@@ -84,6 +112,12 @@ def aggregate(pairs: list[dict]) -> dict:
     gross_pnl = sum(p["pnl_usd"] for p in pairs)
     sum_wins = sum(p["pnl_usd"] for p in wins)
     sum_losses = sum(p["pnl_usd"] for p in losses)
+    # win/loss classification and profit_factor stay GROSS-based (a live/
+    # paper trade row never carries a "commission" field at all, so this
+    # is unchanged there) - total_commission_usd/net_pnl_usd are additive,
+    # answering "is this actually worth it after real transaction costs"
+    # without redefining what every existing caller already reads.
+    total_commission = sum(p.get("commission_usd", 0) for p in pairs)
 
     largest_winner = max(pairs, key=lambda p: p["pnl_usd"])
     largest_loser = min(pairs, key=lambda p: p["pnl_usd"])
@@ -96,6 +130,8 @@ def aggregate(pairs: list[dict]) -> dict:
         "losses": len(losses),
         "win_rate_pct": round(len(wins) / len(pairs) * 100, 1),
         "gross_pnl_usd": round(gross_pnl, 2),
+        "total_commission_usd": round(total_commission, 2),
+        "net_pnl_usd": round(gross_pnl - total_commission, 2),
         "largest_winner": {"symbol": largest_winner["symbol"], "pnl_usd": round(largest_winner["pnl_usd"], 2)},
         "largest_loser": {"symbol": largest_loser["symbol"], "pnl_usd": round(largest_loser["pnl_usd"], 2)},
         "avg_winner": round(sum_wins / len(wins), 2) if wins else 0.0,

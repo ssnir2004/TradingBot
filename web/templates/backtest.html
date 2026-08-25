@@ -52,6 +52,10 @@
           <label class="form-label small">Max trades/day</label>
           <input type="number" id="bt-max-trades-per-day" class="form-control form-control-sm" value="5">
         </div>
+        <div class="col-6 col-md-2">
+          <label class="form-label small">Commission/trade ($)</label>
+          <input type="number" step="0.01" id="bt-commission-per-trade" class="form-control form-control-sm" value="1.5">
+        </div>
       </div>
 
       <div class="small text-muted mb-2" id="bt-universe-info">Checking available historical data…</div>
@@ -261,6 +265,7 @@ function renderTrades(pairs) {
       <td class="mono">${fmtMoney(p.close_price)}</td>
       <td>${p.size}</td>
       <td class="mono ${pnlClass}">${fmtMoney(p.pnl_usd)}</td>
+      <td class="mono text-muted">${fmtMoney(p.commission_usd)}</td>
       <td>${reason}</td>
       <td class="small text-muted text-nowrap">${fmtTimeET(entryTime)} → ${fmtTimeET(exitTime)}</td>
     </tr>`;
@@ -269,7 +274,7 @@ function renderTrades(pairs) {
     <div class="small text-muted mb-1">Trades (${pairs.length})</div>
     <div style="max-height:280px; overflow-y:auto; overflow-x:auto;">
       <table class="table table-sm mb-0">
-        <thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Initial Stop</th><th>Exit</th><th>Size</th><th>P&amp;L</th><th>Closed by</th><th>When</th></tr></thead>
+        <thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Initial Stop</th><th>Exit</th><th>Size</th><th>P&amp;L</th><th>Commission</th><th>Closed by</th><th>When</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
@@ -284,11 +289,17 @@ function renderStrategyResult(strategyId, result) {
   const a = result.aggregate;
   const skipped = result.skipped_symbols || [];
   const key = (strategiesById[strategyId] || {}).key;
+  // net_pnl_usd/total_commission_usd are only absent on a result stored
+  // before commission modeling existed - fmtMoney's own null/undefined
+  // check already renders that as "-" rather than crashing.
+  const netClass = a.net_pnl_usd > 0 ? "text-success" : a.net_pnl_usd < 0 ? "text-danger" : "";
   return `<div class="col-12 col-lg-6 mb-3"><div class="card h-100">
     <div class="card-header">${key ? `<span class="badge bg-light text-dark border me-1">${key}</span>` : ""}${result.strategy_name} ${sideBadge(result.direction)}</div>
     <div class="card-body">
       <p>Trades: <strong>${a.total_trades}</strong> (${a.wins}W / ${a.losses}L, ${a.win_rate_pct}%)</p>
       <p>Gross P&amp;L: <strong>${fmtMoney(a.gross_pnl_usd)}</strong></p>
+      <p>Commission: <strong>${fmtMoney(a.total_commission_usd)}</strong></p>
+      <p>Net P&amp;L (after commission): <strong class="${netClass}">${fmtMoney(a.net_pnl_usd)}</strong></p>
       <p>Profit factor: <strong>${a.profit_factor}</strong></p>
       <p>Avg winner: ${fmtMoney(a.avg_winner)} | Avg loser: ${fmtMoney(a.avg_loser)}</p>
       ${renderHistogram(result.histogram)}
@@ -453,6 +464,7 @@ document.getElementById("btn-run-backtest").addEventListener("click", async () =
     portfolio_value: Number(document.getElementById("bt-portfolio-value").value),
     max_risk_pct: Number(document.getElementById("bt-max-risk-pct").value),
     max_trades_per_day: Number(document.getElementById("bt-max-trades-per-day").value),
+    commission_per_trade: Number(document.getElementById("bt-commission-per-trade").value),
   };
   try {
     const { id } = await api("/api/backtests", {
@@ -465,16 +477,17 @@ document.getElementById("btn-run-backtest").addEventListener("click", async () =
 });
 
 // Remembers the last-typed risk sizing (portfolio value, max risk/trade,
-// max trades/day) across page loads via localStorage, purely so it isn't
-// retyped on every visit - it's a form default, not account data, so it
-// stays local to this browser rather than round-tripping to the server.
-// Wrapped in try/catch since localStorage can throw (private browsing,
-// disabled site data) - falling back to the HTML's own hardcoded value
-// attributes is a fine default either way.
+// max trades/day, commission/trade) across page loads via localStorage,
+// purely so it isn't retyped on every visit - it's a form default, not
+// account data, so it stays local to this browser rather than round-
+// tripping to the server. Wrapped in try/catch since localStorage can
+// throw (private browsing, disabled site data) - falling back to the
+// HTML's own hardcoded value attributes is a fine default either way.
 const BT_RISK_PARAM_STORAGE_KEYS = {
   "bt-portfolio-value": "tradingbot.backtest.portfolio_value",
   "bt-max-risk-pct": "tradingbot.backtest.max_risk_pct",
   "bt-max-trades-per-day": "tradingbot.backtest.max_trades_per_day",
+  "bt-commission-per-trade": "tradingbot.backtest.commission_per_trade",
 };
 
 function restoreRiskParams() {
