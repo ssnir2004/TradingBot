@@ -54,6 +54,14 @@ def _env() -> dict:
 @app.on_event("startup")
 def on_startup():
     db.init_db(seed_rules_path=PROJECT_DIR / "rules.json")
+    # A backtest subprocess spawned by the PREVIOUS dashboard process (see
+    # api_create_backtest) doesn't survive a `systemctl restart
+    # dashboard.service` - systemd's default KillMode=control-group kills
+    # every process in the service's cgroup on stop, this subprocess
+    # included, without ever reaching its own except handler. Left alone
+    # that leaves the backtest's row stuck at 'running' forever; this
+    # reconciles that on every startup instead.
+    db.fail_orphaned_backtests()
 
 
 def require_mode(mode: str = Query(...)) -> str:
@@ -1137,7 +1145,8 @@ async def api_create_backtest(request: Request, account_id: int = Depends(requir
     # for a wide date range or many symbols, and this request must return
     # immediately with the new backtest's id so the dashboard can start
     # polling GET /api/backtests/{id} for progress.
-    subprocess.Popen([sys.executable, str(PROJECT_DIR / "run_backtest.py"), "--backtest-id", str(backtest_id)])
+    proc = subprocess.Popen([sys.executable, str(PROJECT_DIR / "run_backtest.py"), "--backtest-id", str(backtest_id)])
+    db.set_backtest_pid(backtest_id, proc.pid)
     return {"id": backtest_id}
 
 

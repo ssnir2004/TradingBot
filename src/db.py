@@ -21,6 +21,7 @@ WAL mode lets readers (dashboard) and the two writers (paper + live
 engines) run at the same time without locking each other out.
 """
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -162,11 +163,14 @@ CREATE TABLE IF NOT EXISTS account_gateway_ports (
 );
 
 -- One row per backtest run (possibly covering several strategies at once,
--- for side-by-side comparison — see params_json's strategy_ids). Runs in
--- a background thread in the dashboard process itself (no subprocess,
--- unlike every IBKR-touching endpoint - src/backtest_engine.py only reads
--- the local historical-bar cache plus yfinance, never talks to IBKR at
--- run time), so results_json is filled in once that thread finishes.
+-- for side-by-side comparison — see params_json's strategy_ids). Runs as
+-- an isolated subprocess (run_backtest.py, spawned by web/app.py) rather
+-- than in-process, so a memory-heavy run can't take the dashboard down
+-- with it; results_json is filled in once that subprocess finishes. pid
+-- is that subprocess's OS pid, recorded so a dashboard restart mid-run
+-- (which kills it along with the rest of dashboard.service's cgroup) can
+-- be told apart from one still genuinely computing - see
+-- fail_orphaned_backtests.
 CREATE TABLE IF NOT EXISTS backtests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
@@ -174,6 +178,7 @@ CREATE TABLE IF NOT EXISTS backtests (
     params_json TEXT NOT NULL,
     results_json TEXT,
     error TEXT,
+    pid INTEGER,
     created_at TEXT NOT NULL,
     finished_at TEXT
 );
@@ -678,6 +683,7 @@ def init_db(seed_rules_path: Path | None = None):
         # only ever by cycle.sync_broker_fills, which uses it to avoid
         # re-inserting a fill it has already synced. See record_trade.
         _migrate_add_column(conn, "trades", "exec_id", "TEXT")
+        _migrate_add_column(conn, "backtests", "pid", "INTEGER")
         # The shipped default strategy predates risk_rating and got the
         # generic 'moderate' default from the ALTER TABLE above — it's
         # actually the conservative baseline every preset above is loosened
@@ -1439,6 +1445,16 @@ def start_backtest(backtest_id: int):
         conn.execute("UPDATE backtests SET status = 'running' WHERE id = ?", (backtest_id,))
 
 
+def set_backtest_pid(backtest_id: int, pid: int):
+    """Records the OS pid of the subprocess web/app.py just spawned for this
+    backtest (before it's necessarily reached 'running' - run_backtest.py
+    sets that itself once it's actually started). Only used to tell a
+    genuinely still-running backtest apart from an orphaned one on the next
+    dashboard startup - see fail_orphaned_backtests."""
+    with get_conn() as conn:
+        conn.execute("UPDATE backtests SET pid = ? WHERE id = ?", (pid, backtest_id))
+
+
 def finish_backtest(backtest_id: int, results: dict):
     now = datetime.now(ET).isoformat(timespec="seconds")
     with get_conn() as conn:
@@ -1455,6 +1471,39 @@ def fail_backtest(backtest_id: int, error: str):
             "UPDATE backtests SET status = 'failed', error = ?, finished_at = ? WHERE id = ?",
             (error, now, backtest_id),
         )
+
+
+def fail_orphaned_backtests():
+    """Called once from web/app.py's startup handler: a backtest still
+    marked 'running' from BEFORE this dashboard process started can no
+    longer be trusted - systemd's default KillMode=control-group kills
+    every process in dashboard.service's cgroup on stop/restart, including
+    any subprocess.Popen'd run_backtest.py, not just the dashboard's own
+    pid, so a `systemctl restart dashboard.service` while a backtest is
+    running silently kills it without ever reaching its own except
+    handler (the one thing that would otherwise call fail_backtest) -
+    leaving the row stuck at 'running' forever with nothing left tracking
+    it. os.kill(pid, 0) (a real signal is never sent - see the os.kill
+    docs) tells a genuinely still-running backtest (survived because
+    KillMode=process was set, or this dashboard start wasn't a restart at
+    all) apart from one that's actually gone."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id, pid FROM backtests WHERE status = 'running'").fetchall()
+    for row in rows:
+        alive = False
+        if row["pid"]:
+            try:
+                os.kill(row["pid"], 0)
+                alive = True
+            except ProcessLookupError:
+                alive = False
+            except PermissionError:
+                alive = True  # pid exists, just not ours to signal - treat as still running rather than guess
+        if not alive:
+            fail_backtest(
+                row["id"],
+                "Orphaned - the dashboard restarted while this backtest was still running, which killed it. Re-run it.",
+            )
 
 
 def get_backtest(backtest_id: int) -> dict | None:
