@@ -200,6 +200,24 @@ def simulate_strategy(
         if intraday is None or intraday.empty:
             skipped.append({"symbol": symbol, "reason": "no cached intraday bars"})
             continue
+        # The cache holds a symbol's ENTIRE fetched history (200+ days, per
+        # fetch_backtest_data.py), but only [start_date - lookback,
+        # end_date] is ever actually read below (_intraday_window never
+        # looks further back than INTRADAY_LOOKBACK_DAYS, and
+        # _trading_days/day_bar_times never look past end_date) - keeping
+        # the rest in memory for the whole simulation was pure waste,
+        # multiplied by however many symbols are in the universe. This is
+        # the dominant memory cost of a backtest (confirmed live: even a
+        # single-day run against ~500 symbols was memory-heavy), and
+        # trimming it here is a pure performance change with no effect on
+        # which trades get simulated - daily bars (SMA200 etc.) are a
+        # separate, much smaller cache and don't need this.
+        window_start = pd.Timestamp(start_date, tz=intraday.index.tz) - pd.Timedelta(days=INTRADAY_LOOKBACK_DAYS)
+        window_end = pd.Timestamp(end_date, tz=intraday.index.tz) + pd.Timedelta(days=1)
+        intraday = intraday[(intraday.index >= window_start) & (intraday.index < window_end)]
+        if intraday.empty:
+            skipped.append({"symbol": symbol, "reason": "no cached bars in the requested date range"})
+            continue
         daily_candidates[symbol] = intraday
 
     # `symbols` is the whole cached universe regardless of the requested
@@ -233,6 +251,15 @@ def simulate_strategy(
     for day in all_days:
         open_positions: dict[str, dict] = {}  # symbol -> simulated position state
         entries_today = 0
+
+        # _daily_as_of(daily_by_symbol[symbol], day) depends only on
+        # (symbol, day), not on the tick - computing it fresh on every
+        # single intraday bar in Step 2 below (as this used to) redid the
+        # same full-history slice up to ~100-190x per symbol per day for
+        # nothing. Once per (symbol, day) here instead.
+        daily_slice_by_symbol = {
+            symbol: _daily_as_of(daily_by_symbol[symbol], day) for symbol in intraday_by_symbol
+        }
 
         # Union of this day's regular-session 5-min timestamps across every
         # symbol, walked in chronological order — mirrors run_cycle's own
@@ -330,7 +357,7 @@ def simulate_strategy(
                 if not cycle._within_entry_window(strategy_rules, bar_ts.to_pydatetime()):
                     continue
 
-                daily_slice = _daily_as_of(daily_by_symbol[symbol], day)
+                daily_slice = daily_slice_by_symbol[symbol]
                 if daily_slice is None:
                     continue
                 intraday_slice = _intraday_window(intraday, bar_ts)
