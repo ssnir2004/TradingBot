@@ -134,8 +134,8 @@
     <div class="col-12">
       <div class="card">
         <div class="card-header">Trade History</div>
-        <div class="small text-muted px-3 pt-2" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="bottom" title="כולל: טריידים של הבוט (כניסה/יציאה אוטומטית), הזמנות Market מ-Place Order למעלה, וסגירות Market מ-Account Holdings.<br>לא כולל: מילוי בפועל של הזמנת LIMIT+ATR (Bracket), או של Stop/Take Profit/ATR trail כשהם מופעלים אצל הברוקר - אלה נראים ב-Pending Orders כל עוד הם ממתינים, אבל אין עדיין רישום כאן ברגע שהם מתמלאים.">
-          Fills recorded by the bot's own buy/sell actions, most recent first — hover for exact coverage.
+        <div class="small text-muted px-3 pt-2" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="bottom" title="כולל את כל הטריידים של הבוט (כניסה/יציאה אוטומטית), הזמנות Market מ-Place Order למעלה, סגירות Market מ-Account Holdings, וגם מילוי בפועל של הזמנת LIMIT+ATR (Bracket) או של Stop/Take Profit/ATR trail כשהם מופעלים אצל הברוקר - מסונכרן אוטומטית מ-IBKR כל עד 5 דקות (או מיד עם Refresh now).">
+          Every fill — the bot's own trades, manual orders, and stop/take-profit/ATR trail triggers at the broker — most recent first. Hover for details.
         </div>
         <div class="card-body p-0" style="max-height:340px; overflow-y:auto;">
           <table class="table table-sm mb-0">
@@ -252,6 +252,7 @@ async function refreshAccountAndOrders() {
   }
   await refreshOrders();
   await refreshBrokerPositions();
+  await refreshTrades();
 }
 
 document.getElementById("orders-body").addEventListener("click", async (e) => {
