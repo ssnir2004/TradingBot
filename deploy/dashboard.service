@@ -12,6 +12,17 @@ Environment=DASHBOARD_PORT=8000
 ExecStart=/opt/tradingbot/.venv/bin/python /opt/tradingbot/run_dashboard.py
 Restart=on-failure
 RestartSec=10
+# Default KillMode=control-group kills every process in this service's
+# cgroup on stop/restart - including a backtest subprocess this process
+# spawned via subprocess.Popen (see web/app.py's api_create_backtest),
+# not just this unit's own pid. That silently kills an in-flight backtest
+# on every routine dashboard redeploy. KillMode=process signals only the
+# main process; an orphaned backtest subprocess is reparented to init and
+# keeps running to completion under its own pid (see db.py's
+# fail_orphaned_backtests, which still cleans up the rare case this
+# process itself gets killed hard enough to take children with it, e.g.
+# `systemctl kill -s KILL`).
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target
