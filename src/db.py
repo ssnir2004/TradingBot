@@ -20,12 +20,14 @@ get_default_account_id().
 WAL mode lets readers (dashboard) and the two writers (paper + live
 engines) run at the same time without locking each other out.
 """
+import hashlib
 import json
 import os
+import secrets
 import signal
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -180,8 +182,25 @@ CREATE TABLE IF NOT EXISTS backtests (
     results_json TEXT,
     error TEXT,
     pid INTEGER,
+    execution_mode TEXT NOT NULL DEFAULT 'local',
+    claimed_at TEXT,
     created_at TEXT NOT NULL,
     finished_at TEXT
+);
+
+-- One row per remote backtest worker token (see docs/worker.md and
+-- backtest_worker.py). Only the SHA-256 hash is ever stored - the raw
+-- token is shown to the user exactly once, at creation, the same pattern
+-- API keys everywhere use, so a stolen db file alone can't be used to
+-- impersonate a worker. last_seen_at is updated on every successful
+-- claim, purely for the dashboard's own "worker: online/offline" display.
+CREATE TABLE IF NOT EXISTS worker_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    label TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT
 );
 """
 
@@ -826,6 +845,8 @@ def init_db(seed_rules_path: Path | None = None):
         # re-inserting a fill it has already synced. See record_trade.
         _migrate_add_column(conn, "trades", "exec_id", "TEXT")
         _migrate_add_column(conn, "backtests", "pid", "INTEGER")
+        _migrate_add_column(conn, "backtests", "execution_mode", "TEXT NOT NULL DEFAULT 'local'")
+        _migrate_add_column(conn, "backtests", "claimed_at", "TEXT")
         # The shipped default strategy predates risk_rating and got the
         # generic 'moderate' default from the ALTER TABLE above — it's
         # actually the conservative baseline every preset above is loosened
@@ -1572,12 +1593,19 @@ def delete_strategy(strategy_id: int):
 
 
 # -------------------------------------------------------------- backtests ---
-def create_backtest(account_id: int, params: dict) -> int:
+def create_backtest(account_id: int, params: dict, execution_mode: str = "local") -> int:
+    """execution_mode 'local' (default, unchanged behavior) has web/app.py
+    spawn run_backtest.py itself right after this returns. 'remote' leaves
+    the row at status='pending' for a worker to pick up via
+    claim_next_backtest - see docs/worker.md."""
+    if execution_mode not in ("local", "remote"):
+        raise ValueError("execution_mode must be 'local' or 'remote'")
     now = datetime.now(ET).isoformat(timespec="seconds")
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO backtests (account_id, status, params_json, created_at) VALUES (?, 'pending', ?, ?)",
-            (account_id, json.dumps(params), now),
+            "INSERT INTO backtests (account_id, status, params_json, execution_mode, created_at) "
+            "VALUES (?, 'pending', ?, ?, ?)",
+            (account_id, json.dumps(params), execution_mode, now),
         )
         return cur.lastrowid
 
@@ -1712,7 +1740,7 @@ def list_backtests(account_id: int, limit: int = 20) -> list[dict]:
     total."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT id, account_id, status, params_json, results_json, error, created_at, finished_at FROM backtests "
+            "SELECT id, account_id, status, params_json, results_json, error, execution_mode, created_at, finished_at FROM backtests "
             "WHERE account_id = ? ORDER BY created_at DESC LIMIT ?",
             (account_id, limit),
         ).fetchall()
@@ -1737,6 +1765,165 @@ def list_backtests(account_id: int, limit: int = 20) -> list[dict]:
                     pass  # malformed/unexpected results_json - leave total_pnl_usd as None rather than fail the whole list
             results.append(result)
         return results
+
+
+# --------------------------------------------------------- backtest worker ---
+# A remote backtest worker (see docs/worker.md, backtest_worker.py) is a
+# script running on the user's OWN machine, polling this dashboard over
+# HTTP instead of being spawned as a local subprocess (see run_backtest.py/
+# api_create_backtest) - moving the CPU/memory cost of a backtest off the
+# small always-on server entirely. It authenticates with a bearer token
+# instead of a browser session cookie (see require_worker_token in
+# web/app.py), so it needs its own token lifecycle here.
+def _hash_worker_token(raw_token: str) -> str:
+    return hashlib.sha256(raw_token.encode()).hexdigest()
+
+
+def create_worker_token(account_id: int, label: str = "") -> tuple[int, str]:
+    """Returns (token_id, raw_token) - raw_token is shown to the caller
+    exactly once, right here; only its hash is ever persisted, the same
+    pattern every API-key system uses, so a stolen db file alone can't be
+    used to impersonate a worker. Generated with secrets.token_urlsafe
+    (256 bits) rather than bcrypt-hashed like user passwords - this is a
+    high-entropy random token, not a human-chosen low-entropy password,
+    so it doesn't need bcrypt's deliberate slowness (which would also
+    needlessly cost real CPU on every single claim poll)."""
+    raw_token = secrets.token_urlsafe(32)
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO worker_tokens (account_id, token_hash, label, created_at) VALUES (?, ?, ?, ?)",
+            (account_id, _hash_worker_token(raw_token), label, now),
+        )
+        return cur.lastrowid, raw_token
+
+
+def list_worker_tokens(account_id: int) -> list[dict]:
+    """Never returns token_hash - there's no legitimate reason for the
+    dashboard UI to need it, and it costs nothing to just not send it."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, label, created_at, last_seen_at FROM worker_tokens WHERE account_id = ? ORDER BY created_at DESC",
+            (account_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_worker_token(token_id: int, account_id: int) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM worker_tokens WHERE id = ? AND account_id = ?", (token_id, account_id)
+        )
+        return cur.rowcount > 0
+
+
+def verify_worker_token(raw_token: str) -> int | None:
+    """Returns the owning account_id, or None if the token doesn't match
+    any live row. Updates last_seen_at on every successful verification -
+    purely for the dashboard's own "worker last seen" display, not used
+    for any access-control decision."""
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, account_id FROM worker_tokens WHERE token_hash = ?",
+            (_hash_worker_token(raw_token),),
+        ).fetchone()
+        if not row:
+            return None
+        conn.execute("UPDATE worker_tokens SET last_seen_at = ? WHERE id = ?", (now, row["id"]))
+        return row["account_id"]
+
+
+def claim_next_backtest(account_id: int) -> dict | None:
+    """Atomically finds the oldest still-pending remote-mode backtest for
+    this account and marks it claimed (status='running', claimed_at=now)
+    in one UPDATE ... WHERE status='pending' - so two workers polling at
+    once can't both claim the same row (whichever's UPDATE lands first
+    changes status out from under the other, and rowcount tells the loser
+    it got nothing). Returns the full params PLUS each requested
+    strategy's own resolved rules/direction (a worker has no direct DB
+    access of its own - everything it needs to actually run
+    backtest_engine.simulate_strategy has to come back in this one
+    response) - or None if there's nothing to claim."""
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id FROM backtests WHERE account_id = ? AND status = 'pending' AND execution_mode = 'remote' "
+            "ORDER BY created_at ASC LIMIT 1",
+            (account_id,),
+        ).fetchone()
+        if not row:
+            return None
+        backtest_id = row["id"]
+        cur = conn.execute(
+            "UPDATE backtests SET status = 'running', claimed_at = ? WHERE id = ? AND status = 'pending'",
+            (now, backtest_id),
+        )
+        if cur.rowcount == 0:
+            return None  # lost the race to another worker's claim between the SELECT and this UPDATE
+        backtest_row = conn.execute("SELECT * FROM backtests WHERE id = ?", (backtest_id,)).fetchone()
+        params = json.loads(backtest_row["params_json"])
+        strategies = {}
+        for strategy_id in params["strategy_ids"]:
+            strategy_row = conn.execute("SELECT * FROM strategies WHERE id = ?", (strategy_id,)).fetchone()
+            if strategy_row:
+                strategies[str(strategy_id)] = {
+                    "name": strategy_row["name"],
+                    "direction": strategy_row["direction"],
+                    "rules": json.loads(strategy_row["rules_json"]),
+                }
+        return {"id": backtest_id, "params": params, "strategies": strategies}
+
+
+def submit_worker_result(backtest_id: int, account_id: int, results: dict) -> bool:
+    """Scoped to account_id so one account's worker can't write into
+    another's backtest row. Returns False (does nothing) for a row that
+    doesn't belong to this account, or isn't actually in the 'running'
+    state a worker's own claim would have left it in (e.g. it was already
+    cancelled, or requeue_abandoned_worker_backtests already gave up on
+    it and a slow worker is now reporting in too late)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT status FROM backtests WHERE id = ? AND account_id = ? AND execution_mode = 'remote'",
+            (backtest_id, account_id),
+        ).fetchone()
+        if not row or row["status"] != "running":
+            return False
+    finish_backtest(backtest_id, results)
+    return True
+
+
+def fail_worker_backtest(backtest_id: int, account_id: int, error: str) -> bool:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT status FROM backtests WHERE id = ? AND account_id = ? AND execution_mode = 'remote'",
+            (backtest_id, account_id),
+        ).fetchone()
+        if not row or row["status"] != "running":
+            return False
+    fail_backtest(backtest_id, error)
+    return True
+
+
+def requeue_abandoned_worker_backtests(timeout_minutes: int = 15):
+    """Called periodically from web/app.py (a background asyncio task, not
+    just at startup - a worker can go quiet at any time, not only across a
+    dashboard restart). A remote backtest claimed more than timeout_minutes
+    ago and still sitting at 'running' means the worker that claimed it
+    went away (crashed, lost network, closed the laptop) without ever
+    reporting a result - mirrors fail_orphaned_backtests' role for a local
+    subprocess's dead pid, just detected by a time budget instead of
+    os.kill, since a remote worker's liveness isn't something this process
+    can check directly at all."""
+    cutoff = (datetime.now(ET) - timedelta(minutes=timeout_minutes)).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id FROM backtests WHERE execution_mode = 'remote' AND status = 'running' "
+            "AND claimed_at IS NOT NULL AND claimed_at < ?",
+            (cutoff,),
+        ).fetchall()
+    for row in rows:
+        fail_backtest(row["id"], f"Abandoned by worker - no result within {timeout_minutes} minutes of being claimed. Re-run it.")
 
 
 # ------------------------------------------------------------------ users ---

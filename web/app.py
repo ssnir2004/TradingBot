@@ -5,6 +5,7 @@ query param (the frontend has a Paper/Live tab). Reads and writes the same
 SQLite DB the two trading services (run_service.py --mode paper/live) use;
 it never talks to IBKR directly, so it can safely run as a separate process.
 """
+import asyncio
 import json
 import subprocess
 import sys
@@ -12,7 +13,7 @@ from datetime import date
 from pathlib import Path
 
 from dotenv import dotenv_values
-from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Form, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -51,8 +52,26 @@ def _env() -> dict:
     return dotenv_values(PROJECT_DIR / ".env")
 
 
+async def _requeue_abandoned_worker_backtests_loop():
+    """A remote worker can go quiet at ANY time (crash, closed laptop,
+    lost network) - unlike a local subprocess's dead pid, this process has
+    no way to directly check whether a worker that claimed a job is still
+    alive, so it just checks periodically whether too much time has
+    passed since the claim. Runs for the lifetime of the dashboard
+    process as a background asyncio task (not just once at startup, since
+    a worker can vanish hours into an already-running session) - errors
+    are swallowed and retried next tick rather than letting one bad pass
+    kill the loop for good."""
+    while True:
+        try:
+            db.requeue_abandoned_worker_backtests()
+        except Exception:  # noqa: BLE001 - a bad pass must not silently end this background loop
+            pass
+        await asyncio.sleep(60)
+
+
 @app.on_event("startup")
-def on_startup():
+async def on_startup():
     db.init_db(seed_rules_path=PROJECT_DIR / "rules.json")
     # A backtest subprocess spawned by the PREVIOUS dashboard process (see
     # api_create_backtest) doesn't survive a `systemctl restart
@@ -62,6 +81,7 @@ def on_startup():
     # that leaves the backtest's row stuck at 'running' forever; this
     # reconciles that on every startup instead.
     db.fail_orphaned_backtests()
+    asyncio.create_task(_requeue_abandoned_worker_backtests_loop())
 
 
 def require_mode(mode: str = Query(...)) -> str:
@@ -89,6 +109,24 @@ def require_admin(user: str = Depends(require_user)) -> str:
     if account is None or not account.get("is_admin"):
         raise HTTPException(status_code=403, detail="Admin only")
     return user
+
+
+def require_worker_token(authorization: str | None = Header(default=None)) -> int:
+    """A remote backtest worker (see docs/worker.md) isn't a browser with a
+    session cookie - it authenticates every request with a long-lived
+    bearer token instead (Authorization: Bearer <token>), created via
+    POST /api/worker_tokens by a real logged-in user and never shown
+    again after that. Returns the owning account_id, resolved fresh on
+    every call exactly like require_account does for cookie sessions -
+    every worker-facing endpoint below is scoped through this, so one
+    account's worker can never see or touch another account's backtests."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or malformed Authorization header")
+    token = authorization.removeprefix("Bearer ").strip()
+    account_id = db.verify_worker_token(token)
+    if account_id is None:
+        raise HTTPException(status_code=401, detail="Invalid worker token")
+    return account_id
 
 
 # ------------------------------------------------------------------ pages ---
@@ -1137,6 +1175,10 @@ async def api_create_backtest(request: Request, account_id: int = Depends(requir
             detail="No symbols have cached historical bars yet - run fetch_backtest_data.py on the server first.",
         )
 
+    execution_mode = body.get("execution_mode", "local")
+    if execution_mode not in ("local", "remote"):
+        raise HTTPException(status_code=400, detail="execution_mode must be 'local' or 'remote'")
+
     params = {
         "strategy_ids": strategy_ids,
         "start_date": start_date.isoformat(),
@@ -1147,14 +1189,22 @@ async def api_create_backtest(request: Request, account_id: int = Depends(requir
         "max_trades_per_day": int(body.get("max_trades_per_day", DEFAULT_BACKTEST_MAX_TRADES_PER_DAY)),
         "commission_per_trade": float(body.get("commission_per_trade", DEFAULT_BACKTEST_COMMISSION_PER_TRADE)),
     }
-    backtest_id = db.create_backtest(account_id, params)
-    _log_account_action(account_id, user, action="create_backtest", backtest_id=backtest_id, strategy_ids=strategy_ids)
-    # Fire-and-forget (Popen, not run) - the run itself can take a while
-    # for a wide date range or many symbols, and this request must return
-    # immediately with the new backtest's id so the dashboard can start
-    # polling GET /api/backtests/{id} for progress.
-    proc = subprocess.Popen([sys.executable, str(PROJECT_DIR / "run_backtest.py"), "--backtest-id", str(backtest_id)])
-    db.set_backtest_pid(backtest_id, proc.pid)
+    backtest_id = db.create_backtest(account_id, params, execution_mode=execution_mode)
+    _log_account_action(
+        account_id, user, action="create_backtest", backtest_id=backtest_id,
+        strategy_ids=strategy_ids, execution_mode=execution_mode,
+    )
+    if execution_mode == "local":
+        # Fire-and-forget (Popen, not run) - the run itself can take a
+        # while for a wide date range or many symbols, and this request
+        # must return immediately with the new backtest's id so the
+        # dashboard can start polling GET /api/backtests/{id} for
+        # progress.
+        proc = subprocess.Popen([sys.executable, str(PROJECT_DIR / "run_backtest.py"), "--backtest-id", str(backtest_id)])
+        db.set_backtest_pid(backtest_id, proc.pid)
+    # execution_mode == "remote": the row stays 'pending' with no local
+    # process at all - a worker picks it up via POST /api/worker/claim
+    # whenever it next polls (see docs/worker.md).
     return {"id": backtest_id}
 
 
@@ -1190,3 +1240,61 @@ def api_cancel_backtest(backtest_id: int, account_id: int = Depends(require_acco
 def api_backtest_universe(user: str = Depends(require_user)):
     symbols = backtest_data.cached_symbols(backtest_engine.BAR_SIZE)
     return {"symbols": symbols, "count": len(symbols)}
+
+
+# --------------------------------------------------------- backtest worker ---
+# Token management is browser-session-authenticated (a real logged-in user
+# creates/revokes these), like everything else in this file up to here.
+# The /api/worker/* endpoints below it are different: a remote worker has
+# no session cookie at all, so those go through require_worker_token
+# (Authorization: Bearer <token>) instead of require_account/require_user.
+# See docs/worker.md and backtest_worker.py.
+@app.post("/api/worker_tokens")
+async def api_create_worker_token(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    body = await request.json()
+    label = (body.get("label") or "").strip()
+    token_id, raw_token = db.create_worker_token(account_id, label)
+    _log_account_action(account_id, user, action="create_worker_token", token_id=token_id, label=label)
+    # raw_token is returned ONLY on this one response - the db never
+    # stores it, just its hash (see create_worker_token), so there is no
+    # way to retrieve it again later. Losing it means generating a new one.
+    return {"id": token_id, "token": raw_token}
+
+
+@app.get("/api/worker_tokens")
+def api_list_worker_tokens(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    return db.list_worker_tokens(account_id)
+
+
+@app.delete("/api/worker_tokens/{token_id}")
+def api_delete_worker_token(token_id: int, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    if not db.delete_worker_token(token_id, account_id):
+        raise HTTPException(status_code=404, detail="Worker token not found")
+    _log_account_action(account_id, user, action="delete_worker_token", token_id=token_id)
+    return {"ok": True}
+
+
+@app.post("/api/worker/claim")
+def api_worker_claim(account_id: int = Depends(require_worker_token)):
+    job = db.claim_next_backtest(account_id)
+    return job  # None (-> JSON null) when there's nothing pending - the worker's own poll loop treats that as "nothing to do, sleep and retry"
+
+
+@app.post("/api/worker/backtests/{backtest_id}/result")
+async def api_worker_submit_result(backtest_id: int, request: Request, account_id: int = Depends(require_worker_token)):
+    body = await request.json()
+    results = body.get("results")
+    if not isinstance(results, dict):
+        raise HTTPException(status_code=400, detail="results (an object) is required")
+    if not db.submit_worker_result(backtest_id, account_id, results):
+        raise HTTPException(status_code=404, detail="Backtest not found, not claimed by this account, or no longer 'running' (already cancelled/timed out/finished)")
+    return {"ok": True}
+
+
+@app.post("/api/worker/backtests/{backtest_id}/fail")
+async def api_worker_fail(backtest_id: int, request: Request, account_id: int = Depends(require_worker_token)):
+    body = await request.json()
+    error = body.get("error") or "Worker reported failure with no error message"
+    if not db.fail_worker_backtest(backtest_id, account_id, str(error)):
+        raise HTTPException(status_code=404, detail="Backtest not found, not claimed by this account, or no longer 'running'")
+    return {"ok": True}

@@ -14,6 +14,12 @@ historical-bar cache plus yfinance for daily bars), so there's no
 client-id concern here the way there is for trade.py etc - this only
 needs its own DB connection, same as every other standalone script.
 
+Only ever runs a backtest whose execution_mode is 'local' (the default -
+see api_create_backtest); a 'remote' one is never spawned like this at
+all, it just sits at status='pending' until a worker claims it over HTTP
+instead (see docs/worker.md, backtest_worker.py). Both paths share the
+actual "run these strategies" logic via src/backtest_runner.py.
+
 The backtest's params (symbols, date range, strategies, risk settings)
 are already stored as JSON on the backtests row by db.create_backtest at
 request time - this script just re-reads them via --backtest-id rather
@@ -21,11 +27,9 @@ than needing them passed on the command line.
 """
 import argparse
 import json
-from datetime import date
 from pathlib import Path
 
-from src import db, perf
-from src import backtest_engine
+from src import backtest_runner, db
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
@@ -38,34 +42,16 @@ def run_backtest(backtest_id: int):
     params = record["params"]
     db.start_backtest(backtest_id)
     try:
-        start_date = date.fromisoformat(params["start_date"])
-        end_date = date.fromisoformat(params["end_date"])
-        symbols = params["symbols"]
-        results = {}
+        strategies = {}
         for strategy_id in params["strategy_ids"]:
             strategy = db.get_strategy(strategy_id)
-            if not strategy:
-                results[str(strategy_id)] = {"error": "Strategy not found"}
-                continue
-            rules = json.loads(strategy["rules_json"])
-            sim = backtest_engine.simulate_strategy(
-                rules, strategy["direction"], symbols, start_date, end_date,
-                params["portfolio_value"], params["max_risk_pct"], params["max_trades_per_day"],
-                commission_per_trade=params.get("commission_per_trade", 0.0),
-            )
-            pairs = perf.pair_trades(sim["trades"])
-            aggregate = perf.aggregate(pairs)
-            r_values = perf.compute_r_multiples(pairs)
-            histogram = [{"label": l, "count": c, "is_loss": loss} for l, c, loss in perf.histogram(r_values)]
-            results[str(strategy_id)] = {
-                "strategy_name": strategy["name"],
-                "direction": strategy["direction"],
-                "pairs": pairs,
-                "aggregate": aggregate,
-                "histogram": histogram,
-                "skipped_symbols": sim["skipped_symbols"],
-                "filter_stats": sim["filter_stats"],
-            }
+            if strategy:
+                strategies[str(strategy_id)] = {
+                    "name": strategy["name"],
+                    "direction": strategy["direction"],
+                    "rules": json.loads(strategy["rules_json"]),
+                }
+        results = backtest_runner.run_backtest_params(params, strategies)
         db.finish_backtest(backtest_id, results)
         print(f"backtest {backtest_id}: done ({len(results)} strategy result(s))")
     except Exception as exc:  # noqa: BLE001 - a bad run must record failure, not crash silently
