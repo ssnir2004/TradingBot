@@ -303,7 +303,10 @@ function renderResults(detail) {
   document.getElementById("bt-results-meta").textContent =
     `Period: ${fmtDateOnly(params.start_date)} → ${fmtDateOnly(params.end_date)}`
     + (symbolCount ? ` · ${symbolCount} symbol(s)` : "")
-    + ` · Run started ${fmtDateTimeET(detail.created_at)}`;
+    + ` · Run started ${fmtDateTimeET(detail.created_at)}`
+    + (params.portfolio_value != null ? ` · Portfolio: $${Number(params.portfolio_value).toLocaleString()}` : "")
+    + (params.max_risk_pct != null ? ` · Max risk/trade: ${params.max_risk_pct}%` : "")
+    + (params.max_trades_per_day != null ? ` · Max trades/day: ${params.max_trades_per_day}` : "");
 
   const body = document.getElementById("bt-results-body");
   if (detail.status === "pending" || detail.status === "running") {
