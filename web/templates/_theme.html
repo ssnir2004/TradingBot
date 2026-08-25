@@ -1,0 +1,40 @@
+<script>
+(function() {
+  var THEME_KEY = "tb_theme";
+  function getTheme() {
+    try { return localStorage.getItem(THEME_KEY) || "light"; } catch (e) { return "light"; }
+  }
+  function applyTheme(theme) {
+    document.documentElement.setAttribute("data-bs-theme", theme);
+  }
+  // Runs synchronously in <head>, before first paint, so the page never
+  // flashes light before switching to a saved dark preference.
+  applyTheme(getTheme());
+
+  window.toggleTheme = function() {
+    var next = getTheme() === "dark" ? "light" : "dark";
+    try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
+    applyTheme(next);
+    document.querySelectorAll(".theme-toggle-btn").forEach(function(btn) {
+      btn.textContent = next === "dark" ? "☀️" : "🌙";
+    });
+  };
+
+  document.addEventListener("DOMContentLoaded", function() {
+    var icon = getTheme() === "dark" ? "☀️" : "🌙";
+    document.querySelectorAll(".theme-toggle-btn").forEach(function(btn) {
+      btn.textContent = icon;
+    });
+  });
+})();
+</script>
+<style>
+  /* Bootstrap 5.3's data-bs-theme handles .card/.table/.form-control/etc.
+     automatically - these cover the handful of utility classes and custom
+     colors in this app's own CSS that don't participate in that. */
+  [data-bs-theme="dark"] body { background-color: var(--bs-body-bg); }
+  [data-bs-theme="dark"] .bg-white { background-color: var(--bs-tertiary-bg) !important; color: var(--bs-body-color); }
+  [data-bs-theme="dark"] .bg-light { background-color: var(--bs-tertiary-bg) !important; color: var(--bs-body-color) !important; }
+  [data-bs-theme="dark"] .text-dark { color: var(--bs-body-color) !important; }
+  [data-bs-theme="dark"] .hist-bar-track { background-color: #343a40; }
+</style>
