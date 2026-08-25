@@ -311,6 +311,14 @@ def main():
     parser.add_argument("--account-id", type=int, default=None,
                          help="Defaults to the admin account when omitted.")
     parser.add_argument("--symbols", nargs="*", default=None, help="Defaults to the full S&P 500 universe")
+    parser.add_argument("--symbols-file", type=str, default=None,
+                         help="Read symbols from this file (one per line, e.g. verify_backtest_data.py's "
+                              "--out) instead of --symbols - avoids having to pass a long symbol list "
+                              "through shell quoting/word-splitting, which is easy to get wrong with a "
+                              "large list (nesting a multi-line $(cat file) inside an outer quoted string, "
+                              "as in a `tmux new-session \"...\"` wrapper, silently loses the separators "
+                              "between symbols instead of erroring). Takes priority over --symbols if both "
+                              "are given.")
     parser.add_argument("--duration", default=DEFAULT_INITIAL_DURATION,
                          help="Initial backfill depth for a symbol with no cache yet, e.g. '2 Y'")
     parser.add_argument("--limit", type=int, default=None, help="Cap symbols fetched (testing only)")
@@ -320,7 +328,11 @@ def main():
                               "are degraded and live's aren't.")
     args = parser.parse_args()
     account_id = args.account_id if args.account_id is not None else db.get_default_account_id()
-    symbols = args.symbols or list(SP500_TICKERS)
+    if args.symbols_file:
+        with open(args.symbols_file) as f:
+            symbols = [line.strip() for line in f if line.strip()]
+    else:
+        symbols = args.symbols or list(SP500_TICKERS)
     if args.limit:
         symbols = symbols[: args.limit]
 
