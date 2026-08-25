@@ -243,15 +243,24 @@ function renderTrades(pairs) {
   const rows = pairs.map(p => {
     const pnlClass = p.pnl_usd > 0 ? "text-success" : (p.pnl_usd < 0 ? "text-danger" : "");
     const reason = EXIT_REASON_LABELS[p.exit_reason] || p.exit_reason || "-";
+    // buy_price/sell_price (and buy_time/sell_time) are which side of the
+    // pair the BUY vs SELL execution was - correct for long (BUY opens,
+    // SELL closes) but backwards for short (SELL opens, BUY closes): a
+    // short's "Entry" is its sell_price/sell_time, not buy_price/buy_time.
+    // open_price/close_price are chronological (which leg happened
+    // first) regardless of side, so those - not buy/sell - are what
+    // "Entry"/"Exit" actually mean here.
+    const entryTime = p.side === "short" ? p.sell_time : p.buy_time;
+    const exitTime = p.side === "short" ? p.buy_time : p.sell_time;
     return `<tr>
       <td>${p.symbol}</td>
       <td>${sideBadge(p.side)}</td>
-      <td class="mono">${fmtMoney(p.buy_price)}</td>
-      <td class="mono">${fmtMoney(p.sell_price)}</td>
+      <td class="mono">${fmtMoney(p.open_price)}</td>
+      <td class="mono">${fmtMoney(p.close_price)}</td>
       <td>${p.size}</td>
       <td class="mono ${pnlClass}">${fmtMoney(p.pnl_usd)}</td>
       <td>${reason}</td>
-      <td class="small text-muted text-nowrap">${fmtTimeET(p.buy_time)} → ${fmtTimeET(p.sell_time)}</td>
+      <td class="small text-muted text-nowrap">${fmtTimeET(entryTime)} → ${fmtTimeET(exitTime)}</td>
     </tr>`;
   }).join("");
   return `<div class="mt-3">
