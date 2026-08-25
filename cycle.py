@@ -631,7 +631,10 @@ def force_close_all(account_id: int, mode: str, ib, positions: list[dict]):
 
 
 # ---------------------------------------------------------------- Step 8 ---
-def _evaluate_filters_from_bars(daily: pd.DataFrame, intraday: pd.DataFrame, rules: dict, side: str) -> dict:
+def _evaluate_filters_from_bars(
+    daily: pd.DataFrame, intraday: pd.DataFrame, rules: dict, side: str,
+    prior_day_bars: dict | None = None,
+) -> dict:
     """The actual D1-D3/I1-I3 decision logic, pulled out of
     _evaluate_entry_filters as a pure function: no data fetching, no
     wall-clock "now" — the day being evaluated is whatever the LAST date
@@ -648,7 +651,17 @@ def _evaluate_filters_from_bars(daily: pd.DataFrame, intraday: pd.DataFrame, rul
     or low (short); D2 wants the prior close on the trend side of the
     200-day SMA; D3 wants a gap in the trade's direction; I1/I2 want a new
     premarket/intraday extreme in the trade's direction; I3 (relative
-    volume) is direction-agnostic."""
+    volume) is direction-agnostic.
+
+    prior_day_bars is a purely-optional performance hook for I3: a
+    {date: DataFrame} map of that symbol's earlier trading days' bars,
+    already split out. When omitted (the live path, which only ever calls
+    this once per symbol per real tick) I3 derives the same thing itself
+    from `intraday` - same result either way, just slower to rederive on
+    every call, which only matters for backtest_engine.py's per-simulated-
+    tick calling pattern (hundreds of calls a day per symbol) - see its
+    own precomputed prior_day_bars_by_symbol for why it bothers passing
+    this in."""
     daily_filters = rules["daily_filters"]
     intraday_filters = rules["intraday_filters"]
 
@@ -718,11 +731,18 @@ def _evaluate_filters_from_bars(daily: pd.DataFrame, intraday: pd.DataFrame, rul
     # least that many days - see INTRADAY_FETCH_LOOKBACK_DAYS.
     lookback = intraday_filters["I3_rvol_lookback_days"]
     as_of_time = intraday.index[-1].time()
-    prior_dates = sorted({d for d in intraday.index.date if d < as_of_date})[-lookback:]
-    prior_volume_by_this_time = [
-        float(intraday[(intraday.index.date == d) & (intraday.index.time <= as_of_time)]["Volume"].sum())
-        for d in prior_dates
-    ]
+    if prior_day_bars is not None:
+        prior_dates = sorted(prior_day_bars.keys())[-lookback:]
+        prior_volume_by_this_time = [
+            float(prior_day_bars[d][prior_day_bars[d].index.time <= as_of_time]["Volume"].sum())
+            for d in prior_dates
+        ]
+    else:
+        prior_dates = sorted({d for d in intraday.index.date if d < as_of_date})[-lookback:]
+        prior_volume_by_this_time = [
+            float(intraday[(intraday.index.date == d) & (intraday.index.time <= as_of_time)]["Volume"].sum())
+            for d in prior_dates
+        ]
     avg_volume_by_this_time = (sum(prior_volume_by_this_time) / len(prior_volume_by_this_time)) if prior_volume_by_this_time else 0.0
     today_volume_so_far = float(today_bars["Volume"].sum())
     rvol = today_volume_so_far / avg_volume_by_this_time if avg_volume_by_this_time else 0.0

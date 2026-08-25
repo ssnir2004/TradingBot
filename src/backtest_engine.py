@@ -270,6 +270,20 @@ def simulate_strategy(
         set(_trading_days(intraday, start_date, end_date)) for intraday in intraday_by_symbol.values()
     ]))
 
+    # One split-by-calendar-day pass per symbol, done ONCE for the whole
+    # run (not per simulated day, and definitely not per tick) - I3's
+    # time-of-day-adjusted relative volume (see cycle._evaluate_filters_
+    # from_bars) needs "this symbol's bars for day X" for each of several
+    # prior trading days, and re-deriving that from the full intraday
+    # window on every single entry-scan tick (as a naive implementation
+    # would) redoes the same O(window size) scan hundreds of times a day
+    # per symbol for nothing - the exact same class of waste
+    # daily_slice_by_symbol below already fixed for the daily-bar side.
+    day_groups_by_symbol = {
+        symbol: dict(tuple(intraday.groupby(intraday.index.date)))
+        for symbol, intraday in intraday_by_symbol.items()
+    }
+
     trades = []
     trade_id = 0
     for day in all_days:
@@ -283,6 +297,13 @@ def simulate_strategy(
         # nothing. Once per (symbol, day) here instead.
         daily_slice_by_symbol = {
             symbol: _daily_as_of(daily_by_symbol[symbol], day) for symbol in intraday_by_symbol
+        }
+        # Cheap dict filtering (no DataFrame scanning) over the day groups
+        # already split out above - just "which of this symbol's already-
+        # separated days are before today".
+        prior_day_bars_by_symbol = {
+            symbol: {d: bars for d, bars in groups.items() if d < day}
+            for symbol, groups in day_groups_by_symbol.items()
         }
 
         # Union of this day's regular-session 5-min timestamps across every
@@ -385,7 +406,10 @@ def simulate_strategy(
                 if daily_slice is None:
                     continue
                 intraday_slice = _intraday_window(intraday, bar_ts)
-                detail = cycle._evaluate_filters_from_bars(daily_slice, intraday_slice, strategy_rules, side)
+                detail = cycle._evaluate_filters_from_bars(
+                    daily_slice, intraday_slice, strategy_rules, side,
+                    prior_day_bars=prior_day_bars_by_symbol[symbol],
+                )
                 if "error" in detail:
                     filter_stats["insufficient_data"] += 1
                     continue
