@@ -8,7 +8,6 @@ it never talks to IBKR directly, so it can safely run as a separate process.
 import json
 import subprocess
 import sys
-import threading
 from datetime import date
 from pathlib import Path
 
@@ -1071,48 +1070,20 @@ def api_delete_strategy(strategy_id: int, account_id: int = Depends(require_acco
 
 
 # --------------------------------------------------------------- backtests ---
-# Runs entirely in a background thread inside THIS process, unlike every
-# IBKR-touching endpoint above — backtest_engine.py only reads the local
-# historical-bar cache (src/backtest_data.py) plus yfinance for daily bars,
-# never talks to IBKR at run time, so there's no subprocess/client-id
-# concern here the way there is for trade.py etc.
+# Spawned as an isolated subprocess (run_backtest.py), like every
+# IBKR-touching endpoint elsewhere in this file — not for a client-id
+# concern (backtest_engine.py only reads the local historical-bar cache
+# plus yfinance for daily bars, never talks to IBKR at run time), but for
+# memory isolation: a full-universe backtest holds every cached symbol's
+# entire intraday history in memory for the whole simulation, which used
+# to run as a background thread INSIDE this dashboard process — so that
+# memory pressure landed directly on the one process everything else
+# (Account Holdings, trading controls, this backtest's own progress)
+# depends on staying up. A subprocess's memory is fully released back to
+# the OS the moment it exits, win or lose, regardless of how much it used.
 DEFAULT_BACKTEST_PORTFOLIO_VALUE = 100_000.0
 DEFAULT_BACKTEST_MAX_RISK_PCT = 1.0
 DEFAULT_BACKTEST_MAX_TRADES_PER_DAY = 5
-
-
-def _run_backtest_job(backtest_id: int, params: dict):
-    db.start_backtest(backtest_id)
-    try:
-        start_date = date.fromisoformat(params["start_date"])
-        end_date = date.fromisoformat(params["end_date"])
-        symbols = params["symbols"]
-        results = {}
-        for strategy_id in params["strategy_ids"]:
-            strategy = db.get_strategy(strategy_id)
-            if not strategy:
-                results[str(strategy_id)] = {"error": "Strategy not found"}
-                continue
-            rules = json.loads(strategy["rules_json"])
-            sim = backtest_engine.simulate_strategy(
-                rules, strategy["direction"], symbols, start_date, end_date,
-                params["portfolio_value"], params["max_risk_pct"], params["max_trades_per_day"],
-            )
-            pairs = perf.pair_trades(sim["trades"])
-            aggregate = perf.aggregate(pairs)
-            r_values = perf.compute_r_multiples(pairs)
-            histogram = [{"label": l, "count": c, "is_loss": loss} for l, c, loss in perf.histogram(r_values)]
-            results[str(strategy_id)] = {
-                "strategy_name": strategy["name"],
-                "direction": strategy["direction"],
-                "pairs": pairs,
-                "aggregate": aggregate,
-                "histogram": histogram,
-                "skipped_symbols": sim["skipped_symbols"],
-            }
-        db.finish_backtest(backtest_id, results)
-    except Exception as exc:  # noqa: BLE001 - a bad run must record failure, not crash the thread silently
-        db.fail_backtest(backtest_id, str(exc))
 
 
 @app.post("/api/backtests")
@@ -1152,7 +1123,11 @@ async def api_create_backtest(request: Request, account_id: int = Depends(requir
     }
     backtest_id = db.create_backtest(account_id, params)
     _log_account_action(account_id, user, action="create_backtest", backtest_id=backtest_id, strategy_ids=strategy_ids)
-    threading.Thread(target=_run_backtest_job, args=(backtest_id, params), daemon=True).start()
+    # Fire-and-forget (Popen, not run) - the run itself can take a while
+    # for a wide date range or many symbols, and this request must return
+    # immediately with the new backtest's id so the dashboard can start
+    # polling GET /api/backtests/{id} for progress.
+    subprocess.Popen([sys.executable, str(PROJECT_DIR / "run_backtest.py"), "--backtest-id", str(backtest_id)])
     return {"id": backtest_id}
 
 
