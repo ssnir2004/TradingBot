@@ -451,7 +451,7 @@ def simulate_strategy(
 
                     price = detail["price"]
                     stop_ref = detail["stop_ref"]
-                    initial_stop = stop_ref * 1.01 if side == "short" else stop_ref * 0.99
+                    initial_stop = cycle._resolve_initial_stop(stop_ref, strategy_rules, side)
                     r = (initial_stop - price) if side == "short" else (price - initial_stop)
                     if r <= 0:
                         continue

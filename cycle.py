@@ -630,6 +630,42 @@ def force_close_all(account_id: int, mode: str, ib, positions: list[dict]):
             )
 
 
+# Every strategy preset's exit.initial_stop_rule value, mapped to which
+# today's-session extreme it anchors off of ("lod"/"hod") and the
+# multiplier applied to it. Adding a new rule (e.g. a wider "hod_plus_2pct"
+# for a strategy that wants more room) only ever means adding an entry
+# here - both _evaluate_filters_from_bars (which reference price to read)
+# and _resolve_initial_stop (the offset actually applied) key off this same
+# table, so the two can never quietly disagree about what a rule means.
+INITIAL_STOP_RULES = {
+    "lod_minus_1pct": ("lod", 0.99),
+    "hod_plus_1pct": ("hod", 1.01),
+}
+
+
+def _initial_stop_reference_and_multiplier(rules: dict, side: str) -> tuple:
+    """Looks up exit.initial_stop_rule in INITIAL_STOP_RULES. Missing or
+    unrecognized (a typo, or a strategy predating this field) falls back to
+    the side's own natural rule - lod_minus_1pct for a long, hod_plus_1pct
+    for a short - so every existing strategy keeps behaving exactly as
+    before rather than silently ending up with no stop logic at all."""
+    default_rule = "lod_minus_1pct" if side == "long" else "hod_plus_1pct"
+    rule_name = rules.get("exit", {}).get("initial_stop_rule", default_rule)
+    return INITIAL_STOP_RULES.get(rule_name, INITIAL_STOP_RULES[default_rule])
+
+
+def _resolve_initial_stop(stop_ref: float, rules: dict, side: str) -> float:
+    """The offset half of exit.initial_stop_rule - turns the reference
+    price _evaluate_filters_from_bars already picked (per the same rule)
+    into the actual initial stop price. Shared by entry_scan (live) and
+    backtest_engine.simulate_strategy so a rule change can't quietly drift
+    between the two the way the old hardcoded `side`-only formula never
+    risked (it also never let the rule mean anything - see module-level
+    INITIAL_STOP_RULES comment)."""
+    _, multiplier = _initial_stop_reference_and_multiplier(rules, side)
+    return stop_ref * multiplier
+
+
 # ---------------------------------------------------------------- Step 8 ---
 def _evaluate_filters_from_bars(
     daily: pd.DataFrame, intraday: pd.DataFrame, rules: dict, side: str,
@@ -670,10 +706,13 @@ def _evaluate_filters_from_bars(
     to `side` (every existing strategy's rules omit it, so this is a
     no-op for them - D1-D3/I1-I3 and the trade itself always agree,
     unchanged). Only the signal-detection booleans read signal_side;
-    stop_ref (and therefore initial_stop/sizing/exits downstream) always
-    follows `side`, the real trade direction - a fade short still needs
-    a short's own stop (above price): same signal, opposite trade,
-    stop/target sized for the trade actually being placed."""
+    stop_ref (and therefore initial_stop/sizing/exits downstream) is keyed
+    off exit.initial_stop_rule (see _initial_stop_reference_and_multiplier),
+    which itself defaults to the real trade direction (`side`) when the
+    rule is absent/unrecognized - never signal_side either way: a fade
+    short still needs a short's own stop (above price): same signal,
+    opposite trade, stop/target sized for the trade actually being
+    placed."""
     daily_filters = rules["daily_filters"]
     intraday_filters = rules["intraday_filters"]
     signal_side = signal_side or side
@@ -729,11 +768,14 @@ def _evaluate_filters_from_bars(
             extreme_so_far = float(today_bars["Low"].iloc[:-1].min()) if len(today_bars) > 1 else float("inf")
             i2 = current_price < extreme_so_far  # new low-of-day
 
-    # stop_ref always follows the real TRADE direction (side), never
-    # signal_side - a faded short still needs a short's own stop
-    # (above price), even when the entry signal itself was detected
-    # using the long-style D1-D3/I1-I3 definitions above.
-    if side == "long":
+    # stop_ref's reference price comes from exit.initial_stop_rule (via
+    # side's own default when the rule is absent/unrecognized - see
+    # _initial_stop_reference_and_multiplier) - always keyed off the real
+    # TRADE direction (side), never signal_side - a faded short still needs
+    # a short's own stop (above price), even when the entry signal itself
+    # was detected using the long-style D1-D3/I1-I3 definitions above.
+    stop_reference, _ = _initial_stop_reference_and_multiplier(rules, side)
+    if stop_reference == "lod":
         stop_ref = float(regular_bars["Low"].min()) if not regular_bars.empty else float(today_bars["Low"].min())
     else:
         stop_ref = float(regular_bars["High"].max()) if not regular_bars.empty else float(today_bars["High"].max())
@@ -889,7 +931,7 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
 
         price = signal["price"]
         stop_ref = signal["stop_ref"]
-        initial_stop = stop_ref * 1.01 if side == "short" else stop_ref * 0.99
+        initial_stop = _resolve_initial_stop(stop_ref, rules, side)
         r = (initial_stop - price) if side == "short" else (price - initial_stop)
         if r <= 0:
             continue
