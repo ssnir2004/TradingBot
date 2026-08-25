@@ -68,6 +68,7 @@
         <span id="bt-status-badge" class="badge bg-secondary">...</span>
       </span>
     </div>
+    <div class="small text-muted px-3 pt-2" id="bt-results-meta"></div>
     <div class="card-body" id="bt-results-body"></div>
   </div>
 
@@ -100,6 +101,16 @@ function sideBadge(direction) {
   return direction === "short" ? '<span class="badge bg-danger">SHORT</span>' : '<span class="badge bg-primary">LONG</span>';
 }
 function fmtMoney(v) { return (v === null || v === undefined || v === "") ? "-" : `$${Number(v).toFixed(2)}`; }
+
+function fmtDateOnly(isoDate) {
+  if (!isoDate) return "-";
+  const [y, m, d] = isoDate.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+function fmtDateTime(iso) {
+  if (!iso) return "-";
+  return new Date(iso).toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
 
 function fmtDuration(startIso, endIso) {
   if (!startIso || !endIso) return null;
@@ -204,6 +215,40 @@ function renderFilterStats(fs) {
   </div>`;
 }
 
+const EXIT_REASON_LABELS = {
+  stop_loss: "Stop loss",
+  trailing_stop: "Trailing stop",
+  partial_profit: "Partial profit",
+  eod_close: "End of day",
+};
+
+function renderTrades(pairs) {
+  if (!pairs || !pairs.length) return "";
+  const rows = pairs.map(p => {
+    const pnlClass = p.pnl_usd > 0 ? "text-success" : (p.pnl_usd < 0 ? "text-danger" : "");
+    const reason = EXIT_REASON_LABELS[p.exit_reason] || p.exit_reason || "-";
+    return `<tr>
+      <td>${p.symbol}</td>
+      <td>${sideBadge(p.side)}</td>
+      <td class="mono">${fmtMoney(p.buy_price)}</td>
+      <td class="mono">${fmtMoney(p.sell_price)}</td>
+      <td>${p.size}</td>
+      <td class="mono ${pnlClass}">${fmtMoney(p.pnl_usd)}</td>
+      <td>${reason}</td>
+      <td class="small text-muted text-nowrap">${fmtDateTime(p.buy_time)} → ${fmtDateTime(p.sell_time)}</td>
+    </tr>`;
+  }).join("");
+  return `<div class="mt-3">
+    <div class="small text-muted mb-1">Trades (${pairs.length})</div>
+    <div style="max-height:280px; overflow-y:auto; overflow-x:auto;">
+      <table class="table table-sm mb-0">
+        <thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>Size</th><th>P&amp;L</th><th>Closed by</th><th>When</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
 function renderStrategyResult(strategyId, result) {
   if (result.error) {
     return `<div class="col-12 col-lg-6 mb-3"><div class="card"><div class="card-header">${result.strategy_name || `Strategy ${strategyId}`}</div>
@@ -220,6 +265,7 @@ function renderStrategyResult(strategyId, result) {
       <p>Avg winner: ${fmtMoney(a.avg_winner)} | Avg loser: ${fmtMoney(a.avg_loser)}</p>
       ${renderHistogram(result.histogram)}
       ${renderFilterStats(result.filter_stats)}
+      ${renderTrades(result.pairs)}
       ${skipped.length ? `<div class="small text-muted mt-2">${skipped.length} symbol(s) skipped (no cached data): ${skipped.slice(0, 10).map(s => s.symbol).join(", ")}${skipped.length > 10 ? "…" : ""}</div>` : ""}
     </div>
   </div></div>`;
@@ -234,6 +280,13 @@ function renderResults(detail) {
   const durationEl = document.getElementById("bt-duration");
   const duration = fmtDuration(detail.created_at, detail.finished_at);
   durationEl.textContent = duration ? `Took ${duration}` : "";
+
+  const params = detail.params || {};
+  const symbolCount = (params.symbols || []).length;
+  document.getElementById("bt-results-meta").textContent =
+    `Period: ${fmtDateOnly(params.start_date)} → ${fmtDateOnly(params.end_date)}`
+    + (symbolCount ? ` · ${symbolCount} symbol(s)` : "")
+    + ` · Run started ${fmtDateTime(detail.created_at)}`;
 
   const body = document.getElementById("bt-results-body");
   if (detail.status === "pending" || detail.status === "running") {

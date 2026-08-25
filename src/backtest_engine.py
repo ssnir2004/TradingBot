@@ -332,6 +332,7 @@ def simulate_strategy(
                         "fill_price": float(intraday_by_symbol[symbol].loc[bar_ts, "Close"])
                         if bar_ts in intraday_by_symbol[symbol].index else pos["entry_price"],
                         "size": pos["qty"], "timestamp_iso": bar_ts.isoformat(),
+                        "exit_reason": "eod_close",
                     })
                 open_positions.clear()
                 break
@@ -351,6 +352,7 @@ def simulate_strategy(
                         "id": trade_id, "symbol": symbol, "side": close_action,
                         "fill_price": pos["stop_price"], "size": pos["qty"],
                         "timestamp_iso": bar_ts.isoformat(),
+                        "exit_reason": "stop_loss" if pos["state"] == "pre_breakeven" else "trailing_stop",
                     })
                     del open_positions[symbol]
                     continue
@@ -370,6 +372,7 @@ def simulate_strategy(
                         trades.append({
                             "id": trade_id, "symbol": symbol, "side": close_action,
                             "fill_price": price, "size": close_qty, "timestamp_iso": bar_ts.isoformat(),
+                            "exit_reason": "partial_profit",
                         })
                         pos["qty"] -= close_qty
                         pos["stop_price"] = decision["new_stop_price"]
@@ -460,6 +463,7 @@ def simulate_strategy(
                 "id": trade_id, "symbol": symbol, "side": close_action,
                 "fill_price": float(last_bar["Close"]), "size": pos["qty"],
                 "timestamp_iso": day_bars.index[-1].isoformat(),
+                "exit_reason": "eod_close",
             })
 
     return {"trades": trades, "skipped_symbols": skipped, "filter_stats": filter_stats}
