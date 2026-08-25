@@ -1656,9 +1656,18 @@ def fail_orphaned_backtests():
     it. os.kill(pid, 0) (a real signal is never sent - see the os.kill
     docs) tells a genuinely still-running backtest (survived because
     KillMode=process was set, or this dashboard start wasn't a restart at
-    all) apart from one that's actually gone."""
+    all) apart from one that's actually gone.
+
+    Scoped to execution_mode = 'local' - a 'remote' row has no pid on this
+    machine at all (it's computing on someone's own PC via
+    backtest_worker.py), so the os.kill check below would always read it
+    as dead and fail it out from under a worker that's still happily
+    computing. requeue_abandoned_worker_backtests is the equivalent check
+    for those, using claimed_at's timeout instead of a pid."""
     with get_conn() as conn:
-        rows = conn.execute("SELECT id, pid FROM backtests WHERE status = 'running'").fetchall()
+        rows = conn.execute(
+            "SELECT id, pid FROM backtests WHERE status = 'running' AND execution_mode = 'local'"
+        ).fetchall()
     for row in rows:
         alive = False
         if row["pid"]:
