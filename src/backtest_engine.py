@@ -144,11 +144,6 @@ def _daily_as_of(daily: pd.DataFrame, day) -> pd.DataFrame | None:
     return pd.concat([sliced, sliced.iloc[[-1]]])
 
 
-def _intraday_window(intraday: pd.DataFrame, as_of: pd.Timestamp) -> pd.DataFrame:
-    window_start = as_of - pd.Timedelta(days=INTRADAY_LOOKBACK_DAYS)
-    return intraday[(intraday.index > window_start) & (intraday.index <= as_of)]
-
-
 def _parse_force_close_time(strategy_rules: dict) -> dt_time:
     raw = strategy_rules.get("time_filter", {}).get("force_close_et", "15:51")
     try:
@@ -395,58 +390,76 @@ def simulate_strategy(
                     del open_positions[symbol]
 
             # --- Step 2: scan for new entries across the whole universe ---
-            for symbol, intraday in intraday_by_symbol.items():
-                if symbol in open_positions:
-                    continue
-                if len(open_positions) >= max_concurrent or entries_today >= max_trades_per_day:
-                    break
-                if bar_ts not in intraday.index:
-                    continue
-                if not cycle._within_entry_window(strategy_rules, bar_ts.to_pydatetime()):
-                    continue
+            # _within_entry_window depends only on strategy_rules + bar_ts,
+            # never on the symbol - checking it once per tick here instead
+            # of once per (symbol, tick) skips the entire per-symbol loop
+            # below outright outside the entry window, rather than paying
+            # the same symbol-independent check up to ~500 times over.
+            if cycle._within_entry_window(strategy_rules, bar_ts.to_pydatetime()):
+                for symbol, intraday in intraday_by_symbol.items():
+                    if symbol in open_positions:
+                        continue
+                    if len(open_positions) >= max_concurrent or entries_today >= max_trades_per_day:
+                        break
+                    if bar_ts not in intraday.index:
+                        continue
 
-                daily_slice = daily_slice_by_symbol[symbol]
-                if daily_slice is None:
-                    continue
-                intraday_slice = _intraday_window(intraday, bar_ts)
-                detail = cycle._evaluate_filters_from_bars(
-                    daily_slice, intraday_slice, strategy_rules, side,
-                    prior_day_bars=prior_day_bars_by_symbol[symbol],
-                )
-                if "error" in detail:
-                    filter_stats["insufficient_data"] += 1
-                    continue
-                filter_stats["evaluations"] += 1
-                for cond in ("D1", "D2", "D3", "I1", "I2", "I3"):
-                    if detail.get(cond):
-                        filter_stats[cond] += 1
-                if not detail.get("pass"):
-                    continue
+                    daily_slice = daily_slice_by_symbol[symbol]
+                    if daily_slice is None:
+                        continue
+                    # _evaluate_filters_from_bars only ever reads TODAY's
+                    # bars off its `intraday` param once prior_day_bars is
+                    # supplied (always true here - see its own docstring);
+                    # the other ~24 days _intraday_window used to hand it
+                    # were dead weight on every single tick.
+                    # day_groups_by_symbol already has today's bars split
+                    # out for free (see prior_day_bars_by_symbol above) -
+                    # slicing that to <= bar_ts is a mask over ~1 day's
+                    # rows instead of ~25 days', on the single hottest call
+                    # in this whole loop (one evaluate call per symbol not
+                    # yet in a position, per tick, per day).
+                    today_bars_full = day_groups_by_symbol[symbol].get(day)
+                    if today_bars_full is None:
+                        continue
+                    intraday_slice = today_bars_full[today_bars_full.index <= bar_ts]
+                    detail = cycle._evaluate_filters_from_bars(
+                        daily_slice, intraday_slice, strategy_rules, side,
+                        prior_day_bars=prior_day_bars_by_symbol[symbol],
+                    )
+                    if "error" in detail:
+                        filter_stats["insufficient_data"] += 1
+                        continue
+                    filter_stats["evaluations"] += 1
+                    for cond in ("D1", "D2", "D3", "I1", "I2", "I3"):
+                        if detail.get(cond):
+                            filter_stats[cond] += 1
+                    if not detail.get("pass"):
+                        continue
 
-                price = detail["price"]
-                stop_ref = detail["stop_ref"]
-                initial_stop = stop_ref * 1.01 if side == "short" else stop_ref * 0.99
-                r = (initial_stop - price) if side == "short" else (price - initial_stop)
-                if r <= 0:
-                    continue
+                    price = detail["price"]
+                    stop_ref = detail["stop_ref"]
+                    initial_stop = stop_ref * 1.01 if side == "short" else stop_ref * 0.99
+                    r = (initial_stop - price) if side == "short" else (price - initial_stop)
+                    if r <= 0:
+                        continue
 
-                risk_dollars = portfolio_value * (max_risk_pct / 100)
-                size_by_risk = math.floor(risk_dollars / r)
-                size_by_cap = math.floor(portfolio_value * max_position_pct / price)
-                size = min(size_by_risk, size_by_cap)
-                if size < 1:
-                    continue
+                    risk_dollars = portfolio_value * (max_risk_pct / 100)
+                    size_by_risk = math.floor(risk_dollars / r)
+                    size_by_cap = math.floor(portfolio_value * max_position_pct / price)
+                    size = min(size_by_risk, size_by_cap)
+                    if size < 1:
+                        continue
 
-                trade_id += 1
-                trades.append({
-                    "id": trade_id, "symbol": symbol, "side": action,
-                    "fill_price": price, "size": size, "timestamp_iso": bar_ts.isoformat(),
-                })
-                open_positions[symbol] = {
-                    "side": side, "entry_price": price, "initial_stop": initial_stop,
-                    "stop_price": initial_stop, "qty": size, "state": "pre_breakeven",
-                }
-                entries_today += 1
+                    trade_id += 1
+                    trades.append({
+                        "id": trade_id, "symbol": symbol, "side": action,
+                        "fill_price": price, "size": size, "timestamp_iso": bar_ts.isoformat(),
+                    })
+                    open_positions[symbol] = {
+                        "side": side, "entry_price": price, "initial_stop": initial_stop,
+                        "stop_price": initial_stop, "qty": size, "state": "pre_breakeven",
+                    }
+                    entries_today += 1
 
         # Fallback for the rare case the force_close_time tick was never
         # reached this day (e.g. a holiday-shortened session that ends
