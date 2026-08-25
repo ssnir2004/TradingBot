@@ -53,6 +53,15 @@ from src.notify import notify
 
 PROJECT_DIR = Path(__file__).resolve().parent
 ET = ZoneInfo("America/New_York")
+# How far back _evaluate_entry_filters' own intraday yfinance fetch goes -
+# needs to comfortably cover I3's rvol lookback (rules.json's own
+# I3_rvol_lookback_days, 14 by default) in TRADING days, so calendar days
+# padded for weekends/holidays (14 trading days is ~19-20 calendar days).
+# backtest_engine.py's INTRADAY_LOOKBACK_DAYS reads this same constant
+# rather than hardcoding its own copy, so the two can't silently drift
+# out of sync the way "matches the live fetch" comments alone don't
+# actually enforce. Well within yfinance's ~60-day 5-min-interval cap.
+INTRADAY_FETCH_LOOKBACK_DAYS = 25
 SUBPROCESS_TIMEOUT = 40  # margin above ibkr_client.SETTLED_STATUSES_TIMEOUT (20s) plus connect/qualify/disconnect overhead
 
 TOO_EARLY_END = dt_time(9, 35)  # earliest any strategy's own time_filter may request entries from - see entry_scan
@@ -696,11 +705,27 @@ def _evaluate_filters_from_bars(daily: pd.DataFrame, intraday: pd.DataFrame, rul
             extreme_so_far = float(today_bars["Low"].iloc[:-1].min()) if len(today_bars) > 1 else float("inf")
             i2 = current_price < extreme_so_far  # new low-of-day
 
-    # I3: relative volume vs lookback-day average >= threshold (direction-agnostic)
+    # I3: relative volume >= threshold (direction-agnostic) - today's
+    # volume-so-far against the AVERAGE volume accumulated by this same
+    # time-of-day over the past I3_rvol_lookback_days trading days
+    # (apples-to-apples: partial session vs partial session). Comparing
+    # against those days' FULL-session volume instead (as this used to)
+    # made the threshold nearly unreachable early in the session - it
+    # required already having traded double a whole day's normal volume
+    # within the first half hour - and progressively easier for no real
+    # reason as the session went on, rather than a genuine "is trading
+    # unusually busy right now" signal. Needs intraday to reach back at
+    # least that many days - see INTRADAY_FETCH_LOOKBACK_DAYS.
     lookback = intraday_filters["I3_rvol_lookback_days"]
-    avg_daily_volume = float(daily["Volume"].iloc[-(lookback + 1):-1].mean())
+    as_of_time = intraday.index[-1].time()
+    prior_dates = sorted({d for d in intraday.index.date if d < as_of_date})[-lookback:]
+    prior_volume_by_this_time = [
+        float(intraday[(intraday.index.date == d) & (intraday.index.time <= as_of_time)]["Volume"].sum())
+        for d in prior_dates
+    ]
+    avg_volume_by_this_time = (sum(prior_volume_by_this_time) / len(prior_volume_by_this_time)) if prior_volume_by_this_time else 0.0
     today_volume_so_far = float(today_bars["Volume"].sum())
-    rvol = today_volume_so_far / avg_daily_volume if avg_daily_volume else 0.0
+    rvol = today_volume_so_far / avg_volume_by_this_time if avg_volume_by_this_time else 0.0
     i3 = rvol >= intraday_filters["I3_rvol_min"]
 
     passed = bool(d1 and d2 and d3 and i1 and i2 and i3)
@@ -730,7 +755,7 @@ def _evaluate_entry_filters(account_id: int, mode: str, ticker: str, rules: dict
     yahoo_symbol = ticker.replace(" ", "-")
     try:
         daily = yf.Ticker(yahoo_symbol).history(period="260d", interval="1d")
-        intraday = yf.Ticker(yahoo_symbol).history(period="5d", interval="5m", prepost=True)
+        intraday = yf.Ticker(yahoo_symbol).history(period=f"{INTRADAY_FETCH_LOOKBACK_DAYS}d", interval="5m", prepost=True)
         if not intraday.empty:
             intraday.index = intraday.index.tz_convert(ET)
         detail = _evaluate_filters_from_bars(daily, intraday, rules, side)

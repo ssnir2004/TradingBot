@@ -49,7 +49,12 @@ from src import backtest_data
 
 BAR_SIZE = "5 mins"
 DAILY_BAR_SIZE = "1 day"
-INTRADAY_LOOKBACK_DAYS = 5  # matches _evaluate_entry_filters' own "5d" yfinance window
+# Reads cycle's own constant rather than hardcoding a second copy of the
+# same number - this MUST match _evaluate_entry_filters' live intraday
+# fetch window (I3's relative-volume lookback needs that much history
+# available either way), and a hardcoded copy here is exactly the kind of
+# thing that quietly drifts out of sync with a comment alone to enforce it.
+INTRADAY_LOOKBACK_DAYS = cycle.INTRADAY_FETCH_LOOKBACK_DAYS
 _DAILY_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 
 # yfinance's own `timeout=` kwarg only bounds a single HTTP request; its
