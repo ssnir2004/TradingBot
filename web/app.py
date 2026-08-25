@@ -622,6 +622,19 @@ def api_broker_positions(mode: str = Depends(require_mode), account_id: int = De
         )
         pos["extended_hours"] = eh
 
+        try:
+            lp = cycle.get_last_price_quote(pos["symbol"])
+        except Exception:
+            lp = {"price": None, "change_pct": None, "ref_price": None}
+        # Same direction-aware treatment as extended_hours above - lp's
+        # change_pct is the symbol's raw move, so the dollar figure shown
+        # must go through the signed qty, not the raw price direction.
+        lp["pnl"] = (
+            (lp["price"] - lp["ref_price"]) * pos["qty"]
+            if lp.get("price") is not None and lp.get("ref_price") is not None else None
+        )
+        pos["last_price_quote"] = lp
+
         # A stop/take-profit that actually protects/exits THIS position
         # must trade in the closing direction (SELL for a long, BUY for a
         # short) - an STP/TRAIL/LMT order on the same symbol going the

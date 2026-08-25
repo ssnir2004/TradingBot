@@ -331,6 +331,34 @@ def get_extended_hours_quote(symbol: str) -> dict:
     return {"session": session, "price": last_price, "change_pct": change_pct, "ref_price": ref}
 
 
+def get_last_price_quote(symbol: str) -> dict:
+    """The most recent known price for `symbol`, whatever session it came
+    from - regular, pre-market, or after-hours - unlike _current_price
+    (regular session only, frozen outside 9:30-16:00 ET) or
+    get_extended_hours_quote (only populated inside the pre/post windows,
+    empty the rest of the time, including overnight when neither session
+    is active). This is the "last price + change" a broker app's
+    portfolio view always shows, 24/7, for the dashboard's Account
+    Holdings table. Returns {"price": float|None, "change_pct":
+    float|None, "ref_price": float|None} - all None on a fetch failure
+    or if there's truly nothing cached yet (a brand new symbol with no
+    trading history at all). change_pct/ref_price are relative to
+    yesterday's regular close, same convention as daily_pnl - like
+    get_extended_hours_quote, change_pct is the SYMBOL's raw move, not
+    any position's P&L; a caller multiplies by a signed qty for that."""
+    empty = {"price": None, "change_pct": None, "ref_price": None}
+    try:
+        bars = yf.Ticker(symbol.replace(" ", "-")).history(period="1d", interval="1m", prepost=True)
+    except Exception:
+        return dict(empty)
+    if bars.empty:
+        return dict(empty)
+    price = float(bars["Close"].iloc[-1])
+    ref = get_prior_close(symbol)
+    change_pct = ((price - ref) / ref * 100) if ref else None
+    return {"price": price, "change_pct": change_pct, "ref_price": ref}
+
+
 def _compute_rsi_series(closes: pd.Series, period: int) -> pd.Series:
     """Wilder's RSI (the standard definition — smoothed via an EWMA with
     alpha=1/period) at every bar of `closes`, not just the latest — NaN

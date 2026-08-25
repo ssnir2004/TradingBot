@@ -113,14 +113,15 @@
         <div id="broker-positions-error" class="text-danger small px-3"></div>
         <div class="card-body p-0">
           <table class="table table-sm mb-0">
-            <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Current</th><th data-bs-toggle="tooltip" title="שינוי ערך מאז סגירת אתמול">Daily P&amp;L</th><th>Unrealized P&amp;L</th><th data-bs-toggle="tooltip" data-bs-html="true" title="מחיר טרום-פתיחה (04:00-09:30 ET) או אפטר-מרקט (16:00-20:00 ET), אם קיים כרגע - ריק בשעות המסחר הרגילות.<br>הסכום ($) מחושב לפי (מחיר טרום/אפטר &minus; מחיר ייחוס) &times; כמות: ביחס לסגירת <u>אתמול</u> בטרום-פתיחה, וביחס לסגירת <u>היום</u> באפטר-מרקט.">Pre/Post</th><th data-bs-toggle="tooltip" title="הזמנת Stop אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש. אפשר להוסיף Stop קבוע (+ Add) או Stop נגרר לפי ATR (+ ATR trail) שנגזר מ-IBKR ומנוהל אוטומטית על ידי הברוקר.">Stop</th><th data-bs-toggle="tooltip" title="הזמנת Limit (Take Profit) אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש">Take Profit</th><th>Close</th></tr></thead>
-            <tbody id="broker-positions-body"><tr><td colspan="10" class="text-center text-muted">Loading…</td></tr></tbody>
+            <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Current</th><th data-bs-toggle="tooltip" title="שינוי ערך מאז סגירת אתמול">Daily P&amp;L</th><th>Unrealized P&amp;L</th><th data-bs-toggle="tooltip" data-bs-html="true" title="מחיר טרום-פתיחה (04:00-09:30 ET) או אפטר-מרקט (16:00-20:00 ET), אם קיים כרגע - ריק בשעות המסחר הרגילות.<br>הסכום ($) מחושב לפי (מחיר טרום/אפטר &minus; מחיר ייחוס) &times; כמות: ביחס לסגירת <u>אתמול</u> בטרום-פתיחה, וביחס לסגירת <u>היום</u> באפטר-מרקט.">Pre/Post</th><th data-bs-toggle="tooltip" data-bs-html="true" title="המחיר האחרון הידוע לכל אורך היממה - כמו LAST PRICE/CHNG באפליקציית IBKR - בניגוד ל-Pre/Post שמוצג רק בתוך חלונות הטרום/אפטר הספציפיים, כאן תמיד יש ערך (המחיר האחרון שנסחר, מכל שעה).<br>הסכום ($) מחושב לפי (מחיר אחרון &minus; סגירת אתמול) &times; כמות.">Last Price</th><th data-bs-toggle="tooltip" title="הזמנת Stop אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש. אפשר להוסיף Stop קבוע (+ Add) או Stop נגרר לפי ATR (+ ATR trail) שנגזר מ-IBKR ומנוהל אוטומטית על ידי הברוקר.">Stop</th><th data-bs-toggle="tooltip" title="הזמנת Limit (Take Profit) אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש">Take Profit</th><th>Close</th></tr></thead>
+            <tbody id="broker-positions-body"><tr><td colspan="11" class="text-center text-muted">Loading…</td></tr></tbody>
             <tfoot id="broker-positions-totals" class="d-none">
               <tr class="table-light fw-bold">
                 <td colspan="4" class="text-end">Total</td>
                 <td id="broker-positions-total-daily"></td>
                 <td id="broker-positions-total-unrealized"></td>
                 <td id="broker-positions-total-extended"></td>
+                <td id="broker-positions-total-lastprice"></td>
                 <td colspan="3"></td>
               </tr>
             </tfoot>
@@ -210,6 +211,15 @@ function extendedHoursCell(eh) {
   // too, since "which close is this measured against" isn't obvious from
   // the % alone (pre-market uses yesterday's, after-hours uses today's).
   return `${fmtPnl(eh.pnl)}<br><span class="small text-muted">${label}: ${fmtMoney(eh.price)}${pctText}${refText}</span>`;
+}
+
+function lastPriceCell(lp) {
+  if (!lp || lp.price === null || lp.price === undefined) return '<span class="text-muted">-</span>';
+  const pctText = (lp.change_pct === null || lp.change_pct === undefined) ? "" : ` (${lp.change_pct >= 0 ? "+" : ""}${lp.change_pct.toFixed(2)}%)`;
+  // Same qty/side-aware $ figure vs muted raw-price convention as
+  // extendedHoursCell above, for the same reason - only always-on,
+  // 24/7 instead of pre/post-only.
+  return `${fmtPnl(lp.pnl)}<br><span class="small text-muted">${fmtMoney(lp.price)}${pctText}</span>`;
 }
 
 function orderTypeBadge(orderType) {
@@ -325,7 +335,7 @@ async function refreshBrokerPositions() {
   const body = document.getElementById("broker-positions-body");
   const totals = document.getElementById("broker-positions-totals");
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="10" class="text-center text-muted">No holdings</td></tr>';
+    body.innerHTML = '<tr><td colspan="11" class="text-center text-muted">No holdings</td></tr>';
     totals.classList.add("d-none");
     return;
   }
@@ -340,6 +350,7 @@ async function refreshBrokerPositions() {
       <td>${symbolLink(p.symbol)}</td><td>${p.qty}</td><td>${fmtMoney(p.avg_cost)}</td>
       <td>${fmtMoney(p.current_price)}</td><td>${fmtPnl(p.daily_pnl)}</td><td>${fmtPnl(p.unrealized_pnl)}</td>
       <td>${extendedHoursCell(p.extended_hours)}</td>
+      <td>${lastPriceCell(p.last_price_quote)}</td>
       <td>${ordersCell(p.symbol, p.stop_orders, "stop", stopRemaining)}</td>
       <td>${ordersCell(p.symbol, p.take_profit_orders, "take_profit", tpRemaining)}</td>
       <td>
@@ -356,6 +367,9 @@ async function refreshBrokerPositions() {
   const extendedPnls = rows.map(p => p.extended_hours && p.extended_hours.pnl).filter(v => v !== null && v !== undefined);
   document.getElementById("broker-positions-total-extended").innerHTML =
     extendedPnls.length ? fmtPnl(extendedPnls.reduce((s, v) => s + v, 0)) : "-";
+  const lastPricePnls = rows.map(p => p.last_price_quote && p.last_price_quote.pnl).filter(v => v !== null && v !== undefined);
+  document.getElementById("broker-positions-total-lastprice").innerHTML =
+    lastPricePnls.length ? fmtPnl(lastPricePnls.reduce((s, v) => s + v, 0)) : "-";
   document.getElementById("broker-positions-total-daily").innerHTML = hasAny("daily_pnl") ? fmtPnl(sum("daily_pnl")) : "-";
   document.getElementById("broker-positions-total-unrealized").innerHTML = hasAny("unrealized_pnl") ? fmtPnl(sum("unrealized_pnl")) : "-";
   totals.classList.remove("d-none");
