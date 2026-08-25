@@ -1698,12 +1698,18 @@ def cancel_backtest(backtest_id: int, account_id: int) -> bool:
 
 
 def list_backtests(account_id: int, limit: int = 20) -> list[dict]:
-    """Summary rows only (no results_json - can be large with several
-    strategies' full trade logs) for the history list; fetch a single
-    backtest's full detail via get_backtest."""
+    """Summary rows for the history list (fetch a single backtest's full
+    detail, including its per-trade pairs, via get_backtest) - but each
+    row DOES carry total_pnl_usd, a lightweight sum of every strategy's
+    own aggregate.gross_pnl_usd within that run's results, so the list
+    can mark a run profitable/unprofitable at a glance without the
+    caller pulling every row's full trade log just to find that out.
+    results_json itself (which can be large, with several strategies'
+    full trade logs) is parsed here to compute that sum but never
+    included in the returned dict - only the derived total."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT id, account_id, status, params_json, error, created_at, finished_at FROM backtests "
+            "SELECT id, account_id, status, params_json, results_json, error, created_at, finished_at FROM backtests "
             "WHERE account_id = ? ORDER BY created_at DESC LIMIT ?",
             (account_id, limit),
         ).fetchall()
@@ -1711,6 +1717,19 @@ def list_backtests(account_id: int, limit: int = 20) -> list[dict]:
         for row in rows:
             result = dict(row)
             result["params"] = json.loads(result.pop("params_json"))
+            raw_results = result.pop("results_json")
+            result["total_pnl_usd"] = None
+            if raw_results:
+                try:
+                    parsed = json.loads(raw_results)
+                    pnls = [
+                        s["aggregate"]["gross_pnl_usd"] for s in parsed.values()
+                        if isinstance(s, dict) and "aggregate" in s
+                    ]
+                    if pnls:
+                        result["total_pnl_usd"] = round(sum(pnls), 2)
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    pass  # malformed/unexpected results_json - leave total_pnl_usd as None rather than fail the whole list
             results.append(result)
         return results
 

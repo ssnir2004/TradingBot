@@ -77,8 +77,8 @@
     <div class="card-header">History</div>
     <div class="card-body p-0">
       <table class="table table-sm mb-0">
-        <thead><tr><th>#</th><th>Strategies</th><th>Range</th><th>Status</th><th>Created</th><th>Duration</th><th></th></tr></thead>
-        <tbody id="bt-history-body"><tr><td colspan="7" class="text-center text-muted">Loading…</td></tr></tbody>
+        <thead><tr><th>#</th><th>Strategies</th><th>Range</th><th>Status</th><th>Result</th><th>Created</th><th>Duration</th><th></th></tr></thead>
+        <tbody id="bt-history-body"><tr><td colspan="8" class="text-center text-muted">Loading…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -355,7 +355,8 @@ async function pollBacktest(id) {
 async function refreshHistory() {
   const rows = await api("/api/backtests");
   const body = document.getElementById("bt-history-body");
-  if (!rows.length) { body.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No backtests yet</td></tr>'; return; }
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="8" class="text-center text-muted">No backtests yet</td></tr>'; return; }
+  const resultsShown = currentBacktestId !== null && !document.getElementById("bt-results-card").classList.contains("d-none");
   body.innerHTML = rows.map(r => {
     const names = r.params.strategy_ids.map(sid => {
       const s = strategiesById[sid];
@@ -364,21 +365,38 @@ async function refreshHistory() {
     }).join(", ");
     const badgeClass = r.status === "done" ? "bg-success" : r.status === "failed" ? "bg-danger" : "bg-secondary";
     const duration = fmtDuration(r.created_at, r.finished_at);
+    // total_pnl_usd is only ever set on a 'done' row (see list_backtests) -
+    // marks each run profitable/unprofitable at a glance, same green/red
+    // convention used everywhere else P&L shows up (see renderTrades).
+    const resultCell = r.total_pnl_usd == null
+      ? '<span class="text-muted small">-</span>'
+      : `<span class="badge ${r.total_pnl_usd > 0 ? "bg-success" : r.total_pnl_usd < 0 ? "bg-danger" : "bg-secondary"}">${fmtMoney(r.total_pnl_usd)}</span>`;
+    const viewOrHideBtn = resultsShown && r.id === currentBacktestId
+      ? `<button class="btn btn-sm btn-outline-secondary" onclick="hideResults()">Hide</button>`
+      : `<button class="btn btn-sm btn-outline-secondary" onclick="pollBacktest(${r.id})">View</button>`;
     return `<tr>
       <td>${r.id}</td>
       <td class="small">${names}</td>
       <td class="small mono">${r.params.start_date} → ${r.params.end_date}</td>
       <td><span class="badge ${badgeClass}">${r.status}</span></td>
+      <td>${resultCell}</td>
       <td class="small">${fmtDateTimeET(r.created_at)}</td>
       <td class="small">${duration || (r.status === "running" || r.status === "pending" ? "…" : "-")}</td>
       <td>
-        <button class="btn btn-sm btn-outline-secondary" onclick="pollBacktest(${r.id})">View</button>
+        ${viewOrHideBtn}
         ${r.status === "running" || r.status === "pending"
           ? `<button class="btn btn-sm btn-outline-warning" onclick="cancelBacktest(${r.id})">Cancel</button>`
           : `<button class="btn btn-sm btn-outline-danger" onclick="deleteBacktest(${r.id})">Delete</button>`}
       </td>
     </tr>`;
   }).join("");
+}
+
+function hideResults() {
+  if (pollHandle) clearInterval(pollHandle);
+  currentBacktestId = null;
+  document.getElementById("bt-results-card").classList.add("d-none");
+  refreshHistory();  // re-render so the row's own button flips back to "View"
 }
 
 async function deleteBacktest(id) {
@@ -390,9 +408,8 @@ async function deleteBacktest(id) {
     return;
   }
   if (id === currentBacktestId) {
-    if (pollHandle) clearInterval(pollHandle);
-    currentBacktestId = null;
-    document.getElementById("bt-results-card").classList.add("d-none");
+    hideResults();
+    return;
   }
   refreshHistory();
 }
