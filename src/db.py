@@ -1734,7 +1734,7 @@ def cancel_backtest(backtest_id: int, account_id: int) -> bool:
     return True
 
 
-def list_backtests(account_id: int, limit: int = 20) -> list[dict]:
+def list_backtests(account_id: int, limit: int = 100) -> list[dict]:
     """Summary rows for the history list (fetch a single backtest's full
     detail, including its per-trade pairs, via get_backtest) - but each
     row DOES carry total_pnl_usd, a lightweight sum of every strategy's
@@ -1749,7 +1749,7 @@ def list_backtests(account_id: int, limit: int = 20) -> list[dict]:
     total."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT id, account_id, status, params_json, results_json, error, execution_mode, created_at, finished_at FROM backtests "
+            "SELECT id, account_id, status, params_json, results_json, error, execution_mode, created_at, claimed_at, finished_at FROM backtests "
             "WHERE account_id = ? ORDER BY created_at DESC LIMIT ?",
             (account_id, limit),
         ).fetchall()

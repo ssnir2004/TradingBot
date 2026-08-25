@@ -352,7 +352,13 @@ function renderResults(detail) {
   cancelBtn.dataset.backtestId = detail.id;
 
   const durationEl = document.getElementById("bt-duration");
-  const duration = fmtDuration(detail.created_at, detail.finished_at);
+  // claimed_at (when a worker actually started on it) beats created_at (when
+  // it was queued) for "how long did this take" - a remote backtest can sit
+  // 'pending' for a while behind an earlier job before any worker claims it,
+  // and that queue wait isn't runtime. Only remote rows ever have claimed_at
+  // at all (see db.claim_next_backtest) - a local one falls back to created_at,
+  // unchanged from before, since its subprocess starts within moments of the request.
+  const duration = fmtDuration(detail.claimed_at || detail.created_at, detail.finished_at);
   durationEl.textContent = duration ? `Took ${duration}` : "";
 
   const params = detail.params || {};
@@ -406,7 +412,9 @@ async function refreshHistory() {
       return s.key ? `${s.key} (${s.name})` : s.name;
     }).join(", ");
     const badgeClass = r.status === "done" ? "bg-success" : r.status === "failed" ? "bg-danger" : "bg-secondary";
-    const duration = fmtDuration(r.created_at, r.finished_at);
+    // See renderResults' identical claimed_at-over-created_at comment above -
+    // same reasoning, same fallback, just the history-list row's own copy.
+    const duration = fmtDuration(r.claimed_at || r.created_at, r.finished_at);
     // total_pnl_usd is only ever set on a 'done' row (see list_backtests) -
     // marks each run profitable/unprofitable at a glance, same green/red
     // convention used everywhere else P&L shows up (see renderTrades).
