@@ -666,6 +666,13 @@ def init_db(seed_rules_path: Path | None = None):
         _migrate_add_column(conn, "positions", "hold_overnight", "INTEGER NOT NULL DEFAULT 0")
         _migrate_add_column(conn, "watchlist", "universe", "TEXT NOT NULL DEFAULT ',default,'")
         _migrate_add_column(conn, "watchlist", "direction", "TEXT NOT NULL DEFAULT 'long'")
+        # NULL for trades recorded the old way (trade.py/close_position.py's
+        # own immediate record_trade call, before this column existed) and
+        # for any row recorded since without a matching IBKR execution (e.g.
+        # a failed/cancelled order) - only ever set for a real fill, and
+        # only ever by cycle.sync_broker_fills, which uses it to avoid
+        # re-inserting a fill it has already synced. See record_trade.
+        _migrate_add_column(conn, "trades", "exec_id", "TEXT")
         # The shipped default strategy predates risk_rating and got the
         # generic 'moderate' default from the ALTER TABLE above — it's
         # actually the conservative baseline every preset above is loosened
@@ -1000,14 +1007,37 @@ def get_cycle_status(account_id: int, mode: str) -> dict:
 
 
 # ---------------------------------------------------------------- trades ---
-def record_trade(account_id: int, mode: str, symbol: str, side: str, size: int, fill_price: float, order_id, status: str):
+def record_trade(account_id: int, mode: str, symbol: str, side: str, size: int, fill_price: float, order_id, status: str,
+                  exec_id: str | None = None, timestamp_iso: str | None = None):
+    """exec_id (IBKR's own execution id) is optional - trade.py/
+    close_position.py pass it when they have it (letting cycle's periodic
+    broker-fills sync recognize the same fill later and skip it, instead
+    of double-logging), but it's fine to omit for a row with no matching
+    IBKR execution (e.g. an order that never filled). timestamp_iso lets
+    a synced-after-the-fact broker fill (see cycle.sync_broker_fills) use
+    the execution's own real fill time instead of whenever the sync
+    happened to run; omit it for "now" (the normal case, an immediate
+    trade.py/close_position.py call)."""
     _check_mode(mode)
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO trades (account_id, mode, timestamp_iso, symbol, side, size, fill_price, order_id, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (account_id, mode, datetime.now(ET).isoformat(timespec="seconds"), symbol, side, size, fill_price, order_id, status),
+            "INSERT INTO trades (account_id, mode, timestamp_iso, symbol, side, size, fill_price, order_id, status, exec_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (account_id, mode, timestamp_iso or datetime.now(ET).isoformat(timespec="seconds"),
+             symbol, side, size, fill_price, order_id, status, exec_id),
         )
+
+
+def trade_exec_id_exists(exec_id: str) -> bool:
+    """Whether a trade with this IBKR execution id has already been
+    recorded - IBKR's execId is globally unique, so this needs no
+    account/mode scoping. Lets cycle.sync_broker_fills skip an execution
+    it has already logged on an earlier periodic sync, or one trade.py/
+    close_position.py already recorded immediately when they placed the
+    order themselves, instead of double-counting the same fill."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT 1 FROM trades WHERE exec_id = ?", (exec_id,)).fetchone()
+        return row is not None
 
 
 def get_trades(account_id: int, mode: str, limit: int = 200, today_only: bool = False) -> list[dict]:

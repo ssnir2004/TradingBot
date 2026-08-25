@@ -957,11 +957,50 @@ def run_cycle(account_id: int, mode: str):
             ibkr.disconnect()
 
 
+def sync_broker_fills(ib, account_id: int, mode: str):
+    """Records any IBKR execution not already in the trades table - not
+    just the entries/exits trade.py and close_position.py place and log
+    themselves immediately, but ALSO fills that happen entirely at the
+    broker with no script of ours involved: a stop, take-profit, or ATR
+    trailing stop triggering, or a LIMIT+ATR bracket's entry filling
+    (open_position.py places it but never waits around for the fill).
+    Without this, Trade History only ever showed the subset of trades our
+    own scripts happened to be watching when they filled - a stop firing
+    while nobody's running a script for it would leave a position that
+    just vanishes from Account Holdings with no record of how or when it
+    actually closed.
+
+    reqExecutions() with no filter returns today's fills for the account
+    this connection is logged into - exactly matching this function's own
+    (account_id, mode) scoping, since each mode's Gateway connection is
+    already scoped to one IBKR account. execId is IBKR's own globally
+    unique id per execution - db.trade_exec_id_exists is what keeps this
+    idempotent across every periodic call, and consistent with a fill
+    trade.py/close_position.py already recorded immediately themselves
+    (they tag their own record_trade call with that same execId - see
+    their comments)."""
+    for fill in ib.reqExecutions():
+        exec_id = fill.execution.execId
+        if not exec_id or db.trade_exec_id_exists(exec_id):
+            continue
+        side = "BUY" if fill.execution.side == "BOT" else "SELL"
+        ts = fill.execution.time
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=ZoneInfo("UTC"))
+        db.record_trade(
+            account_id, mode, fill.contract.symbol, side, int(fill.execution.shares),
+            fill.execution.price, fill.execution.orderId, "Filled",
+            exec_id=exec_id, timestamp_iso=ts.astimezone(ET).isoformat(timespec="seconds"),
+        )
+
+
 def refresh_account_info(account_id: int, mode: str):
-    """Pulls net liquidation / cash balance / buying power from IBKR and
-    stores it in the DB for the dashboard. Runs on its own IBKR client id,
-    independent of market hours, so the dashboard has something to show
-    even outside the trading window."""
+    """Pulls net liquidation / cash balance / buying power, every real
+    position and resting order, and today's executions (see
+    sync_broker_fills) from IBKR and stores them in the DB for the
+    dashboard. Runs on its own IBKR client id, independent of market
+    hours, so the dashboard has something to show even outside the
+    trading window."""
     env = _env()
     ibkr = _connect(env, account_id, mode, ACCOUNT_REFRESH_CLIENT_ID)
     try:
@@ -1011,6 +1050,7 @@ def refresh_account_info(account_id: int, mode: str):
             if t.orderStatus.status not in ("Cancelled", "ApiCancelled", "Filled", "Inactive")
         ]
         db.update_broker_orders(account_id, mode, broker_orders)
+        sync_broker_fills(ib, account_id, mode)
     finally:
         ibkr.disconnect()
 

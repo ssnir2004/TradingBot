@@ -55,8 +55,11 @@ def main():
         status = trade.orderStatus.status
         fill_price = trade.orderStatus.avgFillPrice or 0
         order_id = trade.order.orderId
+        # See trade.py's identical comment - lets cycle.sync_broker_fills
+        # recognize this exact fill later and skip re-logging it.
+        exec_id = trade.fills[-1].execution.execId if trade.fills else None
 
-        db.record_trade(account_id, args.mode, symbol, action, close_qty, fill_price, order_id, status)
+        db.record_trade(account_id, args.mode, symbol, action, close_qty, fill_price, order_id, status, exec_id=exec_id)
 
         if status != "Filled" or fill_price <= 0:
             for entry in trade.log:

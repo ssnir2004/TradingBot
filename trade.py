@@ -40,8 +40,12 @@ def main():
         status = trade.orderStatus.status
         fill_price = trade.orderStatus.avgFillPrice or 0
         order_id = trade.order.orderId
+        # The final fill's execId, if any - lets cycle.sync_broker_fills'
+        # periodic pull of IBKR's own execution history recognize this
+        # exact fill later and skip it, instead of logging it a second time.
+        exec_id = trade.fills[-1].execution.execId if trade.fills else None
 
-        db.record_trade(account_id, args.mode, args.symbol, args.side, args.size, fill_price, order_id, status)
+        db.record_trade(account_id, args.mode, args.symbol, args.side, args.size, fill_price, order_id, status, exec_id=exec_id)
 
         # Success is defined by what actually happened, not by absence from
         # a denylist: only a real fill counts. Anything else (Cancelled,
