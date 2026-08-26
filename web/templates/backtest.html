@@ -255,8 +255,8 @@
     <div class="card-header">History <span class="text-muted small">— click a row to show/hide its results</span></div>
     <div class="card-body p-0">
       <table class="table table-sm mb-0">
-        <thead><tr><th>#</th><th>Strategies</th><th>Range</th><th>Days</th><th>Status</th><th>Result</th><th>Created</th><th>Duration</th><th></th></tr></thead>
-        <tbody id="bt-history-body"><tr><td colspan="9" class="text-center text-muted">Loading…</td></tr></tbody>
+        <thead><tr><th>#</th><th>Strategies</th><th>Range</th><th>Days</th><th>Portfolio value ($)</th><th>Status</th><th>Result</th><th>Created</th><th>Duration</th><th></th></tr></thead>
+        <tbody id="bt-history-body"><tr><td colspan="10" class="text-center text-muted">Loading…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -915,7 +915,7 @@ let lastHistoryRows = [];
 
 function renderHistoryTable() {
   const body = document.getElementById("bt-history-body");
-  if (!lastHistoryRows.length) { body.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No backtests yet</td></tr>'; return; }
+  if (!lastHistoryRows.length) { body.innerHTML = '<tr><td colspan="10" class="text-center text-muted">No backtests yet</td></tr>'; return; }
   const rowsHtml = [];
   for (const r of lastHistoryRows) {
     const names = r.params.strategy_ids.map(sid => {
@@ -935,6 +935,7 @@ function renderHistoryTable() {
       : `<span class="badge ${r.total_pnl_usd > 0 ? "bg-success" : r.total_pnl_usd < 0 ? "bg-danger" : "bg-secondary"}">${fmtMoney(r.total_pnl_usd)}</span>`;
     const expanded = expandedBacktestIds.has(r.id);
     const days = daysTested(r.params.start_date, r.params.end_date);
+    const portfolioValue = r.params.portfolio_value;
     // stopPropagation on the actions cell - clicking Cancel/Delete must not
     // also toggle the row's own expand/collapse underneath it.
     const actionBtn = IS_VIEWER ? "" : (r.status === "running" || r.status === "pending")
@@ -945,6 +946,7 @@ function renderHistoryTable() {
       <td class="small">${names}</td>
       <td class="small mono">${r.params.start_date} → ${r.params.end_date}</td>
       <td class="small mono">${days == null ? "-" : days}</td>
+      <td class="small mono">${portfolioValue == null ? "-" : `$${Number(portfolioValue).toLocaleString()}`}</td>
       <td><span class="badge ${badgeClass}">${r.status}</span>${r.execution_mode === "remote" ? ` <span class="badge bg-light text-dark border" title="Waiting for a worker to claim and run it">remote</span>` : ""}</td>
       <td>${resultCell}</td>
       <td class="small">${fmtDateTimeET(r.created_at)}</td>
@@ -953,7 +955,7 @@ function renderHistoryTable() {
     </tr>`);
     if (expanded) {
       const detail = expandedDetailCache[r.id];
-      rowsHtml.push(`<tr><td colspan="9" class="bg-body-tertiary">${detail ? renderResultsBody(detail) : '<p class="text-muted small mb-0">Loading…</p>'}</td></tr>`);
+      rowsHtml.push(`<tr><td colspan="10" class="bg-body-tertiary">${detail ? renderResultsBody(detail) : '<p class="text-muted small mb-0">Loading…</p>'}</td></tr>`);
     }
   }
   body.innerHTML = rowsHtml.join("");
