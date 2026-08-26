@@ -188,6 +188,24 @@ CREATE TABLE IF NOT EXISTS backtests (
     finished_at TEXT
 );
 
+-- One row per "Update backtest data" run from the dashboard's Backtest page
+-- (see run_backtest_data_fetch.py, spawned as an isolated subprocess for the
+-- exact same reason as backtests above - fetch_backtest_data.py needs its
+-- own IBKR Gateway client connection and can run for a long time, neither
+-- of which the always-on dashboard process should hold itself). No
+-- execution_mode/claimed_at - this only ever runs locally on the server
+-- (it needs the server's own IB Gateway), never on a remote worker.
+CREATE TABLE IF NOT EXISTS backtest_data_fetches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    summary_json TEXT,
+    error TEXT,
+    pid INTEGER,
+    created_at TEXT NOT NULL,
+    finished_at TEXT
+);
+
 -- One row per remote backtest worker token (see docs/worker.md and
 -- backtest_worker.py). Only the SHA-256 hash is ever stored - the raw
 -- token is shown to the user exactly once, at creation, the same pattern
@@ -210,6 +228,7 @@ INDEXES_SCHEMA = """
 CREATE INDEX IF NOT EXISTS idx_trades_account_mode_timestamp ON trades(account_id, mode, timestamp_iso);
 CREATE INDEX IF NOT EXISTS idx_decision_log_account_mode_timestamp ON decision_log(account_id, mode, timestamp_iso);
 CREATE INDEX IF NOT EXISTS idx_backtests_account_created ON backtests(account_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_backtest_data_fetches_account_created ON backtest_data_fetches(account_id, created_at);
 -- Blank ('') is the "no key set yet" default and can repeat across many
 -- rows - only an actually-chosen key (e.g. "L1", "S1") needs to be unique.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_strategies_key ON strategies(key) WHERE key != '';
@@ -1829,6 +1848,97 @@ def list_backtest_calendar_entries(account_id: int) -> list[dict]:
             "strategy_ids": params.get("strategy_ids") or [],
         })
     return out
+
+
+# ----------------------------------------------------- backtest data fetch ---
+# Mirrors the backtests table's own create/set_pid/start/finish/fail/
+# fail_orphaned lifecycle (see above) exactly, for the same reason: an
+# isolated subprocess (run_backtest_data_fetch.py) that the always-on
+# dashboard process spawns and tracks rather than running fetch_backtest_
+# data.py's long, IBKR-connected fetch in-process.
+def create_backtest_data_fetch(account_id: int) -> int:
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO backtest_data_fetches (account_id, status, created_at) VALUES (?, 'pending', ?)",
+            (account_id, now),
+        )
+        return cur.lastrowid
+
+
+def set_backtest_data_fetch_pid(fetch_id: int, pid: int):
+    with get_conn() as conn:
+        conn.execute("UPDATE backtest_data_fetches SET pid = ? WHERE id = ?", (pid, fetch_id))
+
+
+def start_backtest_data_fetch(fetch_id: int):
+    with get_conn() as conn:
+        conn.execute("UPDATE backtest_data_fetches SET status = 'running' WHERE id = ?", (fetch_id,))
+
+
+def finish_backtest_data_fetch(fetch_id: int, summary: dict):
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE backtest_data_fetches SET status = 'done', summary_json = ?, finished_at = ? WHERE id = ?",
+            (json.dumps(summary), now, fetch_id),
+        )
+
+
+def fail_backtest_data_fetch(fetch_id: int, error: str):
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE backtest_data_fetches SET status = 'failed', error = ?, finished_at = ? WHERE id = ?",
+            (error, now, fetch_id),
+        )
+
+
+def fail_orphaned_backtest_data_fetches():
+    """Called once from web/app.py's startup handler, right alongside
+    fail_orphaned_backtests - same os.kill(pid, 0) reasoning: a dashboard
+    restart kills this subprocess along with the rest of dashboard.
+    service's cgroup without it ever reaching its own except handler,
+    leaving the row stuck at 'running' forever otherwise."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id, pid FROM backtest_data_fetches WHERE status IN ('pending', 'running')").fetchall()
+    for row in rows:
+        alive = False
+        if row["pid"]:
+            try:
+                os.kill(row["pid"], 0)
+                alive = True
+            except ProcessLookupError:
+                alive = False
+            except PermissionError:
+                alive = True
+        if not alive:
+            fail_backtest_data_fetch(
+                row["id"],
+                "Orphaned - the dashboard restarted while this update was still running, which killed it. Re-run it.",
+            )
+
+
+def _backtest_data_fetch_row_to_dict(row) -> dict:
+    result = dict(row)
+    raw = result.pop("summary_json")
+    result["summary"] = json.loads(raw) if raw else None
+    return result
+
+
+def get_backtest_data_fetch(fetch_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM backtest_data_fetches WHERE id = ?", (fetch_id,)).fetchone()
+    return _backtest_data_fetch_row_to_dict(row) if row else None
+
+
+def get_latest_backtest_data_fetch(account_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM backtest_data_fetches WHERE account_id = ? ORDER BY created_at DESC LIMIT 1",
+            (account_id,),
+        ).fetchone()
+    return _backtest_data_fetch_row_to_dict(row) if row else None
 
 
 # --------------------------------------------------------- backtest worker ---

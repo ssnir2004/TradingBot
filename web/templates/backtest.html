@@ -45,6 +45,20 @@
 <div class="container-fluid px-4">
 
   <div class="card mb-4">
+    <div class="card-header">Backtest Data</div>
+    <div class="card-body">
+      <div class="small text-muted mb-3">
+        Refreshes this server's local intraday-bars cache from IBKR (<code>fetch_backtest_data.py</code>,
+        the same job that runs automatically every Sunday) — incremental, only fetches the gap since each
+        symbol's last cached bar, so this is safe to run any time to catch up after the bot's been off for
+        a few days. Needs the paper IBKR Gateway connected; checked automatically before starting.
+      </div>
+      <button id="btn-update-backtest-data" class="btn btn-outline-primary btn-sm">Update backtest data</button>
+      <span id="backtest-data-fetch-status" class="small ms-2"></span>
+    </div>
+  </div>
+
+  <div class="card mb-4">
     <div class="card-header">Remote Worker</div>
     <div class="card-body">
       <div class="small text-muted mb-3">
@@ -225,6 +239,65 @@ function fmtDuration(startIso, endIso) {
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
 }
+
+// --- Backtest Data (fetch_backtest_data.py "Update" button) ------------
+let bdfPollHandle = null;
+
+async function refreshBacktestDataFetchStatus() {
+  const btn = document.getElementById("btn-update-backtest-data");
+  const statusEl = document.getElementById("backtest-data-fetch-status");
+  let payload;
+  try {
+    payload = await api("/api/backtest_data_fetch/status");
+  } catch (e) {
+    btn.disabled = true;
+    statusEl.innerHTML = `<span class="text-danger">Could not check status: ${e.message}</span>`;
+    return;
+  }
+  const { gateway, latest } = payload;
+  const running = latest && (latest.status === "pending" || latest.status === "running");
+
+  if (running) {
+    btn.disabled = true;
+    statusEl.innerHTML = '<span class="text-muted">Updating… this can take a while for a large gap or the full S&amp;P 500 - feel free to leave this page.</span>';
+    if (!bdfPollHandle) bdfPollHandle = setInterval(refreshBacktestDataFetchStatus, 5000);
+    return;
+  }
+  if (bdfPollHandle) { clearInterval(bdfPollHandle); bdfPollHandle = null; }
+
+  const connected = gateway.gateway_active && gateway.port_listening;
+  btn.disabled = !connected;
+  if (!connected) {
+    statusEl.innerHTML = '<span class="text-danger">IBKR paper Gateway not connected — see the Gateway Connection control before updating.</span>';
+    return;
+  }
+  if (!latest) { statusEl.innerHTML = ""; return; }
+  if (latest.status === "done") {
+    const s = latest.summary;
+    statusEl.innerHTML = s
+      ? `<span class="text-success">Last update ${fmtDateTimeET(latest.finished_at)}: ${s.ok} updated, ${s.up_to_date} already current` +
+        (s.errors ? `, <span class="text-danger">${s.errors} error(s)</span>` : "") + `.</span>`
+      : `<span class="text-success">Last update done ${fmtDateTimeET(latest.finished_at)}.</span>`;
+  } else if (latest.status === "failed") {
+    statusEl.innerHTML = `<span class="text-danger">Last update failed: ${latest.error || "unknown error"}</span>`;
+  } else {
+    statusEl.innerHTML = "";
+  }
+}
+
+document.getElementById("btn-update-backtest-data").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-update-backtest-data");
+  const statusEl = document.getElementById("backtest-data-fetch-status");
+  btn.disabled = true;
+  try {
+    await api("/api/backtest_data_fetch", { method: "POST" });
+  } catch (e) {
+    statusEl.innerHTML = `<span class="text-danger">Could not start update: ${e.message}</span>`;
+    btn.disabled = false;
+    return;
+  }
+  refreshBacktestDataFetchStatus();
+});
 
 // A single flatpickr range picker (click-to-select on a calendar) rather
 // than two typed fields - explicit d/m/Y display format (not <input
@@ -941,6 +1014,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   refreshHistory();
   refreshCalendar();
   refreshStrategyReport();
+  refreshBacktestDataFetchStatus();
 });
 </script>
 </body>
