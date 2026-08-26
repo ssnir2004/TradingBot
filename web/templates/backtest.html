@@ -145,6 +145,7 @@
       <div id="cal-filter-notice" class="small mb-2"></div>
       <div id="cal-grid">Loading…</div>
       <div id="cal-legend" class="d-flex flex-wrap gap-3 mt-3"></div>
+      <div id="cal-dot-detail" class="small mt-3"></div>
     </div>
   </div>
 
@@ -521,11 +522,34 @@ function renderCalendarGrid(entries) {
     const key = toISODateLocal(year, monthIdx, d);
     const sids = byDate[key] ? Array.from(byDate[key]) : [];
     const dots = sids.map(sid =>
-      `<span class="cal-dot" style="background:${strategyColorById[sid] || "var(--series-other)"}" title="${strategyLabel(sid)}"></span>`
+      `<span class="cal-dot" style="background:${strategyColorById[sid] || "var(--series-other)"}; cursor:pointer" title="${strategyLabel(sid)} - click for the backtest(s) behind this dot" onclick="showCalendarDotDetail('${key}', '${sid}')"></span>`
     ).join("");
     cells += `<div class="cal-cell${key === todayKey ? " cal-today" : ""}"><div class="cal-daynum">${d}</div><div class="cal-dots">${dots}</div></div>`;
   }
   document.getElementById("cal-grid").innerHTML = `<div class="cal-grid">${cells}</div>`;
+}
+
+// Click a dot to see exactly which backtest(s) put it there - a dot only
+// ever means "this strategy's id appears in some backtest's strategy_ids,
+// and this day falls within that backtest's start_date..end_date range"
+// (see renderCalendarGrid's byDate build), which is easy to misread as "a
+// backtest ran on exactly this day" when the real backtest is a wider
+// multi-day range that merely covers it, or a since-cancelled/failed run
+// whose row is easy to miss while scanning History for this exact date.
+function showCalendarDotDetail(dateKey, sid) {
+  const el = document.getElementById("cal-dot-detail");
+  if (!calEntriesCache) { el.innerHTML = ""; return; }
+  const cur = new Date(dateKey + "T00:00:00");
+  const matches = calEntriesCache.filter(e => {
+    if (!e.start_date || !e.end_date) return false;
+    if (!e.strategy_ids.some(s => String(s) === sid)) return false;
+    return new Date(e.start_date + "T00:00:00") <= cur && cur <= new Date(e.end_date + "T00:00:00");
+  });
+  if (!matches.length) { el.innerHTML = '<p class="text-muted mb-0">No matching backtest found (try Refresh - this may be stale).</p>'; return; }
+  el.innerHTML = `<div class="border rounded p-2">
+    <div class="fw-bold mb-1">${strategyLabel(sid)} on ${dateKey} - from:</div>
+    ${matches.map(e => `<div>#${e.id} <span class="badge ${e.status === "done" ? "bg-success" : e.status === "failed" ? "bg-danger" : "bg-secondary"}">${e.status}</span> range ${e.start_date} → ${e.end_date}</div>`).join("")}
+  </div>`;
 }
 
 async function refreshCalendar() {
