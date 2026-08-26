@@ -1269,6 +1269,32 @@ DEFAULT_BACKTEST_MAX_TRADES_PER_DAY = 5
 DEFAULT_BACKTEST_COMMISSION_PER_TRADE = 1.5
 
 
+def _start_backtest(account_id: int, user: str, params: dict, execution_mode: str) -> int:
+    """Shared by api_create_backtest and api_retry_backtest: creates a new
+    backtests row for `params` and actually starts it (local subprocess,
+    or left 'pending' for a remote worker to claim). The retry path reuses
+    this to re-run a failed backtest's exact params as a brand-new row -
+    it never resets/reuses the failed row itself, so the original failure
+    stays in History as its own record instead of being overwritten."""
+    backtest_id = db.create_backtest(account_id, params, execution_mode=execution_mode)
+    _log_account_action(
+        account_id, user, action="create_backtest", backtest_id=backtest_id,
+        strategy_ids=params["strategy_ids"], execution_mode=execution_mode,
+    )
+    if execution_mode == "local":
+        # Fire-and-forget (Popen, not run) - the run itself can take a
+        # while for a wide date range or many symbols, and this request
+        # must return immediately with the new backtest's id so the
+        # dashboard can start polling GET /api/backtests/{id} for
+        # progress.
+        proc = subprocess.Popen([sys.executable, str(PROJECT_DIR / "run_backtest.py"), "--backtest-id", str(backtest_id)])
+        db.set_backtest_pid(backtest_id, proc.pid)
+    # execution_mode == "remote": the row stays 'pending' with no local
+    # process at all - a worker picks it up via POST /api/worker/claim
+    # whenever it next polls (see docs/worker.md).
+    return backtest_id
+
+
 @app.post("/api/backtests")
 async def api_create_backtest(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     body = await request.json()
@@ -1309,22 +1335,7 @@ async def api_create_backtest(request: Request, account_id: int = Depends(requir
         "max_trades_per_day": int(body.get("max_trades_per_day", DEFAULT_BACKTEST_MAX_TRADES_PER_DAY)),
         "commission_per_trade": float(body.get("commission_per_trade", DEFAULT_BACKTEST_COMMISSION_PER_TRADE)),
     }
-    backtest_id = db.create_backtest(account_id, params, execution_mode=execution_mode)
-    _log_account_action(
-        account_id, user, action="create_backtest", backtest_id=backtest_id,
-        strategy_ids=strategy_ids, execution_mode=execution_mode,
-    )
-    if execution_mode == "local":
-        # Fire-and-forget (Popen, not run) - the run itself can take a
-        # while for a wide date range or many symbols, and this request
-        # must return immediately with the new backtest's id so the
-        # dashboard can start polling GET /api/backtests/{id} for
-        # progress.
-        proc = subprocess.Popen([sys.executable, str(PROJECT_DIR / "run_backtest.py"), "--backtest-id", str(backtest_id)])
-        db.set_backtest_pid(backtest_id, proc.pid)
-    # execution_mode == "remote": the row stays 'pending' with no local
-    # process at all - a worker picks it up via POST /api/worker/claim
-    # whenever it next polls (see docs/worker.md).
+    backtest_id = _start_backtest(account_id, user, params, execution_mode)
     return {"id": backtest_id}
 
 
@@ -1473,6 +1484,18 @@ def api_cancel_backtest(backtest_id: int, account_id: int = Depends(require_acco
         raise HTTPException(status_code=404, detail="Backtest not found, or already finished")
     _log_account_action(account_id, user, action="cancel_backtest", backtest_id=backtest_id)
     return {"ok": True}
+
+
+@app.post("/api/backtests/{backtest_id}/retry")
+def api_retry_backtest(backtest_id: int, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    record = db.get_backtest(backtest_id)
+    if not record or record["account_id"] != account_id:
+        raise HTTPException(status_code=404, detail="Backtest not found")
+    if record["status"] != "failed":
+        raise HTTPException(status_code=400, detail="Only a failed backtest can be retried")
+    new_id = _start_backtest(account_id, user, record["params"], record["execution_mode"])
+    _log_account_action(account_id, user, action="retry_backtest", backtest_id=backtest_id, new_backtest_id=new_id)
+    return {"id": new_id}
 
 
 @app.get("/api/backtest_universe")

@@ -1143,6 +1143,11 @@ function renderHistoryTable() {
     const checkboxCell = IS_VIEWER ? "" : `<td onclick="event.stopPropagation()"><input type="checkbox" ${selectedHistoryIds.has(r.id) ? "checked" : ""} onchange="toggleHistorySelect(${r.id}, this.checked)"></td>`;
     const actionBtn = IS_VIEWER ? "" : (r.status === "running" || r.status === "pending")
       ? `<button class="btn btn-sm btn-outline-warning" onclick="event.stopPropagation(); cancelBacktest(${r.id})">Cancel</button>`
+      : r.status === "failed"
+      ? `<div class="d-flex gap-1">
+          <button class="btn btn-sm btn-outline-primary" onclick="event.stopPropagation(); retryBacktest(${r.id})">Retry</button>
+          <button class="btn btn-sm btn-outline-danger" onclick="event.stopPropagation(); deleteBacktest(${r.id})">Delete</button>
+        </div>`
       : `<button class="btn btn-sm btn-outline-danger" onclick="event.stopPropagation(); deleteBacktest(${r.id})">Delete</button>`;
     rowsHtml.push(`<tr style="cursor:pointer" onclick="toggleBacktestExpand(${r.id})">
       ${checkboxCell}
@@ -1288,6 +1293,20 @@ async function cancelBacktest(id) {
   }
   refreshHistory();
   refreshExpandedDetail(id);
+}
+
+// Re-runs a failed backtest's exact params as a brand-new row (see
+// api_retry_backtest) - the failed row itself is untouched, so it stays
+// in History as its own record of what went wrong, right alongside the
+// new attempt. pollBacktest opens the new run in the Results card and
+// refreshes History/Calendar for it, same as a fresh "Run backtest" click.
+async function retryBacktest(id) {
+  try {
+    const { id: newId } = await api(`/api/backtests/${id}/retry`, { method: "POST" });
+    pollBacktest(newId);
+  } catch (e) {
+    alert("Could not retry backtest: " + e.message);
+  }
 }
 
 document.getElementById("btn-cancel-current").addEventListener("click", (e) => {
