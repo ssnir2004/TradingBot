@@ -1213,6 +1213,16 @@ def api_list_backtests(account_id: int = Depends(require_account), user: str = D
     return db.list_backtests(account_id)
 
 
+# Registered ahead of /api/backtests/{backtest_id} - Starlette matches routes
+# in registration order and {backtest_id} (typed int only via FastAPI/
+# Pydantic validation AFTER the path already matched, not by the router
+# itself) would otherwise swallow this path first and 422 on "strategy_report"
+# failing to parse as an int, never reaching this route at all.
+@app.get("/api/backtests/strategy_report")
+def api_backtests_strategy_report(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    return perf.strategy_report(db.list_done_backtest_results(account_id))
+
+
 @app.get("/api/backtests/{backtest_id}")
 def api_get_backtest(backtest_id: int, account_id: int = Depends(require_account), user: str = Depends(require_user)):
     result = db.get_backtest(backtest_id)

@@ -1776,6 +1776,34 @@ def list_backtests(account_id: int, limit: int = 100) -> list[dict]:
         return results
 
 
+def list_done_backtest_results(account_id: int) -> list[dict]:
+    """Every 'done' backtest's params + full results, for src/perf.py's
+    strategy_report to pool trade pairs across every run of the same
+    strategy - unlike list_backtests' summary rows (results_json parsed
+    only far enough to sum one total_pnl_usd figure, never returned),
+    this needs the actual per-strategy trade pairs back out, so it's a
+    separate query rather than a mode on the existing one. Returns
+    [{"id", "created_at", "params", "results"}, ...], oldest first (so a
+    caller pooling by date range can just keep whichever entry it sees
+    last for a given key to prefer the newest re-run)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, params_json, results_json, created_at FROM backtests "
+            "WHERE account_id = ? AND status = 'done' AND results_json IS NOT NULL "
+            "ORDER BY created_at ASC",
+            (account_id,),
+        ).fetchall()
+    out = []
+    for row in rows:
+        try:
+            params = json.loads(row["params_json"])
+            results = json.loads(row["results_json"])
+        except (json.JSONDecodeError, TypeError):
+            continue  # malformed row - skip rather than fail the whole report
+        out.append({"id": row["id"], "created_at": row["created_at"], "params": params, "results": results})
+    return out
+
+
 # --------------------------------------------------------- backtest worker ---
 # A remote backtest worker (see docs/worker.md, backtest_worker.py) is a
 # script running on the user's OWN machine, polling this dashboard over

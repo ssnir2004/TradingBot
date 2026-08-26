@@ -109,6 +109,14 @@
   </div>
 
   <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span>Strategy Report <span class="text-muted small">— every completed backtest, pooled per strategy</span></span>
+      <button class="btn btn-sm btn-outline-secondary" onclick="refreshStrategyReport()">Refresh</button>
+    </div>
+    <div class="card-body" id="strategy-report-body">Loading…</div>
+  </div>
+
+  <div class="card mb-4">
     <div class="card-header">History</div>
     <div class="card-body p-0">
       <table class="table table-sm mb-0">
@@ -342,6 +350,39 @@ function renderStrategyResult(strategyId, result) {
   </div></div>`;
 }
 
+// Rough tripwire, not a real significance test - mirrors src/perf.py's
+// STRATEGY_REPORT_LOW_SAMPLE_TRADES so the badge threshold shown here always
+// matches what actually drove entry.low_sample server-side.
+const STRATEGY_REPORT_LOW_SAMPLE_TRADES = 30;
+
+function renderStrategyReportEntry(entry) {
+  const a = entry.aggregate;
+  const key = (strategiesById[entry.strategy_id] || {}).key;
+  const netClass = a.net_pnl_usd > 0 ? "text-success" : a.net_pnl_usd < 0 ? "text-danger" : "";
+  return `<div class="col-12 col-lg-6 mb-3"><div class="card h-100">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span>${key ? `<span class="badge bg-light text-dark border me-1">${key}</span>` : ""}${entry.strategy_name} ${sideBadge(entry.direction)}</span>
+      ${entry.low_sample ? `<span class="badge bg-warning text-dark" title="Fewer than ${STRATEGY_REPORT_LOW_SAMPLE_TRADES} pooled trades - too small a sample to draw real conclusions from yet">small sample</span>` : ""}
+    </div>
+    <div class="card-body">
+      <p class="small text-muted mb-2">${entry.backtests_included} backtest(s) pooled</p>
+      <p>Trades: <strong>${a.total_trades}</strong> (${a.wins}W / ${a.losses}L, ${a.win_rate_pct}%)</p>
+      <p>Net P&amp;L (after commission): <strong class="${netClass}">${fmtMoney(a.net_pnl_usd)}</strong></p>
+      <p>Profit factor: <strong>${a.profit_factor}</strong></p>
+      <p>Avg winner: ${fmtMoney(a.avg_winner)} | Avg loser: ${fmtMoney(a.avg_loser)}</p>
+      ${renderHistogram(entry.histogram)}
+      ${renderFilterStats(entry.filter_stats)}
+    </div>
+  </div></div>`;
+}
+
+async function refreshStrategyReport() {
+  const body = document.getElementById("strategy-report-body");
+  const rows = await api("/api/backtests/strategy_report");
+  if (!rows.length) { body.innerHTML = '<p class="small text-muted mb-0">No completed backtests yet.</p>'; return; }
+  body.innerHTML = `<div class="row">${rows.map(renderStrategyReportEntry).join("")}</div>`;
+}
+
 function renderResults(detail) {
   document.getElementById("bt-results-card").classList.remove("d-none");
   const badge = document.getElementById("bt-status-badge");
@@ -395,6 +436,7 @@ async function pollBacktest(id) {
     if (detail.status === "done" || detail.status === "failed") {
       clearInterval(pollHandle);
       refreshHistory();
+      if (detail.status === "done") refreshStrategyReport();  // a fresh 'done' result changes the pooled report; 'failed' has no results to pool
     }
   };
   await tick();
@@ -602,6 +644,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   await loadStrategyPicker();
   loadUniverseInfo();
   refreshHistory();
+  refreshStrategyReport();
 });
 </script>
 </body>
