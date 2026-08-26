@@ -427,6 +427,7 @@ function toggleCalendarStrategyFilter(sid) {
   if (calHiddenStrategyIds.has(sid)) calHiddenStrategyIds.delete(sid);
   else calHiddenStrategyIds.add(sid);
   if (calEntriesCache) renderCalendarGrid(calEntriesCache);
+  renderStrategyReport();  // same filter, no re-fetch - just re-render from the cached rows
 }
 
 function renderCalendarLegend(entries) {
@@ -533,11 +534,23 @@ function renderStrategyReportEntry(entry) {
   </div></div>`;
 }
 
-async function refreshStrategyReport() {
+let lastStrategyReportRows = [];
+
+// Shares the Calendar's own checkbox filter (calHiddenStrategyIds) - the
+// same "which strategies am I looking at" selection drives both views, so
+// checking off a strategy in the Calendar legend hides it here too rather
+// than needing a second, separate filter control that could disagree.
+function renderStrategyReport() {
   const body = document.getElementById("strategy-report-body");
-  const rows = await api("/api/backtests/strategy_report");
-  if (!rows.length) { body.innerHTML = '<p class="small text-muted mb-0">No completed backtests yet.</p>'; return; }
+  const rows = lastStrategyReportRows.filter(r => !calHiddenStrategyIds.has(String(r.strategy_id)));
+  if (!lastStrategyReportRows.length) { body.innerHTML = '<p class="small text-muted mb-0">No completed backtests yet.</p>'; return; }
+  if (!rows.length) { body.innerHTML = '<p class="small text-muted mb-0">Every strategy is hidden — check at least one in the Calendar above.</p>'; return; }
   body.innerHTML = `<div class="row">${rows.map(renderStrategyReportEntry).join("")}</div>`;
+}
+
+async function refreshStrategyReport() {
+  lastStrategyReportRows = await api("/api/backtests/strategy_report");
+  renderStrategyReport();
 }
 
 function renderResults(detail) {
