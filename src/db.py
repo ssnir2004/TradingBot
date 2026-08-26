@@ -1795,6 +1795,33 @@ def list_done_backtest_results(account_id: int) -> list[dict]:
     return out
 
 
+def list_backtest_calendar_entries(account_id: int) -> list[dict]:
+    """Every backtest's date range + strategy_ids + status, for the
+    Backtest page's calendar view - no limit (unlike list_backtests, tuned
+    for the recency-capped History table) and no results_json parsing at
+    all, since the calendar only ever needs "which days, which strategies,
+    what state" - never P&L."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, status, params_json FROM backtests WHERE account_id = ? ORDER BY created_at ASC",
+            (account_id,),
+        ).fetchall()
+    out = []
+    for row in rows:
+        try:
+            params = json.loads(row["params_json"])
+        except (json.JSONDecodeError, TypeError):
+            continue  # malformed row - skip rather than fail the whole calendar
+        out.append({
+            "id": row["id"],
+            "status": row["status"],
+            "start_date": params.get("start_date"),
+            "end_date": params.get("end_date"),
+            "strategy_ids": params.get("strategy_ids") or [],
+        })
+    return out
+
+
 # --------------------------------------------------------- backtest worker ---
 # A remote backtest worker (see docs/worker.md, backtest_worker.py) is a
 # script running on the user's OWN machine, polling this dashboard over

@@ -1223,6 +1223,12 @@ def api_backtests_strategy_report(account_id: int = Depends(require_account), us
     return perf.strategy_report(db.list_done_backtest_results(account_id))
 
 
+# Same registration-order reason as strategy_report above.
+@app.get("/api/backtests/calendar")
+def api_backtests_calendar(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    return db.list_backtest_calendar_entries(account_id)
+
+
 @app.get("/api/backtests/{backtest_id}")
 def api_get_backtest(backtest_id: int, account_id: int = Depends(require_account), user: str = Depends(require_user)):
     result = db.get_backtest(backtest_id)
