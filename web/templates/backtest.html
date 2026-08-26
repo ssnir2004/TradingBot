@@ -622,6 +622,7 @@ function renderResultsBody(detail) {
 async function pollBacktest(id) {
   if (pollHandle) clearInterval(pollHandle);
   currentBacktestId = id;
+  refreshHistory();  // shows the new row (pending/running) right away, not just once it reaches done/failed below
   const tick = async () => {
     const detail = await api(`/api/backtests/${id}`);
     renderResults(detail);
