@@ -15,6 +15,19 @@
   .hist-bar { height:100%; }
   .strategy-pick { cursor:pointer; }
 
+  /* Small yellow "i" info badge next to a control - hover/focus pops the
+     Bootstrap tooltip in its title attribute (see the DOMContentLoaded
+     init below). Yellow = dataviz skill's status "warning" step
+     (#fab219, validated >=3:1 contrast on both light and dark surfaces),
+     not the categorical palette - this is a status/info marker, not a
+     data series, so it deliberately doesn't borrow one of those hues. */
+  .info-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; border-radius: 50%;
+    background: #fab219; color: #000; font-size: .7rem; font-weight: bold; font-style: italic;
+    cursor: help; user-select: none;
+  }
+
   /* Categorical palette (dataviz skill's validated default, unmodified) -
      one fixed hue per strategy slot, light/dark steps of the same 8 hues.
      Past slot 8, a strategy folds into --series-other rather than
@@ -47,13 +60,8 @@
   <div class="card mb-4">
     <div class="card-header">Backtest Data</div>
     <div class="card-body">
-      <div class="small text-muted mb-3">
-        Refreshes this server's local intraday-bars cache from IBKR (<code>fetch_backtest_data.py</code>,
-        the same job that runs automatically every Sunday) — incremental, only fetches the gap since each
-        symbol's last cached bar, so this is safe to run any time to catch up after the bot's been off for
-        a few days. Needs the paper IBKR Gateway connected; checked automatically before starting.
-      </div>
       <button id="btn-update-backtest-data" class="btn btn-outline-primary btn-sm">Update backtest data</button>
+      <span class="info-icon" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="right" title="Refreshes this server's local intraday-bars cache from IBKR (<code>fetch_backtest_data.py</code>, the same job that runs automatically every Sunday) &mdash; incremental, only fetches the gap since each symbol's last cached bar, so this is safe to run any time to catch up after the bot's been off for a few days.<br><br>Needs the paper IBKR Gateway connected; checked automatically before starting.">i</span>
       <span id="backtest-data-fetch-status" class="small ms-2"></span>
     </div>
   </div>
@@ -1002,6 +1010,7 @@ document.getElementById("btn-generate-worker-token").addEventListener("click", a
 });
 
 document.addEventListener("DOMContentLoaded", async () => {
+  document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(el => new bootstrap.Tooltip(el));
   restoreRiskParams();
   restoreCalendarFilter();
   refreshWorkerTokens();
