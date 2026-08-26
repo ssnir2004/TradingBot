@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TradingBot — Users</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+{% include "_theme.html" %}
+<style>
+  body { background:#f4f6f8; }
+</style>
+</head>
+<body>
+{% include "_nav.html" %}
+
+<div class="container-fluid px-4">
+
+  <div class="card mb-4">
+    <div class="card-header">Add User</div>
+    <div class="card-body">
+      <div class="small text-muted mb-3">
+        <strong>full</strong> can use every page/action for their own account, same as any account today.
+        <strong>viewer</strong> gets read-only access to the Backtest page (history, strategy report,
+        calendar, a single result) and nothing else anywhere in the app — no trading controls, no
+        Gateway/IBKR settings, no ability to run/delete/cancel a backtest or generate worker tokens.
+      </div>
+      <div class="row g-2 align-items-end">
+        <div class="col-12 col-md-3">
+          <label class="form-label small">Username</label>
+          <input type="text" id="nu-username" class="form-control form-control-sm">
+        </div>
+        <div class="col-12 col-md-3">
+          <label class="form-label small">Password</label>
+          <input type="password" id="nu-password" class="form-control form-control-sm" placeholder="min. 8 characters">
+        </div>
+        <div class="col-6 col-md-2">
+          <label class="form-label small">Role</label>
+          <select id="nu-role" class="form-select form-select-sm">
+            <option value="viewer">viewer (read-only backtests)</option>
+            <option value="full">full</option>
+          </select>
+        </div>
+        <div class="col-6 col-md-2 form-check ms-2">
+          <input type="checkbox" class="form-check-input" id="nu-is-admin">
+          <label class="form-check-label small" for="nu-is-admin">Admin (can manage strategy templates &amp; users)</label>
+        </div>
+        <div class="col-12 col-md-2">
+          <button id="btn-create-user" class="btn btn-primary btn-sm w-100">Add user</button>
+        </div>
+      </div>
+      <div id="create-user-error" class="text-danger small mt-2"></div>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header">Accounts</div>
+    <div class="card-body p-0">
+      <table class="table table-sm mb-0">
+        <thead><tr><th>Username</th><th>Role</th><th>Admin</th><th></th></tr></thead>
+        <tbody id="users-body"><tr><td colspan="4" class="text-center text-muted">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+async function api(path, options) {
+  const res = await fetch(path, Object.assign({ credentials: "same-origin" }, options || {}));
+  if (res.status === 401) { window.location.href = "/login"; throw new Error("unauthenticated"); }
+  if (!res.ok) {
+    const text = await res.text();
+    try { throw new Error(JSON.parse(text).detail || text); } catch (e) { throw new Error(e.message || text); }
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+let currentUsername = null;
+
+async function refreshUsers() {
+  const rows = await api("/api/users");
+  const body = document.getElementById("users-body");
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No users</td></tr>'; return; }
+  body.innerHTML = rows.map(u => `
+    <tr>
+      <td>${u.username}${u.username === currentUsername ? ' <span class="badge bg-secondary">you</span>' : ""}</td>
+      <td>
+        <select class="form-select form-select-sm" style="width:auto;display:inline-block"
+                onchange="changeRole(${u.id}, this.value)" ${u.username === currentUsername ? "disabled" : ""}>
+          <option value="full" ${u.role === "full" ? "selected" : ""}>full</option>
+          <option value="viewer" ${u.role === "viewer" ? "selected" : ""}>viewer</option>
+        </select>
+      </td>
+      <td>${u.is_admin ? '<span class="badge bg-info text-dark">admin</span>' : ""}</td>
+      <td>
+        <button class="btn btn-sm btn-outline-danger" onclick="deleteUser(${u.id}, '${u.username}')"
+                ${u.username === currentUsername ? "disabled" : ""}>Delete</button>
+      </td>
+    </tr>`).join("");
+}
+
+async function changeRole(id, role) {
+  try {
+    await api(`/api/users/${id}/role`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role }),
+    });
+  } catch (e) {
+    alert("Could not change role: " + e.message);
+  }
+  refreshUsers();
+}
+
+async function deleteUser(id, username) {
+  if (!confirm(`Delete user "${username}"? This can't be undone.`)) return;
+  try {
+    await api(`/api/users/${id}`, { method: "DELETE" });
+  } catch (e) {
+    alert("Could not delete user: " + e.message);
+    return;
+  }
+  refreshUsers();
+}
+
+document.getElementById("btn-create-user").addEventListener("click", async () => {
+  const errorEl = document.getElementById("create-user-error");
+  errorEl.textContent = "";
+  const username = document.getElementById("nu-username").value.trim();
+  const password = document.getElementById("nu-password").value;
+  const role = document.getElementById("nu-role").value;
+  const is_admin = document.getElementById("nu-is-admin").checked;
+  if (!username) { errorEl.textContent = "Username is required."; return; }
+  try {
+    await api("/api/users", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password, role, is_admin }),
+    });
+  } catch (e) {
+    errorEl.textContent = e.message;
+    return;
+  }
+  document.getElementById("nu-username").value = "";
+  document.getElementById("nu-password").value = "";
+  document.getElementById("nu-is-admin").checked = false;
+  refreshUsers();
+});
+
+document.addEventListener("DOMContentLoaded", async () => {
+  const me = await api("/api/me");
+  currentUsername = me.username;
+  refreshUsers();
+});
+</script>
+</body>
+</html>

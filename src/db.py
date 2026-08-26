@@ -136,11 +136,21 @@ CREATE TABLE IF NOT EXISTS cycle_errors (
     traceback TEXT
 );
 
+-- role is a SEPARATE axis from is_admin: is_admin gates only the shared
+-- strategy-template catalog (create/edit/delete - see require_admin in
+-- web/app.py); role gates general app access. 'full' (default - every
+-- account before this column existed keeps behaving exactly as before)
+-- can use every page/action for its own account_id, same as always.
+-- 'viewer' is new: read-only access to the Backtest page's own data
+-- (history, strategy report, calendar, a single result) and nothing else
+-- anywhere in the app - see require_full_access in web/app.py for the
+-- enforcement side.
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    is_admin INTEGER NOT NULL DEFAULT 0
+    is_admin INTEGER NOT NULL DEFAULT 0,
+    role TEXT NOT NULL DEFAULT 'full'
 );
 
 -- ibkr_password is Fernet-encrypted (see src/secrets_store.py) — this
@@ -926,6 +936,7 @@ def init_db(seed_rules_path: Path | None = None):
 
         # --- multi-account migration (runs once, no-ops after) ---
         _migrate_add_column(conn, "users", "is_admin", "INTEGER NOT NULL DEFAULT 0")
+        _migrate_add_column(conn, "users", "role", "TEXT NOT NULL DEFAULT 'full'")
         admin_id = _resolve_or_create_admin(conn)
 
         # The admin's Gateway is already running on the ports the
@@ -2101,17 +2112,25 @@ def requeue_abandoned_worker_backtests(timeout_minutes: int = 15):
 
 
 # ------------------------------------------------------------------ users ---
-def create_user(username: str, password: str, is_admin: bool = False) -> int:
+VALID_USER_ROLES = ("full", "viewer")
+
+
+def create_user(username: str, password: str, is_admin: bool = False, role: str = "full") -> int:
     """Creates a new account and seeds it with a sane starting point: the
     conservative long default active (nothing active on the short side),
     mirroring what every fresh single-account deployment used to seed
     automatically before multi-account support existed."""
+    if role not in VALID_USER_ROLES:
+        raise ValueError(f"role must be one of {VALID_USER_ROLES}")
     password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
     with get_conn() as conn:
-        cur = conn.execute(
-            "INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)",
-            (username, password_hash, int(is_admin)),
-        )
+        try:
+            cur = conn.execute(
+                "INSERT INTO users (username, password_hash, is_admin, role) VALUES (?, ?, ?, ?)",
+                (username, password_hash, int(is_admin), role),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"Username '{username}' is already taken") from exc
         account_id = cur.lastrowid
         default_row = conn.execute(
             "SELECT id FROM strategies WHERE name = 'Long Breakout Conservative'"
@@ -2135,7 +2154,7 @@ def verify_user(username: str, password: str) -> bool:
 def get_user_by_username(username: str) -> dict | None:
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT id, username, is_admin FROM users WHERE username = ?", (username,)
+            "SELECT id, username, is_admin, role FROM users WHERE username = ?", (username,)
         ).fetchone()
         return dict(row) if row else None
 
@@ -2144,6 +2163,42 @@ def any_users_exist() -> bool:
     with get_conn() as conn:
         row = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()
         return row["c"] > 0
+
+
+# ------------------------------------------------------- user management ---
+# Admin-only "Users" page (web/app.py's /users + /api/users*) - the only
+# user-creation path before this was /setup, which only ever runs once and
+# always creates a single is_admin=True account (see DEPLOY.md). These let
+# an admin add more accounts afterward, in particular role='viewer' ones -
+# read-only access to the Backtest page and nothing else (see
+# require_full_access in web/app.py for the enforcement side).
+def list_users() -> list[dict]:
+    """No password_hash - this is for the admin-only Users page, which
+    never needs it and should never even transit it over HTTP."""
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute("SELECT id, username, is_admin, role FROM users ORDER BY id")]
+
+
+def set_user_role(user_id: int, role: str):
+    if role not in VALID_USER_ROLES:
+        raise ValueError(f"role must be one of {VALID_USER_ROLES}")
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+
+
+def delete_user(user_id: int):
+    """Refuses to delete the last remaining admin - would leave the whole
+    app with nobody able to reach the Users page (require_admin-gated) or
+    the strategy-template catalog (also require_admin) to fix it."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
+        if row is None:
+            return
+        if row["is_admin"]:
+            admin_count = conn.execute("SELECT COUNT(*) AS c FROM users WHERE is_admin = 1").fetchone()["c"]
+            if admin_count <= 1:
+                raise ValueError("Cannot delete the last remaining admin account")
+        conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
 
 
 def list_account_ids() -> list[int]:
