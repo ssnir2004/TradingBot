@@ -31,6 +31,17 @@ def ibkr_port(env: dict, account_id: int, mode: str) -> int:
     return ports["paper_port"] if mode == "paper" else ports["live_port"]
 
 
+def ibkr_account(env: dict, account_id: int, mode: str) -> str | None:
+    """Explicit IBKR account id to place orders against, or None to let
+    IBKRClient auto-detect it (only possible when that mode's Gateway login
+    is authorized for exactly one account - see IBKRClient.__init__). Only
+    the default account reads this from .env, matching ibkr_port's existing
+    single-account-deployment convention."""
+    if account_id != db.get_default_account_id():
+        return None
+    return env.get(f"{mode.upper()}_IBKR_ACCOUNT_ID") or None
+
+
 def risk_params(env: dict, account_id: int, mode: str) -> dict:
     """Per-param precedence: a value saved from the dashboard (DB) wins;
     otherwise falls back to .env; otherwise the hardcoded default. This way

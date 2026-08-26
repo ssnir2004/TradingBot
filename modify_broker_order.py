@@ -79,6 +79,7 @@ def main():
         env.get("IBKR_HOST", "127.0.0.1"),
         mode_config.ibkr_port(env, account_id, args.mode),
         int(env.get("IBKR_ORDER_CLIENT_ID", 15)),
+        account=mode_config.ibkr_account(env, account_id, args.mode),
     )
     try:
         ib = ibkr.ib
@@ -194,6 +195,8 @@ def main():
                 print(f"[{args.mode}] {symbol}: computed trail amount is not positive (ATR={atr})")
                 sys.exit(1)
             order = Order(action=action, totalQuantity=args.qty, orderType="TRAIL", auxPrice=trail_amount, transmit=True)
+            if getattr(ib, "account", None):
+                order.account = ib.account
             trade = ib.placeOrder(qualified, order)
             ib.sleep(1)
             print(f"[{args.mode}] {symbol}: atr_trailing_stop added: {args.qty} @ trail ${trail_amount:.2f} "
@@ -203,6 +206,8 @@ def main():
                 StopOrder(action, args.qty, round(args.price, 2)) if args.order_type == "stop"
                 else LimitOrder(action, args.qty, round(args.price, 2))
             )
+            if getattr(ib, "account", None):
+                order.account = ib.account
             trade = ib.placeOrder(qualified, order)
             ib.sleep(1)
             print(f"[{args.mode}] {symbol}: {args.order_type} added: {args.qty} @ ${args.price:.2f} "

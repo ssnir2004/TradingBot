@@ -81,6 +81,7 @@ def main():
         env.get("IBKR_HOST", "127.0.0.1"),
         mode_config.ibkr_port(env, account_id, args.mode),
         int(env.get("IBKR_MANUAL_ENTRY_CLIENT_ID", 16)),
+        account=mode_config.ibkr_account(env, account_id, args.mode),
     )
     try:
         ib = ibkr.ib
@@ -110,6 +111,8 @@ def main():
             action=args.side, totalQuantity=args.qty, orderType="LMT",
             lmtPrice=round(args.limit_price, 2), tif="DAY", transmit=False,
         )
+        if getattr(ib, "account", None):
+            parent.account = ib.account
         parent_trade = ib.placeOrder(qualified, parent)
         ib.sleep(0.5)
 
@@ -117,6 +120,8 @@ def main():
             action=close_action, totalQuantity=args.qty, orderType="TRAIL",
             auxPrice=trail_amount, parentId=parent_trade.order.orderId, transmit=True,
         )
+        if getattr(ib, "account", None):
+            stop.account = ib.account
         stop_trade = ib.placeOrder(qualified, stop)
         ib.sleep(0.5)
 
