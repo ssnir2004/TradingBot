@@ -254,7 +254,7 @@
   </div>
 
   <div class="card mb-4">
-    <div class="card-header">History <span class="text-muted small">— click a row to show/hide its results</span></div>
+    <div class="card-header">History <span class="text-muted small">— click a row to show/hide its results; filtered by the Calendar's strategy checkboxes above</span></div>
     <div class="card-body p-0">
       <table class="table table-sm mb-0">
         <thead><tr><th>#</th><th>Strategies</th><th>Range</th><th>Days</th><th>Portfolio value ($)</th><th>Status</th><th>Result</th><th>Created</th><th>Duration</th><th></th></tr></thead>
@@ -682,6 +682,7 @@ function toggleCalendarStrategyFilter(sid) {
   if (calEntriesCache) renderCalendarGrid(calEntriesCache);
   renderCalendarFilterNotice();
   renderStrategyReport();  // same filter, no re-fetch - just re-render from the cached rows
+  renderHistoryTable();    // same filter, no re-fetch - just re-render from the cached rows
 }
 
 // The filter persists across page loads (see restoreCalendarFilter) with
@@ -703,6 +704,7 @@ function showAllCalendarStrategies() {
   if (calEntriesCache) { renderCalendarGrid(calEntriesCache); renderCalendarLegend(calEntriesCache); }
   renderCalendarFilterNotice();
   renderStrategyReport();
+  renderHistoryTable();
 }
 
 function renderCalendarLegend(entries) {
@@ -937,11 +939,17 @@ let expandedBacktestIds = new Set();
 let expandedDetailCache = {};
 let lastHistoryRows = [];
 
+// Shares the Calendar's own checkbox filter (calHiddenStrategyIds), same as
+// renderStrategyReport - a run shows as long as AT LEAST ONE of its
+// strategies is still checked (a multi-strategy run isn't hidden just
+// because one of several strategies it covered got unchecked).
 function renderHistoryTable() {
   const body = document.getElementById("bt-history-body");
   if (!lastHistoryRows.length) { body.innerHTML = '<tr><td colspan="10" class="text-center text-muted">No backtests yet</td></tr>'; return; }
+  const visibleRows = lastHistoryRows.filter(r => r.params.strategy_ids.some(sid => !calHiddenStrategyIds.has(String(sid))));
+  if (!visibleRows.length) { body.innerHTML = '<tr><td colspan="10" class="text-center text-muted">Every strategy is hidden — check at least one in the Calendar above.</td></tr>'; return; }
   const rowsHtml = [];
-  for (const r of lastHistoryRows) {
+  for (const r of visibleRows) {
     const names = r.params.strategy_ids.map(sid => {
       const s = strategiesById[sid];
       if (!s) return `#${sid}`;
