@@ -79,6 +79,10 @@
     <div class="card-header">Backtest Data</div>
     <div class="card-body">
       <button id="btn-update-backtest-data" class="btn btn-outline-primary btn-sm">Update backtest data</button>
+      <select id="bdf-mode" class="form-select form-select-sm d-inline-block ms-2" style="width:auto" title="Which IBKR Gateway to fetch historical data through">
+        <option value="paper" selected>via Paper Gateway</option>
+        <option value="live">via Live Gateway</option>
+      </select>
       <button type="button" class="info-icon" style="border:none;" data-bs-toggle="modal" data-bs-target="#backtest-data-help-modal" aria-label="הסבר">i</button>
       <span id="backtest-data-fetch-status" class="small ms-2"></span>
       <div id="backtest-data-coverage" class="small text-muted mt-2"></div>
@@ -103,13 +107,21 @@
 
           <h6 class="fw-bold mt-4">שלבי הפעולה, בסדר שהם קורים</h6>
           <ol>
-            <li><strong>בדיקת חיבור.</strong> לפני שמתחיל כל דבר, המערכת בודקת שה-IBKR Gateway (בחשבון ה-paper) פעיל ומחובר בפועל.</li>
+            <li><strong>בדיקת חיבור.</strong> לפני שמתחיל כל דבר, המערכת בודקת שה-IBKR Gateway (בחשבון שנבחר ברשימה הנפתחת — Paper או Live) פעיל ומחובר בפועל.</li>
             <li><strong>אין חיבור? עצירה מיידית.</strong> אם החיבור לא תקין, תופיע הודעת שגיאה ברורה ולא מתבצעת שום פעולה נוספת — כדי לא להריץ עדכון שבטוח ייכשל.</li>
             <li><strong>יש חיבור — ההרצה מתחילה.</strong> מופעל תהליך נפרד (לא בתוך הדשבורד עצמו, כדי לא להאט אותו) שמתחבר ל-IBKR ועובר על כל סימבולי ה-S&amp;P 500.</li>
             <li><strong>עדכון מצטבר בלבד.</strong> לכל סימבול, מורד רק הפער מאז הנר האחרון שכבר שמור בקאש — לא מוריד הכל מחדש. בגלל זה זה בטוח להריץ בכל עת, גם אם רוב הנתונים כבר עדכניים.</li>
             <li><strong>מעקב חי.</strong> בזמן הריצה הכפתור מציג "Updating…" ומתעדכן אוטומטית כל 5 שניות. אפשר לצאת מהעמוד — הריצה ממשיכה ברקע בשרת.</li>
             <li><strong>סיכום בסיום.</strong> כשההרצה מסתיימת, מוצג כמה סימבולים עודכנו, כמה כבר היו עדכניים, וכמה נכשלו (אם בכלל) — וגם טווח התאריכים המעודכן של כל הנתונים בקאש.</li>
           </ol>
+
+          <h6 class="fw-bold mt-4">Paper או Live?</h6>
+          <p>
+            זו קריאת נתונים היסטוריים בלבד (לא נשלחות שום פקודות מסחר), ולכן בטוח להשתמש גם בחיבור ה-Live.
+            ברירת המחדל היא Paper. אם ההרצה נתקעת או איטית מאוד — זה סימן ששרתי הנתונים ההיסטוריים של IBKR
+            עבור חשבון ה-Paper מוצפים/לא מגיבים כרגע (תקלה ידועה בצד IBKR, לא בקוד) — במקרה כזה אפשר לבחור
+            "via Live Gateway" ברשימה הנפתחת ולנסות שוב.
+          </p>
 
           <h6 class="fw-bold mt-4">דברים שכדאי לדעת</h6>
           <ul>
@@ -332,11 +344,12 @@ let bdfPollHandle = null;
 
 async function refreshBacktestDataFetchStatus() {
   const btn = document.getElementById("btn-update-backtest-data");
+  const modeSel = document.getElementById("bdf-mode");
   const statusEl = document.getElementById("backtest-data-fetch-status");
   if (!btn || !statusEl) return;  // viewer - the Backtest Data card isn't rendered at all
   let payload;
   try {
-    payload = await api("/api/backtest_data_fetch/status");
+    payload = await api(`/api/backtest_data_fetch/status?mode=${modeSel.value}`);
   } catch (e) {
     btn.disabled = true;
     statusEl.innerHTML = `<span class="text-danger">Could not check status: ${e.message}</span>`;
@@ -347,27 +360,30 @@ async function refreshBacktestDataFetchStatus() {
 
   if (running) {
     btn.disabled = true;
-    statusEl.innerHTML = '<span class="text-muted">Updating… this can take a while for a large gap or the full S&amp;P 500 - feel free to leave this page.</span>';
+    modeSel.disabled = true;
+    statusEl.innerHTML = `<span class="text-muted">Updating via ${latest.mode || "paper"} Gateway… this can take a while for a large gap or the full S&amp;P 500 - feel free to leave this page.</span>`;
     if (!bdfPollHandle) bdfPollHandle = setInterval(refreshBacktestDataFetchStatus, 5000);
     return;
   }
   if (bdfPollHandle) { clearInterval(bdfPollHandle); bdfPollHandle = null; refreshBacktestDataCoverage(); }
+  modeSel.disabled = false;
 
   const connected = gateway.gateway_active && gateway.port_listening;
   btn.disabled = !connected;
   if (!connected) {
-    statusEl.innerHTML = '<span class="text-danger">IBKR paper Gateway not connected — see the Gateway Connection control before updating.</span>';
+    statusEl.innerHTML = `<span class="text-danger">IBKR ${modeSel.value} Gateway not connected — see the Gateway Connection control before updating.</span>`;
     return;
   }
   if (!latest) { statusEl.innerHTML = ""; return; }
   if (latest.status === "done") {
     const s = latest.summary;
+    const modeNote = ` <span class="text-muted">(via ${latest.mode || "paper"})</span>`;
     statusEl.innerHTML = s
       ? `<span class="text-success">Last update ${fmtDateTimeET(latest.finished_at)}: ${s.ok} updated, ${s.up_to_date} already current` +
-        (s.errors ? `, <span class="text-danger">${s.errors} error(s)</span>` : "") + `.</span>`
-      : `<span class="text-success">Last update done ${fmtDateTimeET(latest.finished_at)}.</span>`;
+        (s.errors ? `, <span class="text-danger">${s.errors} error(s)</span>` : "") + `.</span>${modeNote}`
+      : `<span class="text-success">Last update done ${fmtDateTimeET(latest.finished_at)}.</span>${modeNote}`;
   } else if (latest.status === "failed") {
-    statusEl.innerHTML = `<span class="text-danger">Last update failed: ${latest.error || "unknown error"}</span>`;
+    statusEl.innerHTML = `<span class="text-danger">Last update failed (via ${latest.mode || "paper"}): ${latest.error || "unknown error"}</span>`;
   } else {
     statusEl.innerHTML = "";
   }
@@ -403,10 +419,13 @@ async function refreshBacktestDataCoverage() {
 
 document.getElementById("btn-update-backtest-data")?.addEventListener("click", async () => {
   const btn = document.getElementById("btn-update-backtest-data");
+  const modeSel = document.getElementById("bdf-mode");
   const statusEl = document.getElementById("backtest-data-fetch-status");
   btn.disabled = true;
   try {
-    await api("/api/backtest_data_fetch", { method: "POST" });
+    await api("/api/backtest_data_fetch", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: modeSel.value }),
+    });
   } catch (e) {
     statusEl.innerHTML = `<span class="text-danger">Could not start update: ${e.message}</span>`;
     btn.disabled = false;

@@ -22,7 +22,7 @@ from src.sp500_tickers import SP500_TICKERS
 PROJECT_DIR = Path(__file__).resolve().parent
 
 
-def run(fetch_id: int):
+def run(fetch_id: int, mode: str = "paper"):
     record = db.get_backtest_data_fetch(fetch_id)
     if record is None:
         print(f"backtest data fetch {fetch_id}: not found")
@@ -30,7 +30,7 @@ def run(fetch_id: int):
     db.start_backtest_data_fetch(fetch_id)
     try:
         summary = fetch_backtest_data.run_fetch(
-            record["account_id"], list(SP500_TICKERS), fetch_backtest_data.DEFAULT_INITIAL_DURATION, "paper",
+            record["account_id"], list(SP500_TICKERS), fetch_backtest_data.DEFAULT_INITIAL_DURATION, mode,
         )
         db.finish_backtest_data_fetch(fetch_id, summary)
         print(
@@ -46,8 +46,9 @@ def main():
     db.init_db(seed_rules_path=PROJECT_DIR / "rules.json")
     parser = argparse.ArgumentParser()
     parser.add_argument("--fetch-id", type=int, required=True)
+    parser.add_argument("--mode", choices=["paper", "live"], default="paper")
     args = parser.parse_args()
-    run(args.fetch_id)
+    run(args.fetch_id, args.mode)
 
 
 if __name__ == "__main__":
