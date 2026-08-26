@@ -401,10 +401,15 @@ async function refreshActiveStrategyParams() {
     const r = full.rules;
     const d3Key = Object.keys(r.daily_filters).find(k => k.startsWith("D3_"));
     const rsiPeriod = r.intraday_filters.I2_rsi_period || 14;
+    const emaPeriod = r.intraday_filters.I2_ema_period || 9;
     const i2 = r.intraday_filters.I2_rsi_above !== undefined
       ? `RSI(${rsiPeriod})>${r.intraday_filters.I2_rsi_above}`
       : r.intraday_filters.I2_rsi_below !== undefined
       ? `RSI(${rsiPeriod})<${r.intraday_filters.I2_rsi_below}`
+      : r.intraday_filters.I2_ema_above
+      ? `above EMA(${emaPeriod})`
+      : r.intraday_filters.I2_ema_below
+      ? `below EMA(${emaPeriod})`
       : "new HOD/LOD";
     return `<div class="col-md-6">
       <div class="small mb-1"><strong>${label}: ${full.name}</strong>
