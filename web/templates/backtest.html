@@ -83,6 +83,7 @@
         <option value="paper" selected>via Paper Gateway</option>
         <option value="live">via Live Gateway</option>
       </select>
+      <button id="btn-cancel-backtest-data" class="btn btn-outline-warning btn-sm ms-2 d-none">Cancel</button>
       <button type="button" class="info-icon" style="border:none;" data-bs-toggle="modal" data-bs-target="#backtest-data-help-modal" aria-label="הסבר">i</button>
       <span id="backtest-data-fetch-status" class="small ms-2"></span>
       <div id="backtest-data-coverage" class="small text-muted mt-2"></div>
@@ -128,6 +129,7 @@
             <li>ההרצה יכולה לקחת זמן (494 סימבולים) — אין צורך לחכות בדף פתוח.</li>
             <li>לא מומלץ להריץ בסופ"ש — IBKR מוריד את חשבונות ה-paper לתחזוקה מסביבות חצות שישי ועד מוצ"ש/יום ראשון, וכל בקשה תיכשל באותו חלון (זה צפוי, לא תקלה).</li>
             <li>לא ניתן להריץ שתי עדכונים במקביל — אם כבר רץ אחד, הכפתור יהיה כבוי עד שיסתיים.</li>
+            <li>בזמן שריצה פעילה מופיע כפתור "Cancel" — לוחצים עליו כדי לעצור מיידית אם ההרצה תקועה או שכבר לא צריך אותה.</li>
           </ul>
         </div>
         <div class="modal-footer">
@@ -341,10 +343,12 @@ function daysTested(startDate, endDate) {
 
 // --- Backtest Data (fetch_backtest_data.py "Update" button) ------------
 let bdfPollHandle = null;
+let bdfRunningFetchId = null;  // read by the Cancel button's click handler below
 
 async function refreshBacktestDataFetchStatus() {
   const btn = document.getElementById("btn-update-backtest-data");
   const modeSel = document.getElementById("bdf-mode");
+  const cancelBtn = document.getElementById("btn-cancel-backtest-data");
   const statusEl = document.getElementById("backtest-data-fetch-status");
   if (!btn || !statusEl) return;  // viewer - the Backtest Data card isn't rendered at all
   let payload;
@@ -361,12 +365,17 @@ async function refreshBacktestDataFetchStatus() {
   if (running) {
     btn.disabled = true;
     modeSel.disabled = true;
+    bdfRunningFetchId = latest.id;
+    cancelBtn.classList.remove("d-none");
+    cancelBtn.disabled = false;
     statusEl.innerHTML = `<span class="text-muted">Updating via ${latest.mode || "paper"} Gateway… this can take a while for a large gap or the full S&amp;P 500 - feel free to leave this page.</span>`;
     if (!bdfPollHandle) bdfPollHandle = setInterval(refreshBacktestDataFetchStatus, 5000);
     return;
   }
   if (bdfPollHandle) { clearInterval(bdfPollHandle); bdfPollHandle = null; refreshBacktestDataCoverage(); }
   modeSel.disabled = false;
+  cancelBtn.classList.add("d-none");
+  bdfRunningFetchId = null;
 
   const connected = gateway.gateway_active && gateway.port_listening;
   btn.disabled = !connected;
@@ -429,6 +438,21 @@ document.getElementById("btn-update-backtest-data")?.addEventListener("click", a
   } catch (e) {
     statusEl.innerHTML = `<span class="text-danger">Could not start update: ${e.message}</span>`;
     btn.disabled = false;
+    return;
+  }
+  refreshBacktestDataFetchStatus();
+});
+
+document.getElementById("btn-cancel-backtest-data")?.addEventListener("click", async () => {
+  if (!bdfRunningFetchId) return;
+  const cancelBtn = document.getElementById("btn-cancel-backtest-data");
+  const statusEl = document.getElementById("backtest-data-fetch-status");
+  cancelBtn.disabled = true;
+  try {
+    await api(`/api/backtest_data_fetch/${bdfRunningFetchId}/cancel`, { method: "POST" });
+  } catch (e) {
+    statusEl.innerHTML = `<span class="text-danger">Could not cancel: ${e.message}</span>`;
+    cancelBtn.disabled = false;
     return;
   }
   refreshBacktestDataFetchStatus();

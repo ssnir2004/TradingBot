@@ -1898,6 +1898,28 @@ def fail_backtest_data_fetch(fetch_id: int, error: str):
         )
 
 
+def cancel_backtest_data_fetch(fetch_id: int, account_id: int) -> bool:
+    """Same pattern as cancel_backtest: kills the subprocess by its
+    recorded pid and marks the row failed, rather than leaving it to run
+    (and time out through IBKR's own retry/backoff loop, symbol by
+    symbol) for nothing after the user has already given up on it.
+    Returns False if there's no matching row for this account in a
+    cancellable state ('pending'/'running')."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT pid, status FROM backtest_data_fetches WHERE id = ? AND account_id = ?", (fetch_id, account_id)
+        ).fetchone()
+    if row is None or row["status"] not in ("pending", "running"):
+        return False
+    if row["pid"]:
+        try:
+            os.kill(row["pid"], signal.SIGTERM)
+        except ProcessLookupError:
+            pass  # already exited on its own - still fine to mark it failed below
+    fail_backtest_data_fetch(fetch_id, "Cancelled by user")
+    return True
+
+
 def fail_orphaned_backtest_data_fetches():
     """Called once from web/app.py's startup handler, right alongside
     fail_orphaned_backtests - same os.kill(pid, 0) reasoning: a dashboard

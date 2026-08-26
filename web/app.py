@@ -1412,6 +1412,14 @@ def api_get_backtest_data_fetch(fetch_id: int, account_id: int = Depends(require
     return record
 
 
+@app.post("/api/backtest_data_fetch/{fetch_id}/cancel")
+def api_cancel_backtest_data_fetch(fetch_id: int, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    if not db.cancel_backtest_data_fetch(fetch_id, account_id):
+        raise HTTPException(status_code=404, detail="Update not found, or already finished")
+    _log_account_action(account_id, user, action="cancel_backtest_data_fetch", fetch_id=fetch_id)
+    return {"ok": True}
+
+
 @app.get("/api/backtests/{backtest_id}")
 def api_get_backtest(backtest_id: int, account_id: int = Depends(require_account), user: str = Depends(require_user)):
     result = db.get_backtest(backtest_id)
