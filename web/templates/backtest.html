@@ -45,6 +45,29 @@
 <div class="container-fluid px-4">
 
   <div class="card mb-4">
+    <div class="card-header">Remote Worker</div>
+    <div class="card-body">
+      <div class="small text-muted mb-3">
+        A worker token lets a script running on your own computer (<code>backtest_worker.py</code>) poll
+        this dashboard for backtests marked "Run on remote worker" below, compute them locally, and report
+        the result back — freeing this server from the CPU/memory cost of running them itself. See
+        <code>docs/worker.md</code> for full setup. The raw token is shown only once, right after you
+        generate it — store it somewhere safe (e.g. your worker's local <code>.env</code> file); it can't
+        be retrieved again afterward.
+      </div>
+      <div id="worker-token-new" class="alert alert-success small d-none"></div>
+      <table class="table table-sm mb-3">
+        <thead><tr><th>Label</th><th>Created</th><th>Last seen</th><th></th></tr></thead>
+        <tbody id="worker-tokens-body"><tr><td colspan="4" class="text-center text-muted">Loading…</td></tr></tbody>
+      </table>
+      <div class="input-group input-group-sm" style="max-width:400px">
+        <input type="text" id="worker-token-label" class="form-control" placeholder="Label (e.g. &quot;home laptop&quot;)">
+        <button id="btn-generate-worker-token" class="btn btn-outline-primary">Generate token</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card mb-4">
     <div class="card-header">New Backtest</div>
     <div class="card-body">
       <div class="small text-muted mb-3">
@@ -85,36 +108,13 @@
       <div class="form-check mb-3">
         <input type="checkbox" class="form-check-input" id="bt-run-remote">
         <label class="form-check-label small" for="bt-run-remote">
-          Run on remote worker <span class="text-muted">(computes on your own machine instead of this server — see the Remote Worker card below)</span>
+          Run on remote worker <span class="text-muted">(computes on your own machine instead of this server — see the Remote Worker card above)</span>
         </label>
       </div>
 
       <div class="small text-muted mb-2" id="bt-universe-info">Checking available historical data…</div>
       <button id="btn-run-backtest" class="btn btn-primary btn-sm">Run backtest</button>
       <div id="bt-run-error" class="text-danger small mt-2"></div>
-    </div>
-  </div>
-
-  <div class="card mb-4">
-    <div class="card-header">Remote Worker</div>
-    <div class="card-body">
-      <div class="small text-muted mb-3">
-        A worker token lets a script running on your own computer (<code>backtest_worker.py</code>) poll
-        this dashboard for backtests marked "Run on remote worker" above, compute them locally, and report
-        the result back — freeing this server from the CPU/memory cost of running them itself. See
-        <code>docs/worker.md</code> for full setup. The raw token is shown only once, right after you
-        generate it — store it somewhere safe (e.g. your worker's local <code>.env</code> file); it can't
-        be retrieved again afterward.
-      </div>
-      <div id="worker-token-new" class="alert alert-success small d-none"></div>
-      <table class="table table-sm mb-3">
-        <thead><tr><th>Label</th><th>Created</th><th>Last seen</th><th></th></tr></thead>
-        <tbody id="worker-tokens-body"><tr><td colspan="4" class="text-center text-muted">Loading…</td></tr></tbody>
-      </table>
-      <div class="input-group input-group-sm" style="max-width:400px">
-        <input type="text" id="worker-token-label" class="form-control" placeholder="Label (e.g. &quot;home laptop&quot;)">
-        <button id="btn-generate-worker-token" class="btn btn-outline-primary">Generate token</button>
-      </div>
     </div>
   </div>
 
