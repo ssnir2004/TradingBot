@@ -74,6 +74,17 @@
   </div>
   {% endif %}
 
+  <div class="d-flex align-items-center gap-2 mb-3">
+    <a href="https://finviz.com/screener?v=111&f=exch_nasd%2Cta_beta_o1.5%2Cta_changeopen_u1%2Cta_gap_u3%2Cta_highlow20d_nh%2Cta_sma200_pa%2Cta_volatility_wo3&ft=4"
+       target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary"
+       data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="bottom"
+       title="<strong>סורק מניות מומנטום בפריצה חזקה</strong><br>&bull; מגמה חיובית (מעל SMA200)<br>&bull; גאפ משמעותי (&gt;3%)<br>&bull; חוזק תוך יומי (&gt;1%)<br>&bull; שיא 20 יום חדש<br>&bull; בטא גבוהה (מניות מהירות)<br>&bull; MACD כמנגנון דירוג">Momentum Breakout Scanner (Finviz) ↗</a>
+    <a href="https://finviz.com/screener?v=111&f=exch_nasd%2Cta_beta_o1.5%2Cta_changeopen_d1%2Cta_gap_d3%2Cta_highlow20d_nl%2Cta_sma200_pb%2Cta_volatility_wo3&ft=4"
+       target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary"
+       data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="bottom"
+       title="<strong>סורק מניות מומנטום בשבירה חזקה</strong><br>&bull; מגמה שלילית (מתחת ל-SMA200)<br>&bull; גאפ שלילי משמעותי (&lt;-3%)<br>&bull; חולשה תוך יומית (&lt;-1%)<br>&bull; שפל 20 יום חדש<br>&bull; בטא גבוהה (מניות מהירות)<br>&bull; MACD כמנגנון דירוג">Momentum Breakdown Scanner (Finviz) ↗</a>
+  </div>
+
   {% if not is_viewer %}
   <div class="card mb-4">
     <div class="card-header">Backtest Data</div>
