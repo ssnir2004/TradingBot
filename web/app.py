@@ -21,6 +21,7 @@ from fastapi.templating import Jinja2Templates
 import cycle
 import morning_prefilter
 from src import backtest_data, backtest_engine, db, gateway_provisioning, mode_config, perf, secrets_store
+from src.sp500_tickers import SP500_TICKERS
 from web import gateway_control
 from web.auth import COOKIE_NAME, make_session_cookie, read_session, require_user
 
@@ -1244,6 +1245,18 @@ def api_backtest_data_fetch_status(account_id: int = Depends(require_account), u
     return {
         "gateway": gateway_control.status("paper", _env()),
         "latest": db.get_latest_backtest_data_fetch(account_id),
+    }
+
+
+# Reads every cached symbol's full bars file (see cache_coverage_summary's
+# own docstring on why) - meant for page load / right after an update
+# finishes, never the 5s poll api_backtest_data_fetch_status serves, so it's
+# kept as its own endpoint rather than folded into that one.
+@app.get("/api/backtest_data_fetch/coverage")
+def api_backtest_data_fetch_coverage(user: str = Depends(require_user)):
+    return {
+        "coverage": backtest_data.cache_coverage_summary(backtest_engine.BAR_SIZE),
+        "symbols_total_expected": len(SP500_TICKERS),
     }
 
 

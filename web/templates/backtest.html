@@ -63,6 +63,7 @@
       <button id="btn-update-backtest-data" class="btn btn-outline-primary btn-sm">Update backtest data</button>
       <span class="info-icon" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="right" title="Refreshes this server's local intraday-bars cache from IBKR (<code>fetch_backtest_data.py</code>, the same job that runs automatically every Sunday) &mdash; incremental, only fetches the gap since each symbol's last cached bar, so this is safe to run any time to catch up after the bot's been off for a few days.<br><br>Needs the paper IBKR Gateway connected; checked automatically before starting.">i</span>
       <span id="backtest-data-fetch-status" class="small ms-2"></span>
+      <div id="backtest-data-coverage" class="small text-muted mt-2"></div>
     </div>
   </div>
 
@@ -271,7 +272,7 @@ async function refreshBacktestDataFetchStatus() {
     if (!bdfPollHandle) bdfPollHandle = setInterval(refreshBacktestDataFetchStatus, 5000);
     return;
   }
-  if (bdfPollHandle) { clearInterval(bdfPollHandle); bdfPollHandle = null; }
+  if (bdfPollHandle) { clearInterval(bdfPollHandle); bdfPollHandle = null; refreshBacktestDataCoverage(); }
 
   const connected = gateway.gateway_active && gateway.port_listening;
   btn.disabled = !connected;
@@ -291,6 +292,33 @@ async function refreshBacktestDataFetchStatus() {
   } else {
     statusEl.innerHTML = "";
   }
+}
+
+// Called on page load and right after an update finishes (see the
+// bdfPollHandle transition above) - NOT on the 5s poll while one is
+// running, since this reads every cached symbol's own file (see
+// cache_coverage_summary's docstring on that cost).
+async function refreshBacktestDataCoverage() {
+  const el = document.getElementById("backtest-data-coverage");
+  let payload;
+  try {
+    payload = await api("/api/backtest_data_fetch/coverage");
+  } catch (e) {
+    el.textContent = "";
+    return;
+  }
+  const { coverage, symbols_total_expected } = payload;
+  if (!coverage) { el.textContent = "No cached backtest data yet."; return; }
+  const from = coverage.earliest_from.slice(0, 10);
+  const to = coverage.latest_to.slice(0, 10);
+  const laggardTo = coverage.min_to.slice(0, 10);
+  // Only worth calling out when the laggard is actually behind the
+  // freshest symbol - otherwise every cached symbol already agrees on
+  // the same "to" date and a second, identical date would just be noise.
+  const laggardNote = laggardTo !== to
+    ? ` <span class="text-warning">(some symbols lag — fully caught up only through ${fmtDateOnly(laggardTo)})</span>`
+    : "";
+  el.innerHTML = `Cached: <strong>${fmtDateOnly(from)} → ${fmtDateOnly(to)}</strong> · ${coverage.symbols_cached}/${symbols_total_expected} symbols${laggardNote}`;
 }
 
 document.getElementById("btn-update-backtest-data").addEventListener("click", async () => {
@@ -1024,6 +1052,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   refreshCalendar();
   refreshStrategyReport();
   refreshBacktestDataFetchStatus();
+  refreshBacktestDataCoverage();
 });
 </script>
 </body>
