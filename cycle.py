@@ -76,8 +76,6 @@ ACCOUNT_REFRESH_CLIENT_ID = 5  # dedicated id so this never collides with the cy
 # a position must never go unmanaged just because its strategy is gone.
 # Matches rules.json's original defaults.
 _FALLBACK_EXIT_CFG = {
-    "partial_profit_trigger_R": 0.75,
-    "partial_profit_fraction": 0.3333,
     "breakeven_trigger_R": 1.0,
 }
 
@@ -392,6 +390,28 @@ def _compute_rsi(closes: pd.Series, period: int) -> float | None:
     return float(value) if pd.notna(value) else None
 
 
+def _compute_atr(daily: pd.DataFrame, period: int = 14) -> float | None:
+    """Wilder's ATR (Average True Range) as of the last COMPLETE trading
+    day in `daily` — excludes daily.iloc[-1] (today, still in progress),
+    same reasoning as the D2 filter's sma200/sma50 slicing just above: a
+    "how much does this stock normally move" figure shouldn't include a
+    partial day's not-yet-final range. None if there isn't enough history
+    yet for a meaningful value (needs period+1 complete days - the extra
+    one is consumed by the prior-close shift True Range itself needs)."""
+    completed = daily.iloc[:-1]
+    if len(completed) < period + 1:
+        return None
+    high, low, close = completed["High"], completed["Low"], completed["Close"]
+    prev_close = close.shift(1)
+    true_range = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    value = true_range.ewm(alpha=1 / period, min_periods=period, adjust=False).mean().iloc[-1]
+    return float(value) if pd.notna(value) else None
+
+
 def get_chart_rsi(bars: pd.DataFrame, period: int = 14) -> list[dict]:
     """RSI(period) at every bar of `bars` (as returned by get_chart_bars),
     for the dashboard's chart modal — same _compute_rsi_series math used
@@ -468,26 +488,28 @@ def get_chart_ma_series(symbol: str, bars: pd.DataFrame, interval: str) -> dict:
 
 
 # ---------------------------------------------------------------- Step 4 ---
-def _breakeven_or_partial_decision(pos: dict, exit_cfg: dict, r_multiple: float) -> dict:
+def _breakeven_decision(pos: dict, exit_cfg: dict, r_multiple: float) -> dict:
     """Pure decision logic for manage_position's "pre_breakeven" stage —
     shared with backtest_engine.py's exit simulator so both replay the
-    exact same thresholds instead of risking two copies drifting apart.
+    exact same threshold instead of risking two copies drifting apart.
     Only meaningful while pos["state"] == "pre_breakeven"; returns
-    {"action": "hold"} otherwise-uninteresting ticks."""
+    {"action": "hold"} otherwise-uninteresting ticks.
+
+    No partial-profit stage anymore (removed after backtest data across
+    every strategy showed its trades averaging barely more than a single
+    trade's commission - $6.35 avg vs $13.32 for a trade that instead
+    rode the trailing stop - so closing part of the position early was
+    costing more in forgone upside than it banked in locked-in profit):
+    the full position now holds untouched until r_multiple clears
+    breakeven_trigger_R, then moves straight to trailing."""
     if r_multiple >= exit_cfg["breakeven_trigger_R"]:
-        return {"action": "breakeven_flip", "new_stop_price": pos["entry_price"], "new_state": "post_breakeven_no_partial"}
-    if r_multiple >= exit_cfg["partial_profit_trigger_R"]:
-        side = pos.get("side", "long")
-        entry = pos["entry_price"]
-        close_qty = min(math.ceil(pos["qty"] * exit_cfg["partial_profit_fraction"]), pos["qty"])
-        new_stop_price = entry * 1.01 if side == "short" else entry * 0.99
-        return {"action": "partial_profit", "close_qty": close_qty, "new_stop_price": new_stop_price, "new_state": "post_breakeven_partial_done"}
+        return {"action": "breakeven_flip", "new_stop_price": pos["entry_price"], "new_state": "post_breakeven"}
     return {"action": "hold"}
 
 
 def _trailing_stop_decision(pos: dict, swing_stop_candidate: float | None) -> dict:
     """Pure decision logic for manage_position's "post_breakeven" trailing
-    stage — same sharing rationale as _breakeven_or_partial_decision. The
+    stage — same sharing rationale as _breakeven_decision. The
     caller computes swing_stop_candidate from whichever bars source is in
     play (live 5m bars via _find_latest_swing_low/high, or a backtest's
     historical bars) — this function only decides whether it's valid and
@@ -514,7 +536,7 @@ def manage_position(account_id: int, mode: str, ib, pos: dict, rules: dict) -> d
     deleted after it was opened). The two stages below are deliberately
     separate `if`s, not `if`/`elif` — a breakeven flip and a trailing-stop
     check can both fire on the same tick, since the state mutates in
-    between (see _breakeven_or_partial_decision/_trailing_stop_decision,
+    between (see _breakeven_decision/_trailing_stop_decision,
     the pure decision logic both stages and backtest_engine.py share)."""
     exit_cfg = rules["exit"]
     side = pos.get("side", "long")
@@ -533,7 +555,7 @@ def manage_position(account_id: int, mode: str, ib, pos: dict, rules: dict) -> d
     pos["r_multiple"] = r_multiple
 
     if pos["state"] == "pre_breakeven":
-        decision = _breakeven_or_partial_decision(pos, exit_cfg, r_multiple)
+        decision = _breakeven_decision(pos, exit_cfg, r_multiple)
         if decision["action"] == "breakeven_flip":
             _cancel_stop(ib, pos.get("stop_order_id"))
             pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], decision["new_stop_price"], side)
@@ -541,18 +563,6 @@ def manage_position(account_id: int, mode: str, ib, pos: dict, rules: dict) -> d
             pos["state"] = decision["new_state"]
             notify(f"[{mode.upper()}] BE {pos['symbol']}", f"stop -> ${entry:.2f}", "default")
             log_decision(account_id, mode, {"event": "breakeven_flip", "symbol": pos["symbol"], "side": side, "new_stop": entry})
-        elif decision["action"] == "partial_profit":
-            close_qty = decision["close_qty"]
-            if _market_close(account_id, mode, ib, pos["symbol"], close_qty, side):
-                remaining = pos["qty"] - close_qty
-                _cancel_stop(ib, pos.get("stop_order_id"))
-                pos["qty"] = remaining
-                if remaining > 0:
-                    pos["stop_order_id"] = _place_stop(ib, pos["symbol"], remaining, decision["new_stop_price"], side)
-                    pos["stop_price"] = decision["new_stop_price"]
-                pos["state"] = decision["new_state"]
-                notify(f"[{mode.upper()}] PARTIAL {pos['symbol']}", f"closed {close_qty}/{close_qty + remaining} @ ${price:.2f}", "default")
-                log_decision(account_id, mode, {"event": "partial_profit", "symbol": pos["symbol"], "side": side, "closed": close_qty, "price": price})
 
     if pos["state"].startswith("post_breakeven"):
         bars = _get_5min_bars(pos["symbol"])
@@ -630,20 +640,27 @@ def force_close_all(account_id: int, mode: str, ib, positions: list[dict]):
             )
 
 
-# Every strategy preset's exit.initial_stop_rule value, mapped to which
-# today's-session extreme it anchors off of ("lod"/"hod") and the
-# multiplier applied to it. Adding a new rule (e.g. a wider "hod_plus_2pct"
-# for a strategy that wants more room) only ever means adding an entry
-# here - both _evaluate_filters_from_bars (which reference price to read)
-# and _resolve_initial_stop (the offset actually applied) key off this same
-# table, so the two can never quietly disagree about what a rule means.
+# Every strategy preset's exit.initial_stop_rule value. Two kinds:
+#   - "session_extreme": a flat % offset off today's session low/high (the
+#     original rules) - same distance regardless of how volatile the stock
+#     actually is today.
+#   - "atr_multiple": entry price offset by atr_multiplier * ATR(14) off
+#     the last 14 COMPLETE trading days (see _compute_atr) - a wide-range
+#     stock gets a wider stop, a tight one a tighter stop, instead of the
+#     same flat 1% for both.
+# Adding a new rule only ever means adding an entry here - both
+# _evaluate_filters_from_bars (which reference price to read for a
+# session_extreme rule) and _resolve_initial_stop (the offset actually
+# applied) key off this same table, so the two can never quietly disagree
+# about what a rule means.
 INITIAL_STOP_RULES = {
-    "lod_minus_1pct": ("lod", 0.99),
-    "hod_plus_1pct": ("hod", 1.01),
+    "lod_minus_1pct": {"kind": "session_extreme", "reference": "lod", "multiplier": 0.99},
+    "hod_plus_1pct": {"kind": "session_extreme", "reference": "hod", "multiplier": 1.01},
+    "atr_2x": {"kind": "atr_multiple", "atr_multiplier": 2.0},
 }
 
 
-def _initial_stop_reference_and_multiplier(rules: dict, side: str) -> tuple:
+def _initial_stop_rule(rules: dict, side: str) -> dict:
     """Looks up exit.initial_stop_rule in INITIAL_STOP_RULES. Missing or
     unrecognized (a typo, or a strategy predating this field) falls back to
     the side's own natural rule - lod_minus_1pct for a long, hod_plus_1pct
@@ -654,16 +671,40 @@ def _initial_stop_reference_and_multiplier(rules: dict, side: str) -> tuple:
     return INITIAL_STOP_RULES.get(rule_name, INITIAL_STOP_RULES[default_rule])
 
 
-def _resolve_initial_stop(stop_ref: float, rules: dict, side: str) -> float:
-    """The offset half of exit.initial_stop_rule - turns the reference
-    price _evaluate_filters_from_bars already picked (per the same rule)
-    into the actual initial stop price. Shared by entry_scan (live) and
-    backtest_engine.simulate_strategy so a rule change can't quietly drift
-    between the two the way the old hardcoded `side`-only formula never
-    risked (it also never let the rule mean anything - see module-level
-    INITIAL_STOP_RULES comment)."""
-    _, multiplier = _initial_stop_reference_and_multiplier(rules, side)
-    return stop_ref * multiplier
+def _initial_stop_reference(rules: dict, side: str) -> str:
+    """The "lod"/"hod" half of a session_extreme rule, for
+    _evaluate_filters_from_bars to know which session extreme to read
+    stop_ref off of. An atr_multiple rule doesn't use stop_ref for its own
+    math (see _resolve_initial_stop) but stop_ref is still computed and
+    returned regardless - harmless, and keeps the detail dict's shape the
+    same no matter which rule is active - so this still needs an answer:
+    falls back to the side's own natural session extreme."""
+    rule = _initial_stop_rule(rules, side)
+    return rule.get("reference", "lod" if side == "long" else "hod")
+
+
+def _resolve_initial_stop(detail: dict, rules: dict, side: str) -> float:
+    """The offset half of exit.initial_stop_rule - turns the signal detail
+    _evaluate_filters_from_bars already produced (stop_ref/price/atr, all
+    per the same rule) into the actual initial stop price. Shared by
+    entry_scan (live) and backtest_engine.simulate_strategy so a rule
+    change can't quietly drift between the two.
+
+    A session_extreme rule applies its % multiplier to stop_ref, unchanged
+    from before. An atr_multiple rule instead offsets the ENTRY PRICE by
+    atr_multiplier * ATR - if ATR couldn't be computed (not enough daily
+    history), falls back to the side's own default session_extreme rule
+    rather than leaving the position with no stop logic at all, same
+    "never leave a position unmanaged" reasoning as the missing/
+    unrecognized-rule fallback above."""
+    rule = _initial_stop_rule(rules, side)
+    if rule["kind"] == "atr_multiple":
+        atr = detail.get("atr")
+        if atr:
+            price = detail["price"]
+            return (price - rule["atr_multiplier"] * atr) if side == "long" else (price + rule["atr_multiplier"] * atr)
+        rule = INITIAL_STOP_RULES["lod_minus_1pct" if side == "long" else "hod_plus_1pct"]
+    return detail["stop_ref"] * rule["multiplier"]
 
 
 # ---------------------------------------------------------------- Step 8 ---
@@ -707,7 +748,7 @@ def _evaluate_filters_from_bars(
     no-op for them - D1-D3/I1-I3 and the trade itself always agree,
     unchanged). Only the signal-detection booleans read signal_side;
     stop_ref (and therefore initial_stop/sizing/exits downstream) is keyed
-    off exit.initial_stop_rule (see _initial_stop_reference_and_multiplier),
+    off exit.initial_stop_rule (see _initial_stop_reference),
     which itself defaults to the real trade direction (`side`) when the
     rule is absent/unrecognized - never signal_side either way: a fade
     short still needs a short's own stop (above price): same signal,
@@ -770,15 +811,17 @@ def _evaluate_filters_from_bars(
 
     # stop_ref's reference price comes from exit.initial_stop_rule (via
     # side's own default when the rule is absent/unrecognized - see
-    # _initial_stop_reference_and_multiplier) - always keyed off the real
-    # TRADE direction (side), never signal_side - a faded short still needs
-    # a short's own stop (above price), even when the entry signal itself
-    # was detected using the long-style D1-D3/I1-I3 definitions above.
-    stop_reference, _ = _initial_stop_reference_and_multiplier(rules, side)
-    if stop_reference == "lod":
+    # _initial_stop_reference) - always keyed off the real TRADE direction
+    # (side), never signal_side - a faded short still needs a short's own
+    # stop (above price), even when the entry signal itself was detected
+    # using the long-style D1-D3/I1-I3 definitions above. Computed (and
+    # returned) unconditionally, even for an atr_multiple rule that won't
+    # actually use it - see _resolve_initial_stop.
+    if _initial_stop_reference(rules, side) == "lod":
         stop_ref = float(regular_bars["Low"].min()) if not regular_bars.empty else float(today_bars["Low"].min())
     else:
         stop_ref = float(regular_bars["High"].max()) if not regular_bars.empty else float(today_bars["High"].max())
+    atr_value = _compute_atr(daily)
 
     # I3: relative volume >= threshold (direction-agnostic) - today's
     # volume-so-far against the AVERAGE volume accumulated by this same
@@ -816,7 +859,7 @@ def _evaluate_filters_from_bars(
         "D1": bool(d1), "D2": bool(d2), "D3": bool(d3),
         "I1": bool(i1), "I2": bool(i2), "I3": bool(i3),
         "price": current_price, "rvol": rvol, "gap_pct": gap_pct,
-        "stop_ref": stop_ref, "rsi": rsi_value,
+        "stop_ref": stop_ref, "rsi": rsi_value, "atr": atr_value,
     }
 
 
@@ -930,8 +973,7 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
             continue
 
         price = signal["price"]
-        stop_ref = signal["stop_ref"]
-        initial_stop = _resolve_initial_stop(stop_ref, rules, side)
+        initial_stop = _resolve_initial_stop(signal, rules, side)
         r = (initial_stop - price) if side == "short" else (price - initial_stop)
         if r <= 0:
             continue

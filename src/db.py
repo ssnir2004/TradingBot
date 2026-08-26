@@ -290,8 +290,6 @@ EXTRA_STRATEGY_PRESETS = [
             "time_filter": {"earliest_entry_et": "10:05", "latest_entry_et": "15:30", "force_close_et": "15:51"},
             "exit": {
                 "initial_stop_rule": "lod_minus_1pct",
-                "partial_profit_trigger_R": 0.75,
-                "partial_profit_fraction": 0.3333,
                 "breakeven_trigger_R": 1.0,
                 "post_breakeven_trail": "swing_low_5m_2_2",
             },
@@ -344,8 +342,6 @@ EXTRA_STRATEGY_PRESETS = [
             "time_filter": {"earliest_entry_et": "10:05", "latest_entry_et": "15:30", "force_close_et": "15:51"},
             "exit": {
                 "initial_stop_rule": "lod_minus_1pct",
-                "partial_profit_trigger_R": 1.5,
-                "partial_profit_fraction": 0.3333,
                 "breakeven_trigger_R": 2.0,
                 "post_breakeven_trail": "swing_low_5m_2_2",
             },
@@ -410,8 +406,6 @@ EXTRA_STRATEGY_PRESETS = [
             "time_filter": {"earliest_entry_et": "10:05", "latest_entry_et": "15:30", "force_close_et": "15:51"},
             "exit": {
                 "initial_stop_rule": "hod_plus_1pct",
-                "partial_profit_trigger_R": 0.75,
-                "partial_profit_fraction": 0.3333,
                 "breakeven_trigger_R": 1.0,
                 "post_breakeven_trail": "swing_high_5m_2_2",
             },
@@ -480,8 +474,6 @@ EXTRA_STRATEGY_PRESETS = [
             "time_filter": {"earliest_entry_et": "09:35", "latest_entry_et": "15:30", "force_close_et": "15:51"},
             "exit": {
                 "initial_stop_rule": "hod_plus_1pct",
-                "partial_profit_trigger_R": 0.75,
-                "partial_profit_fraction": 0.3333,
                 "breakeven_trigger_R": 1.0,
                 "post_breakeven_trail": "swing_high_5m_2_2",
             },
@@ -557,8 +549,6 @@ EXTRA_STRATEGY_PRESETS = [
             "time_filter": {"earliest_entry_et": "10:05", "latest_entry_et": "15:30", "force_close_et": "15:51"},
             "exit": {
                 "initial_stop_rule": "lod_minus_1pct",
-                "partial_profit_trigger_R": 0.75,
-                "partial_profit_fraction": 0.3333,
                 "breakeven_trigger_R": 1.0,
                 "post_breakeven_trail": "swing_low_5m_2_2",
             },
@@ -633,8 +623,6 @@ EXTRA_STRATEGY_PRESETS = [
             "time_filter": {"earliest_entry_et": "10:05", "latest_entry_et": "15:30", "force_close_et": "15:51"},
             "exit": {
                 "initial_stop_rule": "hod_plus_1pct",
-                "partial_profit_trigger_R": 0.75,
-                "partial_profit_fraction": 0.3333,
                 "breakeven_trigger_R": 1.0,
                 "post_breakeven_trail": "swing_high_5m_2_2",
             },
@@ -696,8 +684,6 @@ EXTRA_STRATEGY_PRESETS = [
             "time_filter": {"earliest_entry_et": "10:05", "latest_entry_et": "15:30", "force_close_et": "15:51"},
             "exit": {
                 "initial_stop_rule": "lod_minus_1pct",
-                "partial_profit_trigger_R": 0.75,
-                "partial_profit_fraction": 0.3333,
                 "breakeven_trigger_R": 1.0,
                 "post_breakeven_trail": "swing_low_5m_2_2",
             },

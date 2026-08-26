@@ -29,11 +29,12 @@ def pair_trades(rows: list[dict]) -> list[dict]:
     BUY is its (lower, ideally) closing price, so the same subtraction
     still yields the profit.
 
-    A single open fill can be closed across SEVERAL opposite-side fills
-    (a partial-profit take followed by a later final close is the normal
-    case here, since every strategy preset configures one) - each pending
-    open row tracks its own unfilled remaining size, and a closing row
-    walks through pending open rows (oldest first) consuming from each
+    A single open fill can be closed across SEVERAL opposite-side fills -
+    a position opened before the partial-profit exit stage was removed can
+    still have historical trades shaped that way, and a manual/broker-side
+    partial close is always possible regardless of strategy config - each
+    pending open row tracks its own unfilled remaining size, and a closing
+    row walks through pending open rows (oldest first) consuming from each
     until its own size is exhausted, producing one pair per matched slice.
     An earlier version of this function popped the WHOLE open row on the
     first opposite-side match regardless of quantity - correct only when
