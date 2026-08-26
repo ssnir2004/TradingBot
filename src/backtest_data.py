@@ -83,3 +83,37 @@ def cache_coverage(symbol: str, bar_size: str) -> dict | None:
     if bars is None:
         return None
     return {"from": bars.index.min(), "to": bars.index.max(), "bar_count": len(bars)}
+
+
+def cache_coverage_summary(bar_size: str) -> dict | None:
+    """Aggregate date-range coverage across every currently-cached symbol at
+    this bar size, for the Backtest page's "Backtest Data" card - answers
+    "how up to date is my data, overall" without a caller reading every
+    symbol's own cache_coverage itself. None if nothing is cached yet.
+
+    latest_to is the single most recent bar seen anywhere; min_to is the
+    laggard - the latest date the WHOLE universe is guaranteed caught up
+    through, since even one symbol lagging behind means that (not
+    whichever symbol happens to be freshest) is the honest answer to "is
+    everything up to date." Reads every cached symbol's full pickle (same
+    cost every backtest run already pays for its own universe), so this is
+    meant to be called on page load / after an update finishes - not on a
+    tight poll."""
+    symbols = cached_symbols(bar_size)
+    if not symbols:
+        return None
+    froms, tos = [], []
+    for symbol in symbols:
+        coverage = cache_coverage(symbol, bar_size)
+        if coverage is None:
+            continue
+        froms.append(coverage["from"])
+        tos.append(coverage["to"])
+    if not froms:
+        return None
+    return {
+        "symbols_cached": len(froms),
+        "earliest_from": min(froms).isoformat(),
+        "latest_to": max(tos).isoformat(),
+        "min_to": min(tos).isoformat(),
+    }
