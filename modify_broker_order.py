@@ -36,7 +36,7 @@ from dotenv import dotenv_values
 from ib_async import LimitOrder, Order, Stock, StopOrder
 
 from src import db, mode_config
-from src.ibkr_client import IBKRClient
+from src.ibkr_client import IBKRClient, belongs_to_account, scoped_positions
 
 PROJECT_DIR = Path(__file__).resolve().parent
 # Same ATR bracket-stop math as open_position.py, reused here so an
@@ -91,7 +91,7 @@ def main():
                 sys.exit(1)
             ib.reqAllOpenOrders()
             ib.sleep(1)
-            match = next((t for t in ib.openTrades() if t.order.orderId == args.order_id), None)
+            match = next((t for t in ib.openTrades() if t.order.orderId == args.order_id and belongs_to_account(ib, t.order.account)), None)
             if match is None:
                 print(f"[{args.mode}] {symbol}: order {args.order_id} not found among open orders "
                       f"(already filled or cancelled?)")
@@ -106,7 +106,7 @@ def main():
                 sys.exit(1)
             ib.reqAllOpenOrders()
             ib.sleep(1)
-            match = next((t for t in ib.openTrades() if t.order.orderId == args.order_id), None)
+            match = next((t for t in ib.openTrades() if t.order.orderId == args.order_id and belongs_to_account(ib, t.order.account)), None)
             if match is None:
                 print(f"[{args.mode}] {symbol}: order {args.order_id} not found among open orders "
                       f"(already filled or cancelled?)")
@@ -139,7 +139,7 @@ def main():
             print(f"[{args.mode}] --price is required for --order-type stop/take_profit")
             sys.exit(1)
 
-        held = next((p for p in ib.positions() if p.contract.symbol == symbol and p.position != 0), None)
+        held = next((p for p in scoped_positions(ib) if p.contract.symbol == symbol and p.position != 0), None)
         if held is None:
             print(f"[{args.mode}] {symbol}: no open position in this account")
             sys.exit(1)
@@ -168,6 +168,7 @@ def main():
         allocated = sum(
             int(t.order.totalQuantity) for t in ib.openTrades()
             if t.contract.symbol == symbol and t.order.orderType in target_types and t.order.action == action
+            and belongs_to_account(ib, t.order.account)
         )
         if allocated + args.qty > held_qty:
             print(f"[{args.mode}] {symbol}: {allocated} share(s) already allocated across existing "

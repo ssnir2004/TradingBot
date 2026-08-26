@@ -48,7 +48,7 @@ from dotenv import dotenv_values
 from ib_async import Stock, StopOrder
 
 from src import db, mode_config
-from src.ibkr_client import IBKRClient
+from src.ibkr_client import IBKRClient, belongs_to_account, scoped_positions
 from src.notify import notify
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -122,7 +122,7 @@ def check_stop_outs(account_id: int, mode: str, ib, positions: list[dict]) -> li
         return positions
 
     cutoff = datetime.now(ET) - timedelta(hours=1)
-    fills = ib.fills()
+    fills = [f for f in ib.fills() if belongs_to_account(ib, f.execution.acctNumber)]
     stopped_symbols = set()
 
     for pos in positions:
@@ -193,7 +193,7 @@ def _broker_position(ib, symbol: str) -> dict | None:
     go through) after that deadline. This is the ground truth to check
     before assuming a "not filled" subprocess result means nothing
     happened at the broker."""
-    for p in ib.positions():
+    for p in scoped_positions(ib):
         if p.contract.symbol == symbol and p.position != 0:
             return {"qty": p.position, "avg_cost": float(p.avgCost)}
     return None
@@ -976,7 +976,7 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
 
     # != 0 (not just > 0) so an existing short in the real account also
     # blocks a duplicate/conflicting entry, not just existing longs.
-    held_symbols = {p.contract.symbol for p in ib.positions() if p.position != 0}
+    held_symbols = {p.contract.symbol for p in scoped_positions(ib) if p.position != 0}
     held_symbols |= {p["symbol"] for p in positions}
 
     portfolio_value = risk["portfolio_value"]
@@ -1171,10 +1171,12 @@ def sync_broker_fills(ib, account_id: int, mode: str):
     just vanishes from Account Holdings with no record of how or when it
     actually closed.
 
-    reqExecutions() with no filter returns today's fills for the account
-    this connection is logged into - exactly matching this function's own
-    (account_id, mode) scoping, since each mode's Gateway connection is
-    already scoped to one IBKR account. execId is IBKR's own globally
+    reqExecutions() with no filter returns today's fills across EVERY
+    account this login manages, not just this mode's - a login authorized
+    for more than one account (see IBKRClient.__init__) would otherwise
+    let another account's real activity get silently recorded as this
+    bot's own trade history. belongs_to_account narrows it back down to
+    match this function's own (account_id, mode) scoping. execId is IBKR's own globally
     unique id per execution - db.trade_exec_id_exists is what keeps this
     idempotent across every periodic call, and consistent with a fill
     trade.py/close_position.py already recorded immediately themselves
@@ -1183,6 +1185,8 @@ def sync_broker_fills(ib, account_id: int, mode: str):
     for fill in ib.reqExecutions():
         exec_id = fill.execution.execId
         if not exec_id or db.trade_exec_id_exists(exec_id):
+            continue
+        if not belongs_to_account(ib, fill.execution.acctNumber):
             continue
         side = "BUY" if fill.execution.side == "BOT" else "SELL"
         ts = fill.execution.time
@@ -1207,7 +1211,13 @@ def refresh_account_info(account_id: int, mode: str):
     try:
         ib = ibkr.ib
         ib.sleep(2)  # let account summary data populate after connecting
-        values = {row.tag: row.value for row in ib.accountSummary()}
+        # Unfiltered, accountSummary() returns a row per tag PER managed
+        # account when this login is authorized for more than one (see
+        # IBKRClient.__init__) - the dict comprehension then collapses
+        # same-tag rows from different accounts down to whichever one
+        # iterated last, which can just as easily be the OTHER account's
+        # (possibly zero/unfunded) numbers as this mode's real ones.
+        values = {row.tag: row.value for row in ib.accountSummary(ibkr.account or "")}
         db.update_account_info(
             account_id, mode,
             values.get("NetLiquidation", ""),
@@ -1220,7 +1230,7 @@ def refresh_account_info(account_id: int, mode: str):
         # dashboard show (and close) things the bot doesn't know about.
         broker_positions = [
             {"symbol": p.contract.symbol, "qty": p.position, "avg_cost": p.avgCost}
-            for p in ib.positions() if p.position != 0
+            for p in scoped_positions(ib) if p.position != 0
         ]
         db.update_broker_positions(account_id, mode, broker_positions)
 
@@ -1249,6 +1259,7 @@ def refresh_account_info(account_id: int, mode: str):
             }
             for t in ib.openTrades()
             if t.orderStatus.status not in ("Cancelled", "ApiCancelled", "Filled", "Inactive")
+            and belongs_to_account(ib, t.order.account)
         ]
         db.update_broker_orders(account_id, mode, broker_orders)
         sync_broker_fills(ib, account_id, mode)

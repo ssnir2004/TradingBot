@@ -12,7 +12,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 from src import db, mode_config
-from src.ibkr_client import IBKRClient
+from src.ibkr_client import IBKRClient, scoped_positions
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
@@ -41,7 +41,7 @@ def main():
     try:
         ib = ibkr.ib
         ib.sleep(1)  # let positions populate after connecting
-        held = next((p for p in ib.positions() if p.contract.symbol == symbol and p.position != 0), None)
+        held = next((p for p in scoped_positions(ib) if p.contract.symbol == symbol and p.position != 0), None)
         if held is None:
             print(f"[{args.mode}] {symbol}: no open position in this account")
             sys.exit(1)
