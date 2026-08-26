@@ -61,9 +61,49 @@
     <div class="card-header">Backtest Data</div>
     <div class="card-body">
       <button id="btn-update-backtest-data" class="btn btn-outline-primary btn-sm">Update backtest data</button>
-      <span class="info-icon" data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="right" title="Refreshes this server's local intraday-bars cache from IBKR (<code>fetch_backtest_data.py</code>, the same job that runs automatically every Sunday) &mdash; incremental, only fetches the gap since each symbol's last cached bar, so this is safe to run any time to catch up after the bot's been off for a few days.<br><br>Needs the paper IBKR Gateway connected; checked automatically before starting.">i</span>
+      <button type="button" class="info-icon" style="border:none;" data-bs-toggle="modal" data-bs-target="#backtest-data-help-modal" aria-label="הסבר">i</button>
       <span id="backtest-data-fetch-status" class="small ms-2"></span>
       <div id="backtest-data-coverage" class="small text-muted mt-2"></div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="backtest-data-help-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content" dir="rtl" style="text-align:right">
+        <div class="modal-header">
+          <h5 class="modal-title">מה עושה הכפתור "Update backtest data"?</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="סגור"></button>
+        </div>
+        <div class="modal-body">
+          <h6 class="fw-bold">מטרת הכפתור</h6>
+          <p>
+            הכפתור מרענן את מאגר הנתונים המקומי של נרות תוך-יומיים (5 דקות) שהבקטסטים קוראים ממנו,
+            ישירות מ-IBKR. זה בדיוק אותו job (<code dir="ltr">fetch_backtest_data.py</code>) שרץ אוטומטית
+            כל יום ראשון בבוקר — הכפתור פשוט מאפשר להריץ אותו גם באופן ידני, למשל אחרי שהבוט לא רץ כמה
+            ימים ונוצר פער בנתונים.
+          </p>
+
+          <h6 class="fw-bold mt-4">שלבי הפעולה, בסדר שהם קורים</h6>
+          <ol>
+            <li><strong>בדיקת חיבור.</strong> לפני שמתחיל כל דבר, המערכת בודקת שה-IBKR Gateway (בחשבון ה-paper) פעיל ומחובר בפועל.</li>
+            <li><strong>אין חיבור? עצירה מיידית.</strong> אם החיבור לא תקין, תופיע הודעת שגיאה ברורה ולא מתבצעת שום פעולה נוספת — כדי לא להריץ עדכון שבטוח ייכשל.</li>
+            <li><strong>יש חיבור — ההרצה מתחילה.</strong> מופעל תהליך נפרד (לא בתוך הדשבורד עצמו, כדי לא להאט אותו) שמתחבר ל-IBKR ועובר על כל סימבולי ה-S&amp;P 500.</li>
+            <li><strong>עדכון מצטבר בלבד.</strong> לכל סימבול, מורד רק הפער מאז הנר האחרון שכבר שמור בקאש — לא מוריד הכל מחדש. בגלל זה זה בטוח להריץ בכל עת, גם אם רוב הנתונים כבר עדכניים.</li>
+            <li><strong>מעקב חי.</strong> בזמן הריצה הכפתור מציג "Updating…" ומתעדכן אוטומטית כל 5 שניות. אפשר לצאת מהעמוד — הריצה ממשיכה ברקע בשרת.</li>
+            <li><strong>סיכום בסיום.</strong> כשההרצה מסתיימת, מוצג כמה סימבולים עודכנו, כמה כבר היו עדכניים, וכמה נכשלו (אם בכלל) — וגם טווח התאריכים המעודכן של כל הנתונים בקאש.</li>
+          </ol>
+
+          <h6 class="fw-bold mt-4">דברים שכדאי לדעת</h6>
+          <ul>
+            <li>ההרצה יכולה לקחת זמן (494 סימבולים) — אין צורך לחכות בדף פתוח.</li>
+            <li>לא מומלץ להריץ בסופ"ש — IBKR מוריד את חשבונות ה-paper לתחזוקה מסביבות חצות שישי ועד מוצ"ש/יום ראשון, וכל בקשה תיכשל באותו חלון (זה צפוי, לא תקלה).</li>
+            <li>לא ניתן להריץ שתי עדכונים במקביל — אם כבר רץ אחד, הכפתור יהיה כבוי עד שיסתיים.</li>
+          </ul>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">סגור</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -856,9 +896,35 @@ function renderHistoryTable() {
   body.innerHTML = rowsHtml.join("");
 }
 
+// Self-perpetuating poll while any row is pending/running - without this,
+// a backtest computed by a REMOTE worker (nothing in this browser tab is
+// driving pollBacktest for it) never gets its own row refreshed again
+// after the initial load, so its badge/Cancel-button can sit frozen on
+// "running" long after the row is actually done - while an already-
+// expanded panel for that same row, fetched fresh at open time or by this
+// same poll, correctly shows the finished results underneath the stale
+// badge. Keeping both in sync here (row list AND any expanded row's own
+// detail) is what actually fixes that mismatch, not just papering over it.
+let historyPollHandle = null;
+
 async function refreshHistory() {
   lastHistoryRows = await api("/api/backtests");
   renderHistoryTable();
+  // Every expanded row, not just ones still pending/running per this fetch -
+  // a row that transitions to done/failed on EXACTLY this tick needs one
+  // more detail refresh to actually show that, and checking only the
+  // still-in-flight ones would silently skip it (its own status already
+  // reads done/failed by the time this loop looks at it).
+  for (const id of expandedBacktestIds) {
+    refreshExpandedDetail(id);
+  }
+  const anyInFlight = lastHistoryRows.some(r => r.status === "pending" || r.status === "running");
+  if (anyInFlight && !historyPollHandle) {
+    historyPollHandle = setInterval(refreshHistory, 5000);
+  } else if (!anyInFlight && historyPollHandle) {
+    clearInterval(historyPollHandle);
+    historyPollHandle = null;
+  }
 }
 
 async function toggleBacktestExpand(id) {
