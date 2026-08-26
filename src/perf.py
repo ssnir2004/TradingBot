@@ -170,3 +170,72 @@ def today_summary(account_id: int, mode: str) -> dict:
     rows = db.get_trades(account_id, mode, limit=5000, today_only=True)
     pairs = pair_trades(rows)
     return aggregate(pairs)
+
+
+# A pooled sample below this many trades is flagged "small sample" in the
+# dashboard's Strategy Report card - not a rigorous significance test, just
+# a rough tripwire against reading a real signal into a handful of trades
+# (most of this dashboard's own backtests so far are single trading days).
+STRATEGY_REPORT_LOW_SAMPLE_TRADES = 30
+
+
+def strategy_report(backtests: list[dict]) -> list[dict]:
+    """Pools every strategy's trade pairs across every 'done' backtest that
+    included it, then re-aggregates over the pooled set with the same
+    aggregate()/compute_r_multiples()/histogram() every single backtest's
+    own card already uses - NOT an average of each run's own win_rate_pct/
+    profit_factor, which would weight a lone-trade day the same as a
+    7-trade day. `backtests` is db.list_done_backtest_results' shape:
+    [{"id", "created_at", "params", "results"}, ...], oldest first.
+
+    Deduped by (strategy_id, start_date, end_date), keeping only the
+    newest-created run for an exact date range - re-running the same range
+    for the same strategy (e.g. right after a bug fix - this has already
+    happened more than once against this exact dashboard) would otherwise
+    silently pool a stale pre-fix result alongside its corrected re-run,
+    double-counting those trades AND averaging in the wrong numbers.
+    Doesn't attempt to resolve PARTIALLY-overlapping ranges (e.g. one run
+    covering Aug 1-5 and another covering just Aug 3) - every backtest run
+    against this dashboard so far has been single-day, so exact-range
+    dedup already covers the real usage pattern; a partial-overlap
+    resolver would be unvalidated complexity for a case that hasn't
+    actually come up yet.
+
+    Returns one entry per strategy_id that appears in at least one 'done'
+    result, busiest (most pooled trades) first."""
+    latest_by_key = {}  # (strategy_id, start_date, end_date) -> {"created_at", "result"}
+    for bt in backtests:
+        date_key = (bt["params"].get("start_date"), bt["params"].get("end_date"))
+        for strategy_id, result in bt["results"].items():
+            if not isinstance(result, dict) or "aggregate" not in result:
+                continue  # {"error": "..."} entries - strategy deleted/not found at run time
+            key = (strategy_id, date_key)
+            existing = latest_by_key.get(key)
+            if existing is None or bt["created_at"] > existing["created_at"]:
+                latest_by_key[key] = {"created_at": bt["created_at"], "result": result}
+
+    by_strategy = defaultdict(list)
+    for (strategy_id, _date_key), entry in latest_by_key.items():
+        by_strategy[strategy_id].append(entry["result"])
+
+    report = []
+    for strategy_id, results in by_strategy.items():
+        pooled_pairs = [pair for r in results for pair in r["pairs"]]
+        pooled_filter_stats = defaultdict(int)
+        for r in results:
+            for cond, count in (r.get("filter_stats") or {}).items():
+                pooled_filter_stats[cond] += count
+        r_values = compute_r_multiples(pooled_pairs)
+        agg = aggregate(pooled_pairs)
+        report.append({
+            "strategy_id": strategy_id,
+            "strategy_name": results[0].get("strategy_name") or f"Strategy {strategy_id}",
+            "direction": results[0].get("direction"),
+            "backtests_included": len(results),
+            "aggregate": agg,
+            "low_sample": agg["total_trades"] < STRATEGY_REPORT_LOW_SAMPLE_TRADES,
+            "histogram": [{"label": l, "count": c, "is_loss": loss} for l, c, loss in histogram(r_values)],
+            "filter_stats": dict(pooled_filter_stats),
+        })
+    report.sort(key=lambda entry: entry["aggregate"]["total_trades"], reverse=True)
+    return report
