@@ -1863,25 +1863,32 @@ def list_archived_backtests(account_id: int) -> list[dict]:
         return [_backtest_row_to_summary(row) for row in rows]
 
 
-def list_done_backtest_results(account_id: int) -> list[dict]:
+def list_done_backtest_results(account_id: int, include_archived: bool = False) -> list[dict]:
     """Every 'done' backtest's params + full results, for src/perf.py's
     strategy_report to pool trade pairs across every run of the same
     strategy - unlike list_backtests' summary rows (results_json parsed
     only far enough to sum one total_pnl_usd figure, never returned),
     this needs the actual per-strategy trade pairs back out, so it's a
     separate query rather than a mode on the existing one. Returns
-    [{"id", "created_at", "params", "results"}, ...], oldest first (so a
-    caller pooling by date range can just keep whichever entry it sees
-    last for a given key to prefer the newest re-run).
+    [{"id", "created_at", "archived_at", "params", "results"}, ...],
+    oldest first (so a caller pooling by date range can just keep
+    whichever entry it sees last for a given key to prefer the newest
+    re-run).
 
-    Archived rows are excluded - same reasoning as list_backtests: an
-    archived run must stay out of the Strategy Report it pools into until
-    explicitly restored (see archive_backtests), not just out of the
-    History list."""
+    Archived rows are excluded by default - same reasoning as
+    list_backtests: an archived run must stay out of the dashboard's
+    Strategy Report card until explicitly restored (see
+    archive_backtests), not just out of the History list. A caller doing
+    OFFLINE analysis across a strategy's full history regardless of
+    archive status (e.g. analyze_strategy.py) passes include_archived=True
+    instead - archiving is a display/organization concept for the
+    day-to-day dashboard views, not a reason to hide data from a
+    deliberate deep-dive."""
     with get_conn() as conn:
+        archived_clause = "" if include_archived else "AND archived_at IS NULL "
         rows = conn.execute(
-            "SELECT id, params_json, results_json, created_at FROM backtests "
-            "WHERE account_id = ? AND status = 'done' AND results_json IS NOT NULL AND archived_at IS NULL "
+            "SELECT id, params_json, results_json, created_at, archived_at FROM backtests "
+            f"WHERE account_id = ? AND status = 'done' AND results_json IS NOT NULL {archived_clause}"
             "ORDER BY created_at ASC",
             (account_id,),
         ).fetchall()
@@ -1892,7 +1899,10 @@ def list_done_backtest_results(account_id: int) -> list[dict]:
             results = json.loads(row["results_json"])
         except (json.JSONDecodeError, TypeError):
             continue  # malformed row - skip rather than fail the whole report
-        out.append({"id": row["id"], "created_at": row["created_at"], "params": params, "results": results})
+        out.append({
+            "id": row["id"], "created_at": row["created_at"], "archived_at": row["archived_at"],
+            "params": params, "results": results,
+        })
     return out
 
 
