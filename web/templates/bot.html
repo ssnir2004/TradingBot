@@ -414,7 +414,7 @@ async function refreshActiveStrategyParams() {
           <tr><td class="text-muted">D3 gap</td><td>${r.daily_filters[d3Key]}%</td><td class="text-muted">I3 RVOL</td><td>x${r.intraday_filters.I3_rvol_min} (${r.intraday_filters.I3_rvol_lookback_days}d)</td></tr>
           <tr><td class="text-muted">I2</td><td colspan="3">${i2}</td></tr>
           <tr><td class="text-muted">Risk/trade</td><td>${r.risk.max_risk_per_trade_pct}%</td><td class="text-muted">Max size</td><td>${r.risk.max_position_size_pct_of_portfolio}%</td></tr>
-          <tr><td class="text-muted">Max positions</td><td>${r.risk.max_concurrent_positions}</td><td class="text-muted">Partial @</td><td>${r.exit.partial_profit_trigger_R}R</td></tr>
+          <tr><td class="text-muted">Max positions</td><td>${r.risk.max_concurrent_positions}</td><td class="text-muted">Initial stop</td><td>${r.exit.initial_stop_rule || (label === "Long" ? "lod_minus_1pct" : "hod_plus_1pct")}</td></tr>
           <tr><td class="text-muted">Breakeven @</td><td>${r.exit.breakeven_trigger_R}R</td><td class="text-muted">Entry window</td><td>${r.time_filter.earliest_entry_et}-${r.time_filter.latest_entry_et}</td></tr>
         </tbody>
       </table>
