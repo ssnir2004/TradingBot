@@ -15,6 +15,16 @@
   .hist-bar { height:100%; }
   .strategy-pick { cursor:pointer; }
 
+  /* Entry/Exit columns in the Trades table - a soft tint (same categorical
+     blue/orange as the Calendar's series-1/series-2, at low opacity so
+     the mono price text stays fully legible) so the two price columns
+     that actually define the trade read as visually distinct from the
+     surrounding context columns (stop/size/P&L/etc), in both themes. */
+  .col-entry { background: rgba(42, 120, 214, 0.12); }
+  .col-exit  { background: rgba(235, 104, 52, 0.12); }
+  [data-bs-theme="dark"] .col-entry { background: rgba(57, 135, 229, 0.20); }
+  [data-bs-theme="dark"] .col-exit  { background: rgba(217, 89, 38, 0.20); }
+
   /* Small yellow "i" info badge next to a control - hover/focus pops the
      Bootstrap tooltip in its title attribute (see the DOMContentLoaded
      init below). Yellow = dataviz skill's status "warning" step
@@ -509,9 +519,9 @@ function renderTrades(pairs) {
     return `<tr>
       <td>${p.symbol}</td>
       <td>${sideBadge(p.side)}</td>
-      <td class="mono">${fmtMoney(p.open_price)}</td>
+      <td class="mono col-entry">${fmtMoney(p.open_price)}</td>
       <td class="mono">${fmtMoney(p.initial_stop)}</td>
-      <td class="mono">${fmtMoney(p.close_price)}</td>
+      <td class="mono col-exit">${fmtMoney(p.close_price)}</td>
       <td>${p.size}</td>
       <td class="mono">${fmtMoney(p.open_price * p.size)}</td>
       <td class="mono ${pnlClass}">${fmtMoney(p.pnl_usd)}</td>
@@ -524,7 +534,7 @@ function renderTrades(pairs) {
     <div class="small text-muted mb-1">Trades (${pairs.length})</div>
     <div style="max-height:280px; overflow-y:auto; overflow-x:auto;">
       <table class="table table-sm mb-0">
-        <thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Initial Stop</th><th>Exit</th><th>Size</th><th>Position $</th><th>P&amp;L</th><th>Commission</th><th>Closed by</th><th>When</th></tr></thead>
+        <thead><tr><th>Symbol</th><th>Side</th><th class="col-entry">Entry</th><th>Initial Stop</th><th class="col-exit">Exit</th><th>Size</th><th>Position $</th><th>P&amp;L</th><th>Commission</th><th>Closed by</th><th>When</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
