@@ -14,6 +14,9 @@
   .hist-bar-track { height: 16px; background:#e9ecef; border-radius:4px; overflow:hidden; }
   .hist-bar { height:100%; }
   .strategy-pick { cursor:pointer; }
+  .strategy-drag-item { cursor: grab; }
+  .strategy-drag-item.dragging { opacity: 0.4; }
+  .strategy-drag-item .drag-handle { cursor: grab; user-select: none; }
 
   /* Entry/Exit columns in the Trades table - a soft tint (same categorical
      blue/orange as the Calendar's series-1/series-2, at low opacity so
@@ -184,8 +187,17 @@
       </div>
 
       <div class="mb-3">
-        <label class="form-label small fw-bold">Strategies</label>
-        <div id="backtest-strategy-list" class="d-flex flex-wrap gap-2">Loading…</div>
+        <label class="form-label small fw-bold">Strategies <span class="text-muted fw-normal">— drag ⠿ to reorder; the order is remembered</span></label>
+        <div class="row g-3">
+          <div class="col-12 col-md-6">
+            <div class="small text-muted mb-1">Long</div>
+            <div id="backtest-strategy-list-long" class="d-flex flex-column gap-2">Loading…</div>
+          </div>
+          <div class="col-12 col-md-6">
+            <div class="small text-muted mb-1">Short</div>
+            <div id="backtest-strategy-list-short" class="d-flex flex-column gap-2">Loading…</div>
+          </div>
+        </div>
       </div>
 
       <div class="row g-2 mb-3">
@@ -515,17 +527,104 @@ let strategiesById = {};
 let pollHandle = null;
 let currentBacktestId = null;
 
+// Per-direction manual ordering for the New Backtest strategy picker - a
+// per-browser display preference (same local-only persistence pattern as
+// the Calendar's own strategy filter, CAL_HIDDEN_STRATEGY_IDS_STORAGE_KEY),
+// not account data, so it's keyed off localStorage rather than round-
+// tripping to the server on every drag.
+const STRATEGY_ORDER_STORAGE_KEY_PREFIX = "tradingbot.backtest.strategy_order.";
+
+function restoreStrategyOrder(direction) {
+  try {
+    const saved = localStorage.getItem(STRATEGY_ORDER_STORAGE_KEY_PREFIX + direction);
+    return saved ? JSON.parse(saved) : [];
+  } catch (e) { return []; }  // private browsing/disabled site data - just falls back to id order below
+}
+
+function persistStrategyOrder(direction, orderedIds) {
+  try { localStorage.setItem(STRATEGY_ORDER_STORAGE_KEY_PREFIX + direction, JSON.stringify(orderedIds)); }
+  catch (e) { /* won't persist this session - not fatal */ }
+}
+
+// Applies the saved custom order (a list of strategy ids) to this
+// direction's strategies - any strategy NOT in the saved order (created,
+// or re-activated, since the last drag) keeps its natural id order and
+// sorts after every strategy that IS ordered, rather than jumping to the
+// front or being dropped from the list.
+function orderStrategies(strategies, direction) {
+  const saved = restoreStrategyOrder(direction);
+  const savedIndex = new Map(saved.map((id, i) => [id, i]));
+  return [...strategies].sort((a, b) => {
+    const ai = savedIndex.has(a.id) ? savedIndex.get(a.id) : Infinity;
+    const bi = savedIndex.has(b.id) ? savedIndex.get(b.id) : Infinity;
+    return ai !== bi ? ai - bi : a.id - b.id;
+  });
+}
+
+let draggedStrategyId = null;
+
+function handleStrategyDragStart(event, id) {
+  draggedStrategyId = id;
+  event.dataTransfer.effectAllowed = "move";
+  event.currentTarget.classList.add("dragging");
+}
+
+function handleStrategyDragOver(event) {
+  event.preventDefault();  // required for this element to become a valid drop target at all
+  event.dataTransfer.dropEffect = "move";
+}
+
+function handleStrategyDrop(event, targetId, direction) {
+  event.preventDefault();
+  if (draggedStrategyId === null || draggedStrategyId === targetId) return;
+  const ids = orderStrategies(Object.values(strategiesById).filter(s => s.direction === direction), direction).map(s => s.id);
+  const fromIndex = ids.indexOf(draggedStrategyId);
+  const toIndex = ids.indexOf(targetId);
+  if (fromIndex === -1 || toIndex === -1) return;
+  ids.splice(fromIndex, 1);
+  ids.splice(toIndex, 0, draggedStrategyId);
+  persistStrategyOrder(direction, ids);
+  renderStrategyColumn(direction);
+}
+
+function handleStrategyDragEnd(event) {
+  event.currentTarget.classList.remove("dragging");
+  draggedStrategyId = null;
+}
+
+function renderStrategyColumn(direction) {
+  const el = document.getElementById(`backtest-strategy-list-${direction}`);
+  if (!el) return;  // viewer - the New Backtest card (and this picker) isn't rendered at all
+  // A reorder re-renders this column's whole innerHTML (fresh <input>
+  // elements, default unchecked) - preserve whichever strategies were
+  // already checked before wiping it, so dragging to reorder never
+  // silently clears the user's selection mid-setup.
+  const checkedIds = new Set(Array.from(el.querySelectorAll(".bt-strategy-checkbox:checked")).map(cb => Number(cb.value)));
+  const strategies = orderStrategies(Object.values(strategiesById).filter(s => s.direction === direction), direction);
+  el.innerHTML = strategies.map(s => `
+    <div class="strategy-drag-item d-flex align-items-center gap-1" draggable="true"
+         ondragstart="handleStrategyDragStart(event, ${s.id})"
+         ondragover="handleStrategyDragOver(event)"
+         ondrop="handleStrategyDrop(event, ${s.id}, '${direction}')"
+         ondragend="handleStrategyDragEnd(event)">
+      <span class="drag-handle text-muted" title="Drag to reorder">⠿</span>
+      <input type="checkbox" class="btn-check bt-strategy-checkbox" id="bt-strategy-${s.id}" value="${s.id}" autocomplete="off">
+      <label class="btn btn-outline-secondary btn-sm strategy-pick flex-grow-1 text-start" for="bt-strategy-${s.id}">
+        ${s.key ? `<span class="badge bg-light text-dark border me-1">${s.key}</span>` : ""}${s.name}
+        <span class="badge ${RISK_BADGE_CLASS[s.risk_rating] || 'bg-secondary'}">${s.risk_rating}</span>
+      </label>
+    </div>`).join("");
+  for (const id of checkedIds) {
+    const cb = document.getElementById(`bt-strategy-${id}`);
+    if (cb) cb.checked = true;
+  }
+}
+
 async function loadStrategyPicker() {
   const rows = await api("/api/strategies");
   strategiesById = Object.fromEntries(rows.map(s => [s.id, s]));
-  const el = document.getElementById("backtest-strategy-list");
-  if (!el) return;  // viewer - the New Backtest card (and this picker) isn't rendered at all; strategiesById above is still needed by the Calendar/History/Strategy Report
-  el.innerHTML = rows.map(s => `
-    <input type="checkbox" class="btn-check bt-strategy-checkbox" id="bt-strategy-${s.id}" value="${s.id}" autocomplete="off">
-    <label class="btn btn-outline-secondary btn-sm strategy-pick" for="bt-strategy-${s.id}">
-      ${s.key ? `<span class="badge bg-light text-dark border me-1">${s.key}</span>` : ""}${s.name} ${sideBadge(s.direction)}
-      <span class="badge ${RISK_BADGE_CLASS[s.risk_rating] || 'bg-secondary'}">${s.risk_rating}</span>
-    </label>`).join("");
+  renderStrategyColumn("long");
+  renderStrategyColumn("short");
 }
 
 async function loadUniverseInfo() {
