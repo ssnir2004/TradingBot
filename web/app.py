@@ -113,6 +113,25 @@ def require_admin(user: str = Depends(require_user)) -> str:
     return user
 
 
+def require_full_access(user: str = Depends(require_user)) -> str:
+    """A role='viewer' account (see the Users page, admin-only) gets
+    read-only access to the Backtest page's own data and nothing else -
+    every route anywhere else in this file that reads or changes anything
+    (trading controls, positions/orders, Gateway/IBKR credentials, risk
+    params, worker tokens, running/deleting/cancelling a backtest,
+    activating a strategy, updating backtest data, ...) depends on this
+    instead of plain require_user. Deliberately separate from is_admin -
+    that axis is "can manage the shared strategy-template catalog",
+    orthogonal to "can this account touch anything beyond a read-only
+    backtest view.\""""
+    account = db.get_user_by_username(user)
+    if account is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    if account.get("role") == "viewer":
+        raise HTTPException(status_code=403, detail="Your account has read-only backtest access")
+    return user
+
+
 def require_worker_token(authorization: str | None = Header(default=None)) -> int:
     """A remote backtest worker (see docs/worker.md) isn't a browser with a
     session cookie - it authenticates every request with a long-lived
@@ -178,40 +197,62 @@ def logout():
     return response
 
 
+def _is_viewer(username: str) -> bool:
+    account = db.get_user_by_username(username)
+    return bool(account) and account.get("role") == "viewer"
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
     if not db.any_users_exist():
         return RedirectResponse("/setup", status_code=303)
-    if not read_session(request):
+    username = read_session(request)
+    if not username:
         return RedirectResponse("/login", status_code=303)
-    return RedirectResponse("/bot", status_code=303)
+    # A viewer has no access to /bot at all (see bot_page/trading_page below) -
+    # land them straight on the one page they can actually use.
+    return RedirectResponse("/backtest" if _is_viewer(username) else "/bot", status_code=303)
 
 
 @app.get("/bot", response_class=HTMLResponse)
 def bot_page(request: Request):
     if not db.any_users_exist():
         return RedirectResponse("/setup", status_code=303)
-    if not read_session(request):
+    username = read_session(request)
+    if not username:
         return RedirectResponse("/login", status_code=303)
-    return templates.TemplateResponse(request, "bot.html", {"active_page": "bot"})
+    account = db.get_user_by_username(username)
+    if account and account.get("role") == "viewer":
+        return RedirectResponse("/backtest", status_code=303)
+    return templates.TemplateResponse(request, "bot.html", {"active_page": "bot", "is_admin": bool(account and account.get("is_admin"))})
 
 
 @app.get("/trading", response_class=HTMLResponse)
 def trading_page(request: Request):
     if not db.any_users_exist():
         return RedirectResponse("/setup", status_code=303)
-    if not read_session(request):
+    username = read_session(request)
+    if not username:
         return RedirectResponse("/login", status_code=303)
-    return templates.TemplateResponse(request, "trading.html", {"active_page": "trading"})
+    account = db.get_user_by_username(username)
+    if account and account.get("role") == "viewer":
+        return RedirectResponse("/backtest", status_code=303)
+    return templates.TemplateResponse(request, "trading.html", {"active_page": "trading", "is_admin": bool(account and account.get("is_admin"))})
 
 
 @app.get("/backtest", response_class=HTMLResponse)
 def backtest_page(request: Request):
     if not db.any_users_exist():
         return RedirectResponse("/setup", status_code=303)
-    if not read_session(request):
+    username = read_session(request)
+    if not username:
         return RedirectResponse("/login", status_code=303)
-    return templates.TemplateResponse(request, "backtest.html", {"active_page": "backtest"})
+    account = db.get_user_by_username(username)
+    return templates.TemplateResponse(request, "backtest.html", {
+        "active_page": "backtest",
+        "is_admin": bool(account and account.get("is_admin")),
+        "is_viewer": bool(account and account.get("role") == "viewer"),
+    })
 
 
 @app.get("/guide", response_class=HTMLResponse)
@@ -221,51 +262,69 @@ def guide(request: Request):
     return templates.TemplateResponse(request, "guide.html", {})
 
 
+@app.get("/users", response_class=HTMLResponse)
+def users_page(request: Request):
+    """Admin-only - add/remove dashboard accounts, in particular
+    role='viewer' ones (read-only Backtest-page access). Gated by
+    require_admin the same as the strategy-template catalog, not
+    require_full_access - a role check has nothing to do with who may
+    manage OTHER accounts' roles."""
+    if not db.any_users_exist():
+        return RedirectResponse("/setup", status_code=303)
+    username = read_session(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    account = db.get_user_by_username(username)
+    if not account or not account.get("is_admin"):
+        return RedirectResponse("/bot", status_code=303)
+    return templates.TemplateResponse(request, "users.html", {"active_page": "users", "is_admin": True})
+
+
 # -------------------------------------------------------------------- API ---
 @app.get("/api/me")
 def api_me(account_id: int = Depends(require_account), user: str = Depends(require_user)):
     account = db.get_user_by_username(user)
-    return {"username": user, "is_admin": bool(account["is_admin"])}
+    return {"username": user, "is_admin": bool(account["is_admin"]), "role": account["role"]}
 
 
 @app.get("/api/status")
-def api_status(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_status(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     return db.get_cycle_status(account_id, mode)
 
 
 @app.post("/api/control/enable")
-def api_enable(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_enable(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     db.set_bot_enabled(account_id, mode, True)
     db.log_decision(account_id, mode, "dashboard_control", action="enable", user=user)
     return {"bot_enabled": True}
 
 
 @app.post("/api/control/disable")
-def api_disable(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_disable(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     db.set_bot_enabled(account_id, mode, False)
     db.log_decision(account_id, mode, "dashboard_control", action="disable", user=user)
     return {"bot_enabled": False}
 
 
 @app.post("/api/control/flatten")
-def api_flatten(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_flatten(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     db.request_flatten_now(account_id, mode)
     db.log_decision(account_id, mode, "dashboard_control", action="flatten_now", user=user)
     return {"flatten_pending": True}
 
 
 @app.get("/api/account")
-def api_account(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_account(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     return db.get_account_info(account_id, mode)
 
 
 @app.get("/api/risk_params")
-def api_get_risk_params(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_get_risk_params(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     return mode_config.risk_params(_env(), account_id, mode)
 
 
 @app.post("/api/risk_params")
-async def api_set_risk_params(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+async def api_set_risk_params(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     body = await request.json()
 
     if mode == "live" and body.get("confirm") != LIVE_RISK_CONFIRM_PHRASE:
@@ -302,7 +361,7 @@ async def api_set_risk_params(request: Request, mode: str = Depends(require_mode
 # touches the DB (see src/secrets_store.py) and this API never echoes it
 # back, only whether credentials are on file and for which username.
 @app.get("/api/ibkr_credentials")
-def api_get_ibkr_credentials(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_get_ibkr_credentials(account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     creds = db.get_ibkr_credentials(account_id)
     if not creds:
         return {"configured": False, "ibkr_username": None, "updated_at": None}
@@ -310,7 +369,7 @@ def api_get_ibkr_credentials(account_id: int = Depends(require_account), user: s
 
 
 @app.post("/api/ibkr_credentials")
-async def api_set_ibkr_credentials(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+async def api_set_ibkr_credentials(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     body = await request.json()
     ibkr_username = (body.get("ibkr_username") or "").strip()
     ibkr_password = body.get("ibkr_password") or ""
@@ -341,7 +400,7 @@ def _provisioning_error_response(exc: Exception) -> HTTPException:
 
 
 @app.get("/api/my_gateway/status")
-def api_my_gateway_status(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_my_gateway_status(account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     try:
         return gateway_provisioning.status(account_id)
     except Exception as exc:
@@ -349,7 +408,7 @@ def api_my_gateway_status(account_id: int = Depends(require_account), user: str 
 
 
 @app.post("/api/my_gateway/connect")
-def api_my_gateway_connect(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_my_gateway_connect(account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     try:
         gateway_provisioning.provision_and_connect(account_id)
     except Exception as exc:
@@ -359,7 +418,7 @@ def api_my_gateway_connect(account_id: int = Depends(require_account), user: str
 
 
 @app.post("/api/my_gateway/resume")
-def api_my_gateway_resume(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_my_gateway_resume(account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     try:
         gateway_provisioning.resume_engines(account_id)
     except Exception as exc:
@@ -369,7 +428,7 @@ def api_my_gateway_resume(account_id: int = Depends(require_account), user: str 
 
 
 @app.post("/api/my_gateway/disconnect")
-def api_my_gateway_disconnect(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_my_gateway_disconnect(account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     try:
         gateway_provisioning.disconnect(account_id)
     except Exception as exc:
@@ -382,12 +441,12 @@ def api_my_gateway_disconnect(account_id: int = Depends(require_account), user: 
 # Lets you free up an IBKR session for a manual TWS/IBKR Mobile login,
 # without SSH — see web/gateway_control.py for the systemd/sudo mechanics.
 @app.get("/api/gateway/status")
-def api_gateway_status(mode: str = Depends(require_mode), user: str = Depends(require_user)):
+def api_gateway_status(mode: str = Depends(require_mode), user: str = Depends(require_full_access)):
     return gateway_control.status(mode, _env())
 
 
 @app.post("/api/gateway/disconnect")
-async def api_gateway_disconnect(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+async def api_gateway_disconnect(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     positions = db.get_open_positions(account_id, mode)
     if positions:
         raise HTTPException(
@@ -414,7 +473,7 @@ async def api_gateway_disconnect(request: Request, mode: str = Depends(require_m
 
 
 @app.post("/api/gateway/reconnect")
-def api_gateway_reconnect(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_gateway_reconnect(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     try:
         gateway_control.reconnect_gateway(mode)
     except gateway_control.GatewayControlError as exc:
@@ -424,7 +483,7 @@ def api_gateway_reconnect(mode: str = Depends(require_mode), account_id: int = D
 
 
 @app.post("/api/gateway/resume_engine")
-def api_gateway_resume_engine(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_gateway_resume_engine(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     try:
         gateway_control.resume_engine(mode)
     except gateway_control.GatewayControlError as exc:
@@ -440,7 +499,7 @@ OPEN_POSITION_LIVE_CONFIRM_PHRASE = "ok"
 
 
 @app.post("/api/positions/open")
-async def api_open_position(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+async def api_open_position(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     """Manual LIMIT entry with an ATR-based native IBKR trailing stop
     attached as a bracket child - see open_position.py. This is a plain
     broker action: the resulting position is never written to the bot's
@@ -483,7 +542,7 @@ async def api_open_position(request: Request, mode: str = Depends(require_mode),
 
 
 @app.get("/api/positions")
-def api_positions(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_positions(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     positions = db.get_open_positions(account_id, mode)
     for pos in positions:
         price = None
@@ -510,7 +569,7 @@ MODIFY_STOP_LIVE_CONFIRM_PHRASE = "ok"
 
 
 @app.put("/api/positions/{symbol}/stop")
-async def api_modify_stop(symbol: str, request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+async def api_modify_stop(symbol: str, request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     body = await request.json()
     try:
         stop_price = float(body.get("stop_price"))
@@ -542,7 +601,7 @@ async def api_modify_stop(symbol: str, request: Request, mode: str = Depends(req
 
 
 @app.get("/api/candles")
-def api_candles(symbol: str, interval: str = "5m", mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_candles(symbol: str, interval: str = "5m", mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     """Candles (plus volume, RSI, the SMA50/SMA200 reference levels D2
     actually checks against, and full MA20/MA200 moving-average lines)
     for the dashboard's chart modal, at the requested interval (one of
@@ -588,7 +647,7 @@ HOLD_OVERNIGHT_LIVE_CONFIRM_PHRASE = "ok"
 
 
 @app.put("/api/positions/{symbol}/hold_overnight")
-async def api_set_hold_overnight(symbol: str, request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+async def api_set_hold_overnight(symbol: str, request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     body = await request.json()
     hold = bool(body.get("hold_overnight"))
     if mode == "live" and hold and body.get("confirm") != HOLD_OVERNIGHT_LIVE_CONFIRM_PHRASE:
@@ -607,7 +666,7 @@ async def api_set_hold_overnight(symbol: str, request: Request, mode: str = Depe
 
 
 @app.post("/api/account/refresh")
-def api_refresh_account(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_refresh_account(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     """On-demand account/positions/orders sync - the same thing
     run_service.py's scheduler already does every 5 minutes for this mode,
     triggered right now instead of waiting for the next tick. Spawned as a
@@ -629,7 +688,7 @@ def api_refresh_account(mode: str = Depends(require_mode), account_id: int = Dep
 
 
 @app.get("/api/broker_positions")
-def api_broker_positions(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_broker_positions(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     """Every real IBKR holding in this mode's account, independent of
     whether the bot opened it or is tracking it — refreshed every 5 minutes
     by cycle.refresh_account_info alongside the account summary, or
@@ -707,7 +766,7 @@ ORDER_TYPE_LABELS = {"stop": "stop", "take_profit": "take-profit", "atr_trailing
 
 
 @app.post("/api/broker_positions/{symbol}/order")
-async def api_add_broker_order(symbol: str, request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+async def api_add_broker_order(symbol: str, request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     """Adds a NEW stop, take-profit, or ATR trailing stop order for
     `symbol` — a position can carry several of each at once, each
     covering its own slice (scaling out); this never touches an existing
@@ -803,7 +862,7 @@ async def api_add_broker_order(symbol: str, request: Request, mode: str = Depend
 
 
 @app.delete("/api/broker_positions/{symbol}/order/{order_id}")
-def api_cancel_broker_order(symbol: str, order_id: int, confirm: str | None = None, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_cancel_broker_order(symbol: str, order_id: int, confirm: str | None = None, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     if mode == "live" and confirm != MODIFY_BROKER_ORDER_LIVE_CONFIRM_PHRASE:
         raise HTTPException(
             status_code=400,
@@ -824,7 +883,7 @@ def api_cancel_broker_order(symbol: str, order_id: int, confirm: str | None = No
 
 
 @app.get("/api/orders")
-def api_list_orders(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_list_orders(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     """Every real resting order in this mode's account, independent of
     order type or whether it's tied to a currently-held position - unlike
     /api/broker_positions' stop_orders/take_profit_orders (which only
@@ -836,7 +895,7 @@ def api_list_orders(mode: str = Depends(require_mode), account_id: int = Depends
 
 
 @app.put("/api/orders/{order_id}")
-async def api_edit_order(order_id: int, request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+async def api_edit_order(order_id: int, request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     """Modifies an existing resting order in place (same order ID - IBKR
     treats this as a live modification, not cancel+replace). Works for any
     order type (LMT entry, STP, TRAIL, take-profit)."""
@@ -879,7 +938,7 @@ async def api_edit_order(order_id: int, request: Request, mode: str = Depends(re
 
 
 @app.delete("/api/orders/{order_id}")
-def api_cancel_order(order_id: int, symbol: str, confirm: str | None = None, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_cancel_order(order_id: int, symbol: str, confirm: str | None = None, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     """Cancels any resting order by ID, independent of order type or
     whether it's tied to a currently-held position."""
     if mode == "live" and confirm != MODIFY_BROKER_ORDER_LIVE_CONFIRM_PHRASE:
@@ -901,7 +960,7 @@ def api_cancel_order(order_id: int, symbol: str, confirm: str | None = None, mod
 
 
 @app.post("/api/broker_positions/close")
-async def api_broker_positions_close(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+async def api_broker_positions_close(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     body = await request.json()
     symbol = (body.get("symbol") or "").strip().upper()
     if not symbol:
@@ -935,7 +994,7 @@ MANUAL_ORDER_LIVE_CONFIRM_PHRASE = "ok"
 
 
 @app.post("/api/trading/order")
-async def api_place_manual_order(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+async def api_place_manual_order(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     body = await request.json()
     symbol = (body.get("symbol") or "").strip().upper()
     side = body.get("side")
@@ -969,12 +1028,12 @@ async def api_place_manual_order(request: Request, mode: str = Depends(require_m
 
 
 @app.get("/api/trades")
-def api_trades(limit: int = 100, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_trades(limit: int = 100, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     return db.get_trades(account_id, mode, limit=limit)
 
 
 @app.get("/api/performance")
-def api_performance(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_performance(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     rows = db.get_trades(account_id, mode, limit=5000, today_only=True)
     pairs = perf.pair_trades(rows)
     aggregates = perf.aggregate(pairs)
@@ -986,17 +1045,17 @@ def api_performance(mode: str = Depends(require_mode), account_id: int = Depends
 
 
 @app.get("/api/watchlist")
-def api_watchlist(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_watchlist(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     return db.get_watchlist(account_id, mode)
 
 
 @app.get("/api/watchlist_filters")
-def api_watchlist_filters(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_watchlist_filters(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     return db.get_watchlist_filters(account_id, mode)
 
 
 @app.post("/api/prefilter/run")
-def api_run_prefilter(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_run_prefilter(account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     """On-demand gap scan — the same scan the scheduler runs at :25/:55 past
     the hour (9:25-12:55 ET), triggered right now instead of waiting for
     the next scheduled slot. Mode-agnostic like the scan itself: writes the
@@ -1011,7 +1070,7 @@ def api_run_prefilter(account_id: int = Depends(require_account), user: str = De
 
 
 @app.get("/api/decision_log")
-def api_decision_log(limit: int = 100, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_decision_log(limit: int = 100, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     rows = db.get_decision_log(account_id, mode, limit=limit)
     for r in rows:
         try:
@@ -1098,7 +1157,7 @@ ACTIVATE_AGGRESSIVE_CONFIRM_PHRASE = "ok"
 
 
 @app.post("/api/strategies/{strategy_id}/activate")
-async def api_activate_strategy(strategy_id: int, request: Request, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+async def api_activate_strategy(strategy_id: int, request: Request, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     strategy = db.get_strategy(strategy_id)
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
@@ -1127,6 +1186,65 @@ def api_delete_strategy(strategy_id: int, account_id: int = Depends(require_acco
     return {"ok": True}
 
 
+# ------------------------------------------------------------------ users ---
+# Admin-only account management - the only user-creation path before this
+# was /setup, which runs at most once and always creates a single
+# is_admin=True account (see DEPLOY.md). This is how an admin adds more
+# accounts afterward, in particular role='viewer' ones.
+@app.get("/api/users")
+def api_list_users(user: str = Depends(require_admin)):
+    return db.list_users()
+
+
+@app.post("/api/users")
+async def api_create_user(request: Request, user: str = Depends(require_admin)):
+    body = await request.json()
+    username = (body.get("username") or "").strip()
+    password = body.get("password") or ""
+    role = body.get("role", "full")
+    is_admin = bool(body.get("is_admin", False))
+    if not username:
+        raise HTTPException(status_code=400, detail="username is required")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+    if role not in db.VALID_USER_ROLES:
+        raise HTTPException(status_code=400, detail=f"role must be one of {db.VALID_USER_ROLES}")
+    try:
+        new_id = db.create_user(username, password, is_admin=is_admin, role=role)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"id": new_id}
+
+
+@app.put("/api/users/{user_id}/role")
+async def api_set_user_role(user_id: int, request: Request, user: str = Depends(require_admin)):
+    body = await request.json()
+    role = body.get("role")
+    if role not in db.VALID_USER_ROLES:
+        raise HTTPException(status_code=400, detail=f"role must be one of {db.VALID_USER_ROLES}")
+    target = db.get_user_by_username(user)
+    # Not a hard security boundary (require_admin still lets an admin fix
+    # this via direct DB access if truly needed) - just avoiding the
+    # confusing, easy-to-trigger-by-accident state of an admin locking
+    # themselves out of /bot and /trading with one click.
+    if target and target["id"] == user_id and role == "viewer":
+        raise HTTPException(status_code=400, detail="Cannot set your own account to viewer")
+    db.set_user_role(user_id, role)
+    return {"ok": True}
+
+
+@app.delete("/api/users/{user_id}")
+def api_delete_user(user_id: int, user: str = Depends(require_admin)):
+    requester = db.get_user_by_username(user)
+    if requester and requester["id"] == user_id:
+        raise HTTPException(status_code=400, detail="Cannot delete your own account")
+    try:
+        db.delete_user(user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
 # --------------------------------------------------------------- backtests ---
 # Spawned as an isolated subprocess (run_backtest.py), like every
 # IBKR-touching endpoint elsewhere in this file — not for a client-id
@@ -1152,7 +1270,7 @@ DEFAULT_BACKTEST_COMMISSION_PER_TRADE = 1.5
 
 
 @app.post("/api/backtests")
-async def api_create_backtest(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+async def api_create_backtest(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     body = await request.json()
     strategy_ids = body.get("strategy_ids")
     if not isinstance(strategy_ids, list) or not strategy_ids:
@@ -1261,7 +1379,7 @@ def api_backtest_data_fetch_coverage(user: str = Depends(require_user)):
 
 
 @app.post("/api/backtest_data_fetch")
-def api_create_backtest_data_fetch(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_create_backtest_data_fetch(account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     gw = gateway_control.status("paper", _env())
     if not (gw["gateway_active"] and gw["port_listening"]):
         raise HTTPException(
@@ -1295,14 +1413,14 @@ def api_get_backtest(backtest_id: int, account_id: int = Depends(require_account
 
 
 @app.delete("/api/backtests/{backtest_id}")
-def api_delete_backtest(backtest_id: int, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_delete_backtest(backtest_id: int, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     if not db.delete_backtest(backtest_id, account_id):
         raise HTTPException(status_code=404, detail="Backtest not found")
     return {"ok": True}
 
 
 @app.post("/api/backtests/{backtest_id}/cancel")
-def api_cancel_backtest(backtest_id: int, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_cancel_backtest(backtest_id: int, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     if not db.cancel_backtest(backtest_id, account_id):
         raise HTTPException(status_code=404, detail="Backtest not found, or already finished")
     _log_account_action(account_id, user, action="cancel_backtest", backtest_id=backtest_id)
@@ -1323,7 +1441,7 @@ def api_backtest_universe(user: str = Depends(require_user)):
 # (Authorization: Bearer <token>) instead of require_account/require_user.
 # See docs/worker.md and backtest_worker.py.
 @app.post("/api/worker_tokens")
-async def api_create_worker_token(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+async def api_create_worker_token(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     body = await request.json()
     label = (body.get("label") or "").strip()
     token_id, raw_token = db.create_worker_token(account_id, label)
@@ -1335,12 +1453,12 @@ async def api_create_worker_token(request: Request, account_id: int = Depends(re
 
 
 @app.get("/api/worker_tokens")
-def api_list_worker_tokens(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_list_worker_tokens(account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     return db.list_worker_tokens(account_id)
 
 
 @app.delete("/api/worker_tokens/{token_id}")
-def api_delete_worker_token(token_id: int, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_delete_worker_token(token_id: int, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     if not db.delete_worker_token(token_id, account_id):
         raise HTTPException(status_code=404, detail="Worker token not found")
     _log_account_action(account_id, user, action="delete_worker_token", token_id=token_id)

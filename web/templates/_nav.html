@@ -2,9 +2,14 @@
   <div class="container-fluid">
     <span class="navbar-brand mb-0 h1">TradingBot Dashboard</span>
     <div class="d-flex gap-2">
+      {% if not is_viewer %}
       <a href="/bot" class="btn btn-sm {{ 'btn-light' if active_page == 'bot' else 'btn-outline-light' }}">Bot</a>
       <a href="/trading" class="btn btn-sm {{ 'btn-light' if active_page == 'trading' else 'btn-outline-light' }}">Trading</a>
+      {% endif %}
       <a href="/backtest" class="btn btn-sm {{ 'btn-light' if active_page == 'backtest' else 'btn-outline-light' }}">Backtest</a>
+      {% if is_admin %}
+      <a href="/users" class="btn btn-sm {{ 'btn-light' if active_page == 'users' else 'btn-outline-light' }}">Users</a>
+      {% endif %}
       <a href="/guide" class="btn btn-outline-light btn-sm">מדריך למשתמש</a>
       <button type="button" class="btn btn-outline-light btn-sm theme-toggle-btn" onclick="toggleTheme()" title="Toggle dark mode">🌙</button>
       <form method="post" action="/logout" class="d-flex">

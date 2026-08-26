@@ -57,6 +57,14 @@
 
 <div class="container-fluid px-4">
 
+  {% if is_viewer %}
+  <div class="alert alert-info small">
+    Read-only backtest access — you can view History, the Strategy Report, and the Calendar, but can't
+    run/delete/cancel backtests, update backtest data, or generate worker tokens.
+  </div>
+  {% endif %}
+
+  {% if not is_viewer %}
   <div class="card mb-4">
     <div class="card-header">Backtest Data</div>
     <div class="card-body">
@@ -180,6 +188,7 @@
       <div id="bt-run-error" class="text-danger small mt-2"></div>
     </div>
   </div>
+  {% endif %}
 
   <div class="card mb-4 d-none" id="bt-results-card">
     <div class="card-header d-flex justify-content-between align-items-center">
@@ -234,6 +243,13 @@
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
+// role='viewer' (see the Users page) - the server already 403s every
+// write this page could otherwise trigger, so this is purely about not
+// showing a control that would just error out (Cancel/Delete in the
+// History table's actions column - everything else action-related is
+// entire cards Jinja hides server-side, above, for is_viewer).
+const IS_VIEWER = {{ "true" if is_viewer else "false" }};
+
 async function api(path, options) {
   const res = await fetch(path, Object.assign({ credentials: "same-origin" }, options || {}));
   if (res.status === 401) { window.location.href = "/login"; throw new Error("unauthenticated"); }
@@ -295,6 +311,7 @@ let bdfPollHandle = null;
 async function refreshBacktestDataFetchStatus() {
   const btn = document.getElementById("btn-update-backtest-data");
   const statusEl = document.getElementById("backtest-data-fetch-status");
+  if (!btn || !statusEl) return;  // viewer - the Backtest Data card isn't rendered at all
   let payload;
   try {
     payload = await api("/api/backtest_data_fetch/status");
@@ -340,6 +357,7 @@ async function refreshBacktestDataFetchStatus() {
 // cache_coverage_summary's docstring on that cost).
 async function refreshBacktestDataCoverage() {
   const el = document.getElementById("backtest-data-coverage");
+  if (!el) return;  // viewer - the Backtest Data card isn't rendered at all
   let payload;
   try {
     payload = await api("/api/backtest_data_fetch/coverage");
@@ -361,7 +379,7 @@ async function refreshBacktestDataCoverage() {
   el.innerHTML = `Cached: <strong>${fmtDateOnly(from)} → ${fmtDateOnly(to)}</strong> · ${coverage.symbols_cached}/${symbols_total_expected} symbols${laggardNote}`;
 }
 
-document.getElementById("btn-update-backtest-data").addEventListener("click", async () => {
+document.getElementById("btn-update-backtest-data")?.addEventListener("click", async () => {
   const btn = document.getElementById("btn-update-backtest-data");
   const statusEl = document.getElementById("backtest-data-fetch-status");
   btn.disabled = true;
@@ -401,6 +419,7 @@ async function loadStrategyPicker() {
   const rows = await api("/api/strategies");
   strategiesById = Object.fromEntries(rows.map(s => [s.id, s]));
   const el = document.getElementById("backtest-strategy-list");
+  if (!el) return;  // viewer - the New Backtest card (and this picker) isn't rendered at all; strategiesById above is still needed by the Calendar/History/Strategy Report
   el.innerHTML = rows.map(s => `
     <input type="checkbox" class="btn-check bt-strategy-checkbox" id="bt-strategy-${s.id}" value="${s.id}" autocomplete="off">
     <label class="btn btn-outline-secondary btn-sm strategy-pick" for="bt-strategy-${s.id}">
@@ -410,8 +429,9 @@ async function loadStrategyPicker() {
 }
 
 async function loadUniverseInfo() {
-  const info = await api("/api/backtest_universe");
   const el = document.getElementById("bt-universe-info");
+  if (!el) return;  // viewer - the New Backtest card (and this status line) isn't rendered at all
+  const info = await api("/api/backtest_universe");
   if (info.count === 0) {
     el.innerHTML = '<span class="text-danger">No symbols have cached historical bars yet — run <span class="mono">fetch_backtest_data.py</span> on the server first (see the guide).</span>';
   } else {
@@ -875,7 +895,7 @@ function renderHistoryTable() {
     const expanded = expandedBacktestIds.has(r.id);
     // stopPropagation on the actions cell - clicking Cancel/Delete must not
     // also toggle the row's own expand/collapse underneath it.
-    const actionBtn = (r.status === "running" || r.status === "pending")
+    const actionBtn = IS_VIEWER ? "" : (r.status === "running" || r.status === "pending")
       ? `<button class="btn btn-sm btn-outline-warning" onclick="event.stopPropagation(); cancelBacktest(${r.id})">Cancel</button>`
       : `<button class="btn btn-sm btn-outline-danger" onclick="event.stopPropagation(); deleteBacktest(${r.id})">Delete</button>`;
     rowsHtml.push(`<tr style="cursor:pointer" onclick="toggleBacktestExpand(${r.id})">
@@ -998,7 +1018,7 @@ document.getElementById("btn-cancel-current").addEventListener("click", (e) => {
   if (id) cancelBacktest(id);
 });
 
-document.getElementById("btn-run-backtest").addEventListener("click", async () => {
+document.getElementById("btn-run-backtest")?.addEventListener("click", async () => {
   const errorEl = document.getElementById("bt-run-error");
   errorEl.textContent = "";
   const strategyIds = Array.from(document.querySelectorAll(".bt-strategy-checkbox:checked")).map(el => Number(el.value));
@@ -1043,6 +1063,8 @@ const BT_RISK_PARAM_STORAGE_KEYS = {
 };
 
 function restoreRiskParams() {
+  // Viewer - the New Backtest card (and these inputs) isn't rendered at all.
+  if (!document.getElementById("bt-portfolio-value")) return;
   for (const [elId, storageKey] of Object.entries(BT_RISK_PARAM_STORAGE_KEYS)) {
     try {
       const saved = localStorage.getItem(storageKey);
@@ -1054,6 +1076,7 @@ function restoreRiskParams() {
 function persistRiskParamsOnChange() {
   for (const [elId, storageKey] of Object.entries(BT_RISK_PARAM_STORAGE_KEYS)) {
     const input = document.getElementById(elId);
+    if (!input) continue;  // viewer - not rendered
     input.addEventListener("input", () => {
       try { localStorage.setItem(storageKey, input.value); } catch (e) { /* won't persist this session - not fatal */ }
     });
@@ -1061,8 +1084,9 @@ function persistRiskParamsOnChange() {
 }
 
 async function refreshWorkerTokens() {
-  const rows = await api("/api/worker_tokens");
   const body = document.getElementById("worker-tokens-body");
+  if (!body) return;  // viewer - the Remote Worker card isn't rendered at all
+  const rows = await api("/api/worker_tokens");
   if (!rows.length) { body.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No worker tokens yet</td></tr>'; return; }
   body.innerHTML = rows.map(t => `<tr>
     <td>${t.label || "-"}</td>
@@ -1083,7 +1107,7 @@ async function revokeWorkerToken(id) {
   refreshWorkerTokens();
 }
 
-document.getElementById("btn-generate-worker-token").addEventListener("click", async () => {
+document.getElementById("btn-generate-worker-token")?.addEventListener("click", async () => {
   const labelEl = document.getElementById("worker-token-label");
   const noticeEl = document.getElementById("worker-token-new");
   try {
@@ -1109,9 +1133,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   restoreCalendarFilter();
   refreshWorkerTokens();
   persistRiskParamsOnChange();
-  dateRangePicker = flatpickr("#bt-date-range", {
-    mode: "range", dateFormat: "d/m/Y", allowInput: false,
-  });
+  if (document.getElementById("bt-date-range")) {  // viewer - the New Backtest card isn't rendered at all
+    dateRangePicker = flatpickr("#bt-date-range", {
+      mode: "range", dateFormat: "d/m/Y", allowInput: false,
+    });
+  }
   await loadStrategyPicker();
   loadUniverseInfo();
   refreshHistory();
