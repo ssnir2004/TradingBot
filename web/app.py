@@ -1359,9 +1359,13 @@ def api_backtests_calendar(account_id: int = Depends(require_account), user: str
 # Registered ahead of /api/backtest_data_fetch/{fetch_id} for the same
 # registration-order reason as strategy_report/calendar above.
 @app.get("/api/backtest_data_fetch/status")
-def api_backtest_data_fetch_status(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+def api_backtest_data_fetch_status(
+    mode: str = Query("paper"), account_id: int = Depends(require_account), user: str = Depends(require_user)
+):
+    if mode not in ("paper", "live"):
+        raise HTTPException(status_code=400, detail="mode must be 'paper' or 'live'.")
     return {
-        "gateway": gateway_control.status("paper", _env()),
+        "gateway": gateway_control.status(mode, _env()),
         "latest": db.get_latest_backtest_data_fetch(account_id),
     }
 
@@ -1379,20 +1383,24 @@ def api_backtest_data_fetch_coverage(user: str = Depends(require_user)):
 
 
 @app.post("/api/backtest_data_fetch")
-def api_create_backtest_data_fetch(account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
-    gw = gateway_control.status("paper", _env())
+async def api_create_backtest_data_fetch(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    body = await request.json() if await request.body() else {}
+    mode = body.get("mode", "paper")
+    if mode not in ("paper", "live"):
+        raise HTTPException(status_code=400, detail="mode must be 'paper' or 'live'.")
+    gw = gateway_control.status(mode, _env())
     if not (gw["gateway_active"] and gw["port_listening"]):
         raise HTTPException(
             status_code=400,
-            detail="IBKR paper Gateway isn't connected - check Gateway Connection before updating backtest data.",
+            detail=f"IBKR {mode} Gateway isn't connected - check Gateway Connection before updating backtest data.",
         )
     latest = db.get_latest_backtest_data_fetch(account_id)
     if latest and latest["status"] in ("pending", "running"):
         raise HTTPException(status_code=409, detail=f"An update (#{latest['id']}) is already running.")
-    fetch_id = db.create_backtest_data_fetch(account_id)
-    proc = subprocess.Popen([sys.executable, str(PROJECT_DIR / "run_backtest_data_fetch.py"), "--fetch-id", str(fetch_id)])
+    fetch_id = db.create_backtest_data_fetch(account_id, mode)
+    proc = subprocess.Popen([sys.executable, str(PROJECT_DIR / "run_backtest_data_fetch.py"), "--fetch-id", str(fetch_id), "--mode", mode])
     db.set_backtest_data_fetch_pid(fetch_id, proc.pid)
-    _log_account_action(account_id, user, action="backtest_data_fetch_start", fetch_id=fetch_id)
+    _log_account_action(account_id, user, action="backtest_data_fetch_start", fetch_id=fetch_id, fetch_mode=mode)
     return {"id": fetch_id}
 
 

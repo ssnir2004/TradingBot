@@ -209,6 +209,7 @@ CREATE TABLE IF NOT EXISTS backtest_data_fetches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
+    mode TEXT NOT NULL DEFAULT 'paper',
     summary_json TEXT,
     error TEXT,
     pid INTEGER,
@@ -876,6 +877,7 @@ def init_db(seed_rules_path: Path | None = None):
         _migrate_add_column(conn, "backtests", "pid", "INTEGER")
         _migrate_add_column(conn, "backtests", "execution_mode", "TEXT NOT NULL DEFAULT 'local'")
         _migrate_add_column(conn, "backtests", "claimed_at", "TEXT")
+        _migrate_add_column(conn, "backtest_data_fetches", "mode", "TEXT NOT NULL DEFAULT 'paper'")
         # The shipped default strategy predates risk_rating and got the
         # generic 'moderate' default from the ALTER TABLE above — it's
         # actually the conservative baseline every preset above is loosened
@@ -1858,12 +1860,12 @@ def list_backtest_calendar_entries(account_id: int) -> list[dict]:
 # isolated subprocess (run_backtest_data_fetch.py) that the always-on
 # dashboard process spawns and tracks rather than running fetch_backtest_
 # data.py's long, IBKR-connected fetch in-process.
-def create_backtest_data_fetch(account_id: int) -> int:
+def create_backtest_data_fetch(account_id: int, mode: str = "paper") -> int:
     now = datetime.now(ET).isoformat(timespec="seconds")
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO backtest_data_fetches (account_id, status, created_at) VALUES (?, 'pending', ?)",
-            (account_id, now),
+            "INSERT INTO backtest_data_fetches (account_id, status, mode, created_at) VALUES (?, 'pending', ?, ?)",
+            (account_id, mode, now),
         )
         return cur.lastrowid
 
