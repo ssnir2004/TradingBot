@@ -390,6 +390,21 @@ def _compute_rsi(closes: pd.Series, period: int) -> float | None:
     return float(value) if pd.notna(value) else None
 
 
+def _compute_ema(closes: pd.Series, period: int) -> float | None:
+    """Standard EMA (alpha = 2/(period+1), via pandas' own `span=` - not
+    Wilder's alpha=1/period smoothing _compute_atr/_compute_rsi use, that
+    convention is specific to those two indicators) as of the most recent
+    bar of `closes`. None if there isn't enough history yet for a
+    meaningful value. Same continues-across-the-session-boundary
+    convention as _compute_rsi (closes is the whole multi-day intraday
+    series, not reset each day) - standard practice for an intraday EMA,
+    and keeps this consistent with how I2's RSI option already works."""
+    if len(closes) < period:
+        return None
+    value = closes.ewm(span=period, adjust=False).mean().iloc[-1]
+    return float(value) if pd.notna(value) else None
+
+
 def _compute_atr(daily: pd.DataFrame, period: int = 14) -> float | None:
     """Wilder's ATR (Average True Range) as of the last COMPLETE trading
     day in `daily` — excludes daily.iloc[-1] (today, still in progress),
@@ -788,6 +803,9 @@ def _evaluate_filters_from_bars(
         if "I2_rsi_above" in intraday_filters:
             rsi_value = _compute_rsi(intraday["Close"], intraday_filters.get("I2_rsi_period", 14))
             i2 = rsi_value is not None and rsi_value > intraday_filters["I2_rsi_above"]  # RSI above threshold
+        elif intraday_filters.get("I2_ema_above"):
+            ema_value = _compute_ema(intraday["Close"], intraday_filters.get("I2_ema_period", 9))
+            i2 = ema_value is not None and current_price > ema_value  # above the short EMA
         else:
             extreme_so_far = float(today_bars["High"].iloc[:-1].max()) if len(today_bars) > 1 else float("-inf")
             i2 = current_price > extreme_so_far  # new high-of-day
@@ -805,6 +823,9 @@ def _evaluate_filters_from_bars(
         if "I2_rsi_below" in intraday_filters:
             rsi_value = _compute_rsi(intraday["Close"], intraday_filters.get("I2_rsi_period", 14))
             i2 = rsi_value is not None and rsi_value < intraday_filters["I2_rsi_below"]  # RSI below threshold (rolled over)
+        elif intraday_filters.get("I2_ema_below"):
+            ema_value = _compute_ema(intraday["Close"], intraday_filters.get("I2_ema_period", 9))
+            i2 = ema_value is not None and current_price < ema_value  # below the short EMA
         else:
             extreme_so_far = float(today_bars["Low"].iloc[:-1].min()) if len(today_bars) > 1 else float("inf")
             i2 = current_price < extreme_so_far  # new low-of-day
