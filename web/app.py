@@ -224,7 +224,10 @@ def bot_page(request: Request):
     account = db.get_user_by_username(username)
     if account and account.get("role") == "viewer":
         return RedirectResponse("/backtest", status_code=303)
-    return templates.TemplateResponse(request, "bot.html", {"active_page": "bot", "is_admin": bool(account and account.get("is_admin"))})
+    return templates.TemplateResponse(request, "bot.html", {
+        "active_page": "bot", "is_admin": bool(account and account.get("is_admin")),
+        "default_commission_per_trade": DEFAULT_BACKTEST_COMMISSION_PER_TRADE,
+    })
 
 
 @app.get("/trading", response_class=HTMLResponse)
