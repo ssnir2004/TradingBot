@@ -295,6 +295,7 @@ function renderTrades(pairs) {
       <td class="mono">${fmtMoney(p.initial_stop)}</td>
       <td class="mono">${fmtMoney(p.close_price)}</td>
       <td>${p.size}</td>
+      <td class="mono">${fmtMoney(p.open_price * p.size)}</td>
       <td class="mono ${pnlClass}">${fmtMoney(p.pnl_usd)}</td>
       <td class="mono text-muted">${fmtMoney(p.commission_usd)}</td>
       <td>${reason}</td>
@@ -305,7 +306,7 @@ function renderTrades(pairs) {
     <div class="small text-muted mb-1">Trades (${pairs.length})</div>
     <div style="max-height:280px; overflow-y:auto; overflow-x:auto;">
       <table class="table table-sm mb-0">
-        <thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Initial Stop</th><th>Exit</th><th>Size</th><th>P&amp;L</th><th>Commission</th><th>Closed by</th><th>When</th></tr></thead>
+        <thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Initial Stop</th><th>Exit</th><th>Size</th><th>Position $</th><th>P&amp;L</th><th>Commission</th><th>Closed by</th><th>When</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
