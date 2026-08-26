@@ -81,6 +81,7 @@ async def on_startup():
     # that leaves the backtest's row stuck at 'running' forever; this
     # reconciles that on every startup instead.
     db.fail_orphaned_backtests()
+    db.fail_orphaned_backtest_data_fetches()  # same reconciliation, same reason - see its own docstring
     asyncio.create_task(_requeue_abandoned_worker_backtests_loop())
 
 
@@ -1227,6 +1228,49 @@ def api_backtests_strategy_report(account_id: int = Depends(require_account), us
 @app.get("/api/backtests/calendar")
 def api_backtests_calendar(account_id: int = Depends(require_account), user: str = Depends(require_user)):
     return db.list_backtest_calendar_entries(account_id)
+
+
+# ----------------------------------------------------- backtest data fetch ---
+# "Update backtest data" button on the Backtest page - refreshes the local
+# intraday-bars cache from IBKR (see fetch_backtest_data.py). Spawned the
+# same way as a local backtest (subprocess.Popen, tracked via its own DB
+# row) since it needs a live IB Gateway connection and can run a long time -
+# neither of which this always-on dashboard process should hold itself.
+
+# Registered ahead of /api/backtest_data_fetch/{fetch_id} for the same
+# registration-order reason as strategy_report/calendar above.
+@app.get("/api/backtest_data_fetch/status")
+def api_backtest_data_fetch_status(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    return {
+        "gateway": gateway_control.status("paper", _env()),
+        "latest": db.get_latest_backtest_data_fetch(account_id),
+    }
+
+
+@app.post("/api/backtest_data_fetch")
+def api_create_backtest_data_fetch(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    gw = gateway_control.status("paper", _env())
+    if not (gw["gateway_active"] and gw["port_listening"]):
+        raise HTTPException(
+            status_code=400,
+            detail="IBKR paper Gateway isn't connected - check Gateway Connection before updating backtest data.",
+        )
+    latest = db.get_latest_backtest_data_fetch(account_id)
+    if latest and latest["status"] in ("pending", "running"):
+        raise HTTPException(status_code=409, detail=f"An update (#{latest['id']}) is already running.")
+    fetch_id = db.create_backtest_data_fetch(account_id)
+    proc = subprocess.Popen([sys.executable, str(PROJECT_DIR / "run_backtest_data_fetch.py"), "--fetch-id", str(fetch_id)])
+    db.set_backtest_data_fetch_pid(fetch_id, proc.pid)
+    _log_account_action(account_id, user, action="backtest_data_fetch_start", fetch_id=fetch_id)
+    return {"id": fetch_id}
+
+
+@app.get("/api/backtest_data_fetch/{fetch_id}")
+def api_get_backtest_data_fetch(fetch_id: int, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    record = db.get_backtest_data_fetch(fetch_id)
+    if not record or record["account_id"] != account_id:
+        raise HTTPException(status_code=404, detail="Not found")
+    return record
 
 
 @app.get("/api/backtests/{backtest_id}")
