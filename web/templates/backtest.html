@@ -142,6 +142,7 @@
       </div>
     </div>
     <div class="card-body viz-root">
+      <div id="cal-filter-notice" class="small mb-2"></div>
       <div id="cal-grid">Loading…</div>
       <div id="cal-legend" class="d-flex flex-wrap gap-3 mt-3"></div>
     </div>
@@ -444,7 +445,29 @@ function toggleCalendarStrategyFilter(sid) {
   else calHiddenStrategyIds.add(sid);
   persistCalendarFilter();
   if (calEntriesCache) renderCalendarGrid(calEntriesCache);
+  renderCalendarFilterNotice();
   renderStrategyReport();  // same filter, no re-fetch - just re-render from the cached rows
+}
+
+// The filter persists across page loads (see restoreCalendarFilter) with
+// no other visible trace once its own checkboxes scroll out of view - this
+// is what stops "a strategy I just ran a backtest for isn't showing up"
+// from looking like a bug days after whichever session actually unchecked
+// it. Only rendered (non-empty) while at least one strategy is hidden.
+function renderCalendarFilterNotice() {
+  const el = document.getElementById("cal-filter-notice");
+  if (!el) return;
+  el.innerHTML = calHiddenStrategyIds.size
+    ? `<span class="text-warning">⚠ ${calHiddenStrategyIds.size} strateg${calHiddenStrategyIds.size === 1 ? "y" : "ies"} hidden by the filter below.</span> <a href="#" onclick="event.preventDefault(); showAllCalendarStrategies();">Show all</a>`
+    : "";
+}
+
+function showAllCalendarStrategies() {
+  calHiddenStrategyIds.clear();
+  persistCalendarFilter();
+  if (calEntriesCache) { renderCalendarGrid(calEntriesCache); renderCalendarLegend(calEntriesCache); }
+  renderCalendarFilterNotice();
+  renderStrategyReport();
 }
 
 function renderCalendarLegend(entries) {
@@ -452,13 +475,14 @@ function renderCalendarLegend(entries) {
   for (const e of entries) for (const sid of e.strategy_ids) present.add(String(sid));
   const orderedIds = Object.keys(strategiesById).map(Number).sort((a, b) => a - b).map(String).filter(sid => present.has(sid));
   const el = document.getElementById("cal-legend");
-  if (!orderedIds.length) { el.innerHTML = '<span class="text-muted small">No backtests yet.</span>'; return; }
+  if (!orderedIds.length) { el.innerHTML = '<span class="text-muted small">No backtests yet.</span>'; renderCalendarFilterNotice(); return; }
   el.innerHTML = orderedIds.map(sid => `
     <label class="d-flex align-items-center gap-1 small mb-0" style="cursor:pointer">
       <input type="checkbox" class="form-check-input mt-0" ${calHiddenStrategyIds.has(sid) ? "" : "checked"}
              onchange="toggleCalendarStrategyFilter('${sid}')">
       <span class="cal-dot" style="background:${strategyColorById[sid] || "var(--series-other)"}"></span>${strategyLabel(sid)}
     </label>`).join("");
+  renderCalendarFilterNotice();
 }
 
 function toISODateLocal(y, m, d) { return `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`; }
