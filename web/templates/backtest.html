@@ -421,11 +421,28 @@ function strategyLabel(sid) {
 // unchecking the rest isolates it - independent checkboxes, so any
 // combination (multi-select) is just "whichever ones are still checked."
 let calHiddenStrategyIds = new Set();
+const CAL_HIDDEN_STRATEGY_IDS_STORAGE_KEY = "tradingbot.backtest.calendar.hidden_strategy_ids";
+
+// Same local-only persistence pattern as restoreRiskParams/persistRiskParamsOnChange
+// below (a per-browser display preference, not account data - wrapped in
+// try/catch since localStorage can throw in private browsing/disabled site data).
+function restoreCalendarFilter() {
+  try {
+    const saved = localStorage.getItem(CAL_HIDDEN_STRATEGY_IDS_STORAGE_KEY);
+    if (saved) calHiddenStrategyIds = new Set(JSON.parse(saved));
+  } catch (e) { /* keep the default (nothing hidden) */ }
+}
+
+function persistCalendarFilter() {
+  try { localStorage.setItem(CAL_HIDDEN_STRATEGY_IDS_STORAGE_KEY, JSON.stringify(Array.from(calHiddenStrategyIds))); }
+  catch (e) { /* won't persist this session - not fatal */ }
+}
 
 function toggleCalendarStrategyFilter(sid) {
   sid = String(sid);
   if (calHiddenStrategyIds.has(sid)) calHiddenStrategyIds.delete(sid);
   else calHiddenStrategyIds.add(sid);
+  persistCalendarFilter();
   if (calEntriesCache) renderCalendarGrid(calEntriesCache);
   renderStrategyReport();  // same filter, no re-fetch - just re-render from the cached rows
 }
@@ -859,6 +876,7 @@ document.getElementById("btn-generate-worker-token").addEventListener("click", a
 
 document.addEventListener("DOMContentLoaded", async () => {
   restoreRiskParams();
+  restoreCalendarFilter();
   refreshWorkerTokens();
   persistRiskParamsOnChange();
   dateRangePicker = flatpickr("#bt-date-range", {
