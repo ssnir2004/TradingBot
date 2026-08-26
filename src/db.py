@@ -863,6 +863,8 @@ def init_db(seed_rules_path: Path | None = None):
         _migrate_add_column(conn, "backtests", "pid", "INTEGER")
         _migrate_add_column(conn, "backtests", "execution_mode", "TEXT NOT NULL DEFAULT 'local'")
         _migrate_add_column(conn, "backtests", "claimed_at", "TEXT")
+        _migrate_add_column(conn, "backtests", "archived_at", "TEXT")
+        _migrate_add_column(conn, "backtests", "archive_folder", "TEXT NOT NULL DEFAULT ''")
         _migrate_add_column(conn, "backtest_data_fetches", "mode", "TEXT NOT NULL DEFAULT 'paper'")
         # The shipped default strategy predates risk_rating and got the
         # generic 'moderate' default from the ALTER TABLE above — it's
@@ -1743,46 +1745,113 @@ def cancel_backtest(backtest_id: int, account_id: int) -> bool:
     return True
 
 
+def _backtest_row_to_summary(row) -> dict:
+    """Shared by list_backtests/list_archived_backtests: turns one raw
+    `backtests` row into a summary dict carrying total_pnl_usd, a
+    lightweight sum of every strategy's own aggregate.net_pnl_usd (falling
+    back to the older gross_pnl_usd for a result stored before commission
+    modeling added that field) within that run's results, so a list can
+    mark a run profitable/unprofitable - after realistic transaction
+    costs, not just on paper - at a glance, without the caller pulling
+    every row's full trade log just to find that out. results_json itself
+    (which can be large, with several strategies' full trade logs) is
+    parsed here to compute that sum but never included in the returned
+    dict - only the derived total."""
+    result = dict(row)
+    result["params"] = json.loads(result.pop("params_json"))
+    raw_results = result.pop("results_json")
+    result["total_pnl_usd"] = None
+    if raw_results:
+        try:
+            parsed = json.loads(raw_results)
+            pnls = [
+                s["aggregate"].get("net_pnl_usd", s["aggregate"].get("gross_pnl_usd"))
+                for s in parsed.values()
+                if isinstance(s, dict) and "aggregate" in s
+            ]
+            pnls = [p for p in pnls if p is not None]
+            if pnls:
+                result["total_pnl_usd"] = round(sum(pnls), 2)
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass  # malformed/unexpected results_json - leave total_pnl_usd as None rather than fail the whole list
+    return result
+
+
 def list_backtests(account_id: int, limit: int = 100) -> list[dict]:
     """Summary rows for the history list (fetch a single backtest's full
-    detail, including its per-trade pairs, via get_backtest) - but each
-    row DOES carry total_pnl_usd, a lightweight sum of every strategy's
-    own aggregate.net_pnl_usd (falling back to the older gross_pnl_usd
-    for a result stored before commission modeling added that field)
-    within that run's results, so the list can mark a run profitable/
-    unprofitable - after realistic transaction costs, not just on paper -
-    at a glance, without the caller pulling every row's full trade log
-    just to find that out. results_json itself (which can be large, with
-    several strategies' full trade logs) is parsed here to compute that
-    sum but never included in the returned dict - only the derived
-    total."""
+    detail, including its per-trade pairs, via get_backtest) - see
+    _backtest_row_to_summary for what each row carries.
+
+    Archived rows (archived_at set - see archive_backtests) are excluded:
+    an archived run has no business cluttering the day-to-day History
+    list it was deliberately filed away out of - list_archived_backtests
+    is the separate view for those."""
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT id, account_id, status, params_json, results_json, error, execution_mode, created_at, claimed_at, finished_at FROM backtests "
-            "WHERE account_id = ? ORDER BY created_at DESC LIMIT ?",
+            "WHERE account_id = ? AND archived_at IS NULL ORDER BY created_at DESC LIMIT ?",
             (account_id, limit),
         ).fetchall()
-        results = []
-        for row in rows:
-            result = dict(row)
-            result["params"] = json.loads(result.pop("params_json"))
-            raw_results = result.pop("results_json")
-            result["total_pnl_usd"] = None
-            if raw_results:
-                try:
-                    parsed = json.loads(raw_results)
-                    pnls = [
-                        s["aggregate"].get("net_pnl_usd", s["aggregate"].get("gross_pnl_usd"))
-                        for s in parsed.values()
-                        if isinstance(s, dict) and "aggregate" in s
-                    ]
-                    pnls = [p for p in pnls if p is not None]
-                    if pnls:
-                        result["total_pnl_usd"] = round(sum(pnls), 2)
-                except (json.JSONDecodeError, KeyError, TypeError):
-                    pass  # malformed/unexpected results_json - leave total_pnl_usd as None rather than fail the whole list
-            results.append(result)
-        return results
+        return [_backtest_row_to_summary(row) for row in rows]
+
+
+def archive_backtests(account_id: int, backtest_ids: list[int], folder: str) -> int:
+    """Files the given backtests away into `folder` (a short free-text
+    label explaining why, e.g. "old universe, before the I3 fix") -
+    archived_at is set to now, archive_folder to the given label. Excludes
+    them from the History list, the Backtest Calendar, and the Strategy
+    Report (see those functions' own archived_at IS NULL filters) until
+    explicitly restored via unarchive_backtests. Scoped to account_id like
+    delete_backtest/cancel_backtest. Returns how many rows actually
+    matched and were archived (silently skips any id that doesn't belong
+    to this account rather than failing the whole batch over one bad id -
+    a multi-select bulk action in the UI shouldn't need to pre-validate
+    every id itself)."""
+    if not backtest_ids:
+        return 0
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        placeholders = ",".join("?" for _ in backtest_ids)
+        cur = conn.execute(
+            f"UPDATE backtests SET archived_at = ?, archive_folder = ? "
+            f"WHERE account_id = ? AND id IN ({placeholders})",
+            (now, folder, account_id, *backtest_ids),
+        )
+        return cur.rowcount
+
+
+def unarchive_backtests(account_id: int, backtest_ids: list[int]) -> int:
+    """Restores the given backtests to the ordinary History/Calendar/
+    Strategy Report views - clears both archived_at and archive_folder (a
+    restored run has no folder anymore; archiving it again later starts
+    fresh). Same account-scoping/silent-skip behavior as
+    archive_backtests."""
+    if not backtest_ids:
+        return 0
+    with get_conn() as conn:
+        placeholders = ",".join("?" for _ in backtest_ids)
+        cur = conn.execute(
+            f"UPDATE backtests SET archived_at = NULL, archive_folder = '' "
+            f"WHERE account_id = ? AND id IN ({placeholders})",
+            (account_id, *backtest_ids),
+        )
+        return cur.rowcount
+
+
+def list_archived_backtests(account_id: int) -> list[dict]:
+    """Every archived backtest, same summary shape as list_backtests (see
+    _backtest_row_to_summary) plus archived_at/archive_folder, for the
+    Archive view - grouped by folder client-side (a run's folder is just a
+    text label on the row, not a separate table, so "the folders" are
+    whatever distinct values are currently in use, computed on the fly)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, account_id, status, params_json, results_json, error, execution_mode, "
+            "created_at, claimed_at, finished_at, archived_at, archive_folder FROM backtests "
+            "WHERE account_id = ? AND archived_at IS NOT NULL ORDER BY archived_at DESC",
+            (account_id,),
+        ).fetchall()
+        return [_backtest_row_to_summary(row) for row in rows]
 
 
 def list_done_backtest_results(account_id: int) -> list[dict]:
@@ -1794,11 +1863,16 @@ def list_done_backtest_results(account_id: int) -> list[dict]:
     separate query rather than a mode on the existing one. Returns
     [{"id", "created_at", "params", "results"}, ...], oldest first (so a
     caller pooling by date range can just keep whichever entry it sees
-    last for a given key to prefer the newest re-run)."""
+    last for a given key to prefer the newest re-run).
+
+    Archived rows are excluded - same reasoning as list_backtests: an
+    archived run must stay out of the Strategy Report it pools into until
+    explicitly restored (see archive_backtests), not just out of the
+    History list."""
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT id, params_json, results_json, created_at FROM backtests "
-            "WHERE account_id = ? AND status = 'done' AND results_json IS NOT NULL "
+            "WHERE account_id = ? AND status = 'done' AND results_json IS NOT NULL AND archived_at IS NULL "
             "ORDER BY created_at ASC",
             (account_id,),
         ).fetchall()
@@ -1818,10 +1892,14 @@ def list_backtest_calendar_entries(account_id: int) -> list[dict]:
     Backtest page's calendar view - no limit (unlike list_backtests, tuned
     for the recency-capped History table) and no results_json parsing at
     all, since the calendar only ever needs "which days, which strategies,
-    what state" - never P&L."""
+    what state" - never P&L.
+
+    Archived rows are excluded - same reasoning as list_backtests: an
+    archived run's dot must disappear from the calendar until explicitly
+    restored (see archive_backtests)."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT id, status, params_json FROM backtests WHERE account_id = ? ORDER BY created_at ASC",
+            "SELECT id, status, params_json FROM backtests WHERE account_id = ? AND archived_at IS NULL ORDER BY created_at ASC",
             (account_id,),
         ).fetchall()
     out = []
