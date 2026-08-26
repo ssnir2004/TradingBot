@@ -29,8 +29,6 @@
 
   "exit": {
     "initial_stop_rule": "lod_minus_1pct",
-    "partial_profit_trigger_R": 0.75,
-    "partial_profit_fraction": 0.3333,
     "breakeven_trigger_R": 1.0,
     "post_breakeven_trail": "swing_low_5m_2_2"
   },

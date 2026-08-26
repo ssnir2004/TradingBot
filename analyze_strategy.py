@@ -16,6 +16,7 @@ Usage:
     python3 analyze_strategy.py --strategy "Long Breakout Fade" --account-id 1
 """
 import argparse
+import json
 import statistics
 from collections import defaultdict
 from datetime import datetime
@@ -238,6 +239,7 @@ def main():
 
     strategy = find_strategy(account_id, args.strategy)
     strategy_id = strategy["id"]
+    full_strategy = db.get_strategy(strategy_id)
 
     backtests = db.list_done_backtest_results(account_id)
     pooled = pool_strategy_pairs(backtests, strategy_id)
@@ -247,6 +249,9 @@ def main():
     print(f"Date ranges pooled ({len(pooled['date_ranges'])} backtest run(s)):")
     for start, end in pooled["date_ranges"]:
         print(f"  {start} -> {end}")
+
+    section("rules_json (as currently configured)")
+    print(json.dumps(json.loads(full_strategy["rules_json"]), indent=2, ensure_ascii=False))
 
     if not pairs:
         print("\nNo closed trades found for this strategy across any 'done' backtest.")

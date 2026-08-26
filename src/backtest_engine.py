@@ -1,7 +1,7 @@
 """Backtest engine: replays a strategy day-by-day against historical bars
 to produce a trade log and performance stats "as if" it had really been
 running — reusing cycle.py's exact live decision logic
-(_evaluate_filters_from_bars for entries, _breakeven_or_partial_decision/
+(_evaluate_filters_from_bars for entries, _breakeven_decision/
 _trailing_stop_decision for exits) so the backtester can never quietly
 drift from what the live bot actually does; only the data source and the
 "place a real order" step are different.
@@ -190,10 +190,9 @@ def simulate_strategy(
     strategy found few or no trades (which specific condition(s) are
     actually the bottleneck) instead of leaving that to guesswork.
 
-    commission_per_trade is charged per FILL (every entry, every partial
-    close, every final close each cost it separately - a position closed
-    via one partial-profit fill plus one final fill costs 3x, not 2x),
-    recorded on each trade record as "commission" and only ever summed up
+    commission_per_trade is charged per FILL (both the entry and the exit
+    cost it separately - 2x per closed position, not 1x), recorded on each
+    trade record as "commission" and only ever summed up
     downstream in perf.pair_trades/aggregate - never subtracted from
     fill_price itself, so it can't quietly distort stop/sizing math that
     has nothing to do with transaction costs. Defaults to 0 (unchanged
@@ -369,19 +368,8 @@ def simulate_strategy(
                 r_multiple = ((pos["entry_price"] - price) if side == "short" else (price - pos["entry_price"])) / initial_risk if initial_risk > 0 else 0.0
 
                 if pos["state"] == "pre_breakeven":
-                    decision = cycle._breakeven_or_partial_decision(pos, exit_cfg, r_multiple)
+                    decision = cycle._breakeven_decision(pos, exit_cfg, r_multiple)
                     if decision["action"] == "breakeven_flip":
-                        pos["stop_price"] = decision["new_stop_price"]
-                        pos["state"] = decision["new_state"]
-                    elif decision["action"] == "partial_profit":
-                        close_qty = decision["close_qty"]
-                        trade_id += 1
-                        trades.append({
-                            "id": trade_id, "symbol": symbol, "side": close_action,
-                            "fill_price": price, "size": close_qty, "timestamp_iso": bar_ts.isoformat(),
-                            "exit_reason": "partial_profit", "commission": commission_per_trade,
-                        })
-                        pos["qty"] -= close_qty
                         pos["stop_price"] = decision["new_stop_price"]
                         pos["state"] = decision["new_state"]
 
@@ -450,8 +438,7 @@ def simulate_strategy(
                         continue
 
                     price = detail["price"]
-                    stop_ref = detail["stop_ref"]
-                    initial_stop = cycle._resolve_initial_stop(stop_ref, strategy_rules, side)
+                    initial_stop = cycle._resolve_initial_stop(detail, strategy_rules, side)
                     r = (initial_stop - price) if side == "short" else (price - initial_stop)
                     if r <= 0:
                         continue
