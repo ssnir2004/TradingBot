@@ -103,6 +103,14 @@ You'll see output like:
   laptop mid-run) is automatically detected and marked failed** after 15
   minutes with no result — the dashboard checks for this once a minute in
   the background. Just re-run it once your worker's back.
+- **Stopping the worker (Ctrl+C) to `git pull` an update triggers this same
+  "abandoned claim" failure if it currently has a job claimed** — the
+  backtest it was working on gets marked failed after 15 minutes, same as a
+  crash. Check the worker's terminal output before stopping it: if the last
+  line is `[worker] claimed backtest N ...` with no matching "done"/result
+  line yet, it's still mid-job. Either wait for it to finish that job first,
+  or accept that you'll need to re-run (via the dashboard's Retry button)
+  the backtest it was in the middle of.
 - **One token per worker machine is the simplest setup**, but nothing
   stops you from running the same token on two machines - they'll both
   poll and race for whichever job is claimed first, which is a harmless
