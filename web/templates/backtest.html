@@ -765,11 +765,15 @@ async function deleteBacktest(id) {
   }
   expandedBacktestIds.delete(id);
   delete expandedDetailCache[id];
-  if (id === currentBacktestId) {
-    hideResults();
-    return;
-  }
+  if (id === currentBacktestId) hideResults();
+  // Always refresh all three, even when the deleted row was the one open in
+  // the top card above (that used to `return` early here, skipping every
+  // refresh below - the Calendar's dot for a deleted run, and any Strategy
+  // Report card that pooled it, would then linger stale until the next full
+  // page load instead of updating right away like every other action does).
   refreshHistory();
+  refreshCalendar();
+  refreshStrategyReport();
 }
 
 async function cancelBacktest(id) {
