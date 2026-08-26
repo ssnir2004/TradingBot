@@ -40,6 +40,7 @@ def main():
         env.get("IBKR_HOST", "127.0.0.1"),
         mode_config.ibkr_port(env, account_id, args.mode),
         int(env.get("IBKR_MODIFY_CLIENT_ID", 14)),
+        account=mode_config.ibkr_account(env, account_id, args.mode),
     )
     try:
         ib = ibkr.ib
@@ -58,6 +59,8 @@ def main():
 
         action = "SELL" if pos.get("side", "long") == "long" else "BUY"
         order = StopOrder(action, pos["qty"], round(args.stop_price, 2))
+        if getattr(ib, "account", None):
+            order.account = ib.account
         trade = ib.placeOrder(qualified, order)
         ib.sleep(1)
         new_order_id = trade.order.orderId

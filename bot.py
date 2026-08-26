@@ -50,6 +50,7 @@ def main():
         env.get("IBKR_HOST", "127.0.0.1"),
         mode_config.ibkr_port(env, account_id, args.mode),
         int(env.get("IBKR_CLIENT_ID", 2)),
+        account=mode_config.ibkr_account(env, account_id, args.mode),
     )
 
     try:

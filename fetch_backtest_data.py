@@ -258,6 +258,7 @@ def run_fetch(
         env.get("IBKR_HOST", "127.0.0.1"),
         mode_config.ibkr_port(env, account_id, mode),
         int(env.get("IBKR_BACKTEST_CLIENT_ID", 4)),
+        account=mode_config.ibkr_account(env, account_id, mode),
     )
     # ib.RequestTimeout wraps EVERY blocking call on this client (including
     # qualifyContracts, not just reqHistoricalData) with an outer wait_for -

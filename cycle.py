@@ -112,6 +112,7 @@ def _connect(env: dict, account_id: int, mode: str, client_id: int) -> IBKRClien
         env.get("IBKR_HOST", "127.0.0.1"),
         mode_config.ibkr_port(env, account_id, mode),
         client_id,
+        account=mode_config.ibkr_account(env, account_id, mode),
     )
 
 
@@ -175,6 +176,8 @@ def _place_stop(ib, symbol: str, quantity: int, stop_price: float, side: str) ->
     contract = _qualify(ib, symbol)
     action = "SELL" if side == "long" else "BUY"
     order = StopOrder(action, quantity, round(stop_price, 2))
+    if getattr(ib, "account", None):
+        order.account = ib.account
     trade = ib.placeOrder(contract, order)
     ib.sleep(1)
     return trade.order.orderId

@@ -35,6 +35,7 @@ def main():
         env.get("IBKR_HOST", "127.0.0.1"),
         mode_config.ibkr_port(env, account_id, args.mode),
         int(env.get("IBKR_CLOSE_CLIENT_ID", 13)),
+        account=mode_config.ibkr_account(env, account_id, args.mode),
     )
 
     try:

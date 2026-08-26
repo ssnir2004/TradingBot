@@ -7,9 +7,29 @@ SETTLED_STATUSES_TIMEOUT = 20
 
 
 class IBKRClient:
-    def __init__(self, host: str, port: int, client_id: int):
+    def __init__(self, host: str, port: int, client_id: int, account: str | None = None):
         self.ib = IB()
         self.ib.connect(host, port, clientId=client_id)
+        # IBKR rejects every order with error 435 ("You must specify an
+        # account") once a login is authorized for more than one account -
+        # a single-account login auto-fills it and needs nothing here, but
+        # an ambiguous one needs the caller-supplied account (see
+        # mode_config.ibkr_account) or this fails loudly right away rather
+        # than letting every subsequent order silently get cancelled.
+        # Stamped onto self.ib too so code that only has the raw ib_async
+        # IB object (e.g. cycle.py's _place_stop) can still read it.
+        if account:
+            self.account = account
+        else:
+            accounts = self.ib.managedAccounts()
+            if len(accounts) > 1:
+                raise RuntimeError(
+                    f"This IBKR login manages multiple accounts {accounts} but no "
+                    "account was configured - set the matching *_IBKR_ACCOUNT_ID "
+                    "env var (see mode_config.ibkr_account)."
+                )
+            self.account = accounts[0] if accounts else None
+        self.ib.account = self.account
 
     def place_order(self, symbol: str, side: str, quantity: int) -> Trade:
         contract = Stock(symbol, "SMART", "USD")
@@ -17,6 +37,8 @@ class IBKRClient:
 
         order = MarketOrder(side, quantity)
         order.outsideRth = True
+        if self.account:
+            order.account = self.account
         # Market orders must be DAY (a market order can't stay open past the
         # session). Left unset, IBKR fills the TIF from the account's Order
         # Presets — on live that resolves to GTC, which is invalid for a
