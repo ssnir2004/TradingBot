@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from ib_async import Stock
 
 from src import db
+from src.ibkr_client import scoped_positions
 
 ET = ZoneInfo("America/New_York")
 
@@ -27,7 +28,7 @@ def evaluate(account_id: int, mode: str, symbol: str, ib) -> dict:
     latest = time_filter["latest_entry_et"]
 
     # a) already in position
-    for position in ib.positions():
+    for position in scoped_positions(ib):
         if position.contract.symbol == symbol and position.position > 0:
             result = {"pass": bool(False), "reasons": ["already in position"], "price": 0.0}
             db.log_decision(account_id, mode, "dev_tool_evaluate", symbol=symbol, **result)

@@ -63,3 +63,28 @@ class IBKRClient:
 
     def disconnect(self):
         self.ib.disconnect()
+
+
+def scoped_positions(ib: IB) -> list:
+    """ib.positions() filtered to this connection's own resolved account
+    (IBKRClient stamps it as ib.account). Unfiltered, a login authorized
+    for more than one account (see IBKRClient.__init__) returns every
+    managed account's holdings mixed together - this is what would let a
+    read of this mode's positions silently pick up (or miss) another
+    account's shares in the same symbol."""
+    return ib.positions(getattr(ib, "account", "") or "")
+
+
+def belongs_to_account(ib: IB, acct_number: str | None) -> bool:
+    """Whether an execution/order's own account attribution matches this
+    connection's resolved account - for the calls that return everything
+    across every managed account with no account= filter to pass
+    (fills/reqExecutions/openTrades). True by default when this
+    connection's account is unknown (single-account login - nothing to
+    filter) or the checked value is unexpectedly empty, so this only ever
+    narrows results, never silently drops one for a reason unrelated to
+    account mismatch."""
+    account = getattr(ib, "account", None)
+    if not account or not acct_number:
+        return True
+    return acct_number == account
