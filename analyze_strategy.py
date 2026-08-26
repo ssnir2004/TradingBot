@@ -52,9 +52,16 @@ def pool_strategy_pairs(backtests: list[dict], strategy_id) -> dict:
     wins for a repeated range), but scoped to one strategy_id and returning
     the raw pooled pairs/filter_stats/date-ranges too, not just the
     re-aggregated summary - this needs the underlying trades for the
-    breakdowns strategy_report itself doesn't compute."""
+    breakdowns strategy_report itself doesn't compute.
+
+    `backtests` is expected to come from db.list_done_backtest_results(...,
+    include_archived=True) - unlike the dashboard's own Strategy Report
+    card, this offline analysis pools a strategy's FULL history regardless
+    of archive status (see that function's own docstring on why), and
+    reports how many of the pooled runs were archived so that isn't
+    silently invisible here either."""
     strategy_id_str = str(strategy_id)
-    latest_by_range = {}  # (start_date, end_date) -> {"created_at", "result"}
+    latest_by_range = {}  # (start_date, end_date) -> {"created_at", "result", "archived_at"}
     for bt in backtests:
         result = bt["results"].get(strategy_id_str)
         if not isinstance(result, dict) or "aggregate" not in result:
@@ -62,17 +69,23 @@ def pool_strategy_pairs(backtests: list[dict], strategy_id) -> dict:
         date_key = (bt["params"].get("start_date"), bt["params"].get("end_date"))
         existing = latest_by_range.get(date_key)
         if existing is None or bt["created_at"] > existing["created_at"]:
-            latest_by_range[date_key] = {"created_at": bt["created_at"], "result": result}
+            latest_by_range[date_key] = {"created_at": bt["created_at"], "result": result, "archived_at": bt.get("archived_at")}
 
     pooled_pairs = []
     pooled_filter_stats = defaultdict(int)
     date_ranges = []
+    archived_count = 0
     for date_key, entry in sorted(latest_by_range.items()):
         pooled_pairs.extend(entry["result"]["pairs"])
         for cond, count in (entry["result"].get("filter_stats") or {}).items():
             pooled_filter_stats[cond] += count
-        date_ranges.append(date_key)
-    return {"pairs": pooled_pairs, "filter_stats": dict(pooled_filter_stats), "date_ranges": date_ranges}
+        date_ranges.append((*date_key, entry["archived_at"]))
+        if entry["archived_at"]:
+            archived_count += 1
+    return {
+        "pairs": pooled_pairs, "filter_stats": dict(pooled_filter_stats),
+        "date_ranges": date_ranges, "archived_count": archived_count,
+    }
 
 
 def fmt_money(v: float) -> str:
@@ -241,14 +254,15 @@ def main():
     strategy_id = strategy["id"]
     full_strategy = db.get_strategy(strategy_id)
 
-    backtests = db.list_done_backtest_results(account_id)
+    backtests = db.list_done_backtest_results(account_id, include_archived=True)
     pooled = pool_strategy_pairs(backtests, strategy_id)
     pairs = pooled["pairs"]
 
     section(f"Strategy: {strategy.get('key') or strategy_id} — {strategy['name']}  (direction: {strategy.get('direction')})")
-    print(f"Date ranges pooled ({len(pooled['date_ranges'])} backtest run(s)):")
-    for start, end in pooled["date_ranges"]:
-        print(f"  {start} -> {end}")
+    archived_note = f" ({pooled['archived_count']} archived, included anyway)" if pooled["archived_count"] else ""
+    print(f"Date ranges pooled ({len(pooled['date_ranges'])} backtest run(s)){archived_note}:")
+    for start, end, archived_at in pooled["date_ranges"]:
+        print(f"  {start} -> {end}" + ("  [archived]" if archived_at else ""))
 
     section("rules_json (as currently configured)")
     print(json.dumps(json.loads(full_strategy["rules_json"]), indent=2, ensure_ascii=False))
