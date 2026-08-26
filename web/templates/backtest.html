@@ -14,6 +14,29 @@
   .hist-bar-track { height: 16px; background:#e9ecef; border-radius:4px; overflow:hidden; }
   .hist-bar { height:100%; }
   .strategy-pick { cursor:pointer; }
+
+  /* Categorical palette (dataviz skill's validated default, unmodified) -
+     one fixed hue per strategy slot, light/dark steps of the same 8 hues.
+     Past slot 8, a strategy folds into --series-other rather than
+     generating a 9th hue (color identity must stay unambiguous). */
+  .viz-root {
+    --series-1:#2a78d6; --series-2:#eb6834; --series-3:#1baf7a; --series-4:#eda100;
+    --series-5:#e87ba4; --series-6:#008300; --series-7:#4a3aa7; --series-8:#e34948;
+    --series-other:#898781;
+  }
+  [data-bs-theme="dark"] .viz-root {
+    --series-1:#3987e5; --series-2:#d95926; --series-3:#199e70; --series-4:#c98500;
+    --series-5:#d55181; --series-6:#008300; --series-7:#9085e9; --series-8:#e66767;
+    --series-other:#898781;
+  }
+  .cal-grid { display:grid; grid-template-columns: repeat(7, 1fr); gap:4px; }
+  .cal-daylabel { text-align:center; font-size:.75rem; color:var(--bs-secondary-color); padding-bottom:2px; }
+  .cal-cell { min-height:60px; border:1px solid var(--bs-border-color); border-radius:6px; padding:4px; }
+  .cal-cell.cal-empty { border-color:transparent; }
+  .cal-cell.cal-today { border-color:var(--bs-primary); border-width:2px; }
+  .cal-daynum { font-size:.75rem; color:var(--bs-secondary-color); }
+  .cal-dots { display:flex; flex-wrap:wrap; gap:3px; margin-top:3px; }
+  .cal-dot { width:10px; height:10px; border-radius:50%; flex:none; }
 </style>
 </head>
 <body>
@@ -106,6 +129,21 @@
     </div>
     <div class="small text-muted px-3 pt-2" id="bt-results-meta"></div>
     <div class="card-body" id="bt-results-body"></div>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span>Backtest Calendar</span>
+      <div class="d-flex align-items-center gap-2">
+        <button class="btn btn-sm btn-outline-secondary" id="btn-cal-prev">‹</button>
+        <span id="cal-month-label" class="small fw-bold" style="min-width:120px; text-align:center;"></span>
+        <button class="btn btn-sm btn-outline-secondary" id="btn-cal-next">›</button>
+      </div>
+    </div>
+    <div class="card-body viz-root">
+      <div id="cal-grid">Loading…</div>
+      <div id="cal-legend" class="d-flex flex-wrap gap-3 mt-3"></div>
+    </div>
   </div>
 
   <div class="card mb-4">
@@ -350,6 +388,101 @@ function renderStrategyResult(strategyId, result) {
   </div></div>`;
 }
 
+// --- Backtest Calendar -------------------------------------------------
+const CALENDAR_SERIES_SLOTS = 8;  // matches the .viz-root --series-1..8 CSS vars
+let calMonth = new Date();
+calMonth.setDate(1);
+let calEntriesCache = null;
+let strategyColorById = {};  // strategy_id (string) -> "var(--series-N)"
+
+function assignStrategyColors() {
+  // Keyed off the FULL strategy list (strategiesById), sorted by id - not
+  // off which strategies happen to have a backtest yet, so a given
+  // strategy's color never shifts just because an older backtest for some
+  // other strategy gets deleted or a new one gets run (color follows the
+  // entity, never its rank in today's data).
+  const ids = Object.keys(strategiesById).map(Number).sort((a, b) => a - b).map(String);
+  strategyColorById = {};
+  ids.forEach((sid, i) => {
+    strategyColorById[sid] = i < CALENDAR_SERIES_SLOTS ? `var(--series-${i + 1})` : "var(--series-other)";
+  });
+}
+
+function strategyLabel(sid) {
+  const s = strategiesById[sid];
+  if (!s) return `Strategy #${sid}`;
+  return s.key ? `${s.key} (${s.name})` : s.name;
+}
+
+function renderCalendarLegend(entries) {
+  const present = new Set();
+  for (const e of entries) for (const sid of e.strategy_ids) present.add(String(sid));
+  const orderedIds = Object.keys(strategiesById).map(Number).sort((a, b) => a - b).map(String).filter(sid => present.has(sid));
+  const el = document.getElementById("cal-legend");
+  if (!orderedIds.length) { el.innerHTML = '<span class="text-muted small">No backtests yet.</span>'; return; }
+  el.innerHTML = orderedIds.map(sid => `
+    <span class="d-flex align-items-center gap-1 small">
+      <span class="cal-dot" style="background:${strategyColorById[sid] || "var(--series-other)"}"></span>${strategyLabel(sid)}
+    </span>`).join("");
+}
+
+function toISODateLocal(y, m, d) { return `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`; }
+
+function renderCalendarGrid(entries) {
+  const year = calMonth.getFullYear(), monthIdx = calMonth.getMonth();
+  document.getElementById("cal-month-label").textContent = calMonth.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+
+  // date (YYYY-MM-DD) -> Set of strategy_id strings with a backtest whose
+  // [start_date, end_date] covers that day - walked per entry (each
+  // range is usually a single day, per this dashboard's actual usage so
+  // far) rather than per calendar day.
+  const byDate = {};
+  for (const e of entries) {
+    if (!e.start_date || !e.end_date) continue;
+    const cur = new Date(e.start_date + "T00:00:00");
+    const end = new Date(e.end_date + "T00:00:00");
+    while (cur <= end) {
+      const key = toISODateLocal(cur.getFullYear(), cur.getMonth(), cur.getDate());
+      if (!byDate[key]) byDate[key] = new Set();
+      for (const sid of e.strategy_ids) byDate[key].add(String(sid));
+      cur.setDate(cur.getDate() + 1);
+    }
+  }
+
+  const dayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const firstWeekday = new Date(year, monthIdx, 1).getDay();
+  const totalDays = new Date(year, monthIdx + 1, 0).getDate();
+  const todayKey = toISODateLocal(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
+
+  let cells = dayLabels.map(l => `<div class="cal-daylabel">${l}</div>`).join("");
+  for (let i = 0; i < firstWeekday; i++) cells += `<div class="cal-cell cal-empty"></div>`;
+  for (let d = 1; d <= totalDays; d++) {
+    const key = toISODateLocal(year, monthIdx, d);
+    const sids = byDate[key] ? Array.from(byDate[key]) : [];
+    const dots = sids.map(sid =>
+      `<span class="cal-dot" style="background:${strategyColorById[sid] || "var(--series-other)"}" title="${strategyLabel(sid)}"></span>`
+    ).join("");
+    cells += `<div class="cal-cell${key === todayKey ? " cal-today" : ""}"><div class="cal-daynum">${d}</div><div class="cal-dots">${dots}</div></div>`;
+  }
+  document.getElementById("cal-grid").innerHTML = `<div class="cal-grid">${cells}</div>`;
+}
+
+async function refreshCalendar() {
+  calEntriesCache = await api("/api/backtests/calendar");
+  assignStrategyColors();
+  renderCalendarLegend(calEntriesCache);
+  renderCalendarGrid(calEntriesCache);
+}
+
+document.getElementById("btn-cal-prev").addEventListener("click", () => {
+  calMonth.setMonth(calMonth.getMonth() - 1);
+  if (calEntriesCache) renderCalendarGrid(calEntriesCache);
+});
+document.getElementById("btn-cal-next").addEventListener("click", () => {
+  calMonth.setMonth(calMonth.getMonth() + 1);
+  if (calEntriesCache) renderCalendarGrid(calEntriesCache);
+});
+
 // Rough tripwire, not a real significance test - mirrors src/perf.py's
 // STRATEGY_REPORT_LOW_SAMPLE_TRADES so the badge threshold shown here always
 // matches what actually drove entry.low_sample server-side.
@@ -436,6 +569,7 @@ async function pollBacktest(id) {
     if (detail.status === "done" || detail.status === "failed") {
       clearInterval(pollHandle);
       refreshHistory();
+      refreshCalendar();  // either status still adds/updates a dot for this run's date(s)
       if (detail.status === "done") refreshStrategyReport();  // a fresh 'done' result changes the pooled report; 'failed' has no results to pool
     }
   };
@@ -644,6 +778,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   await loadStrategyPicker();
   loadUniverseInfo();
   refreshHistory();
+  refreshCalendar();
   refreshStrategyReport();
 });
 </script>
