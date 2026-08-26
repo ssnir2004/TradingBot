@@ -265,13 +265,37 @@
   </div>
 
   <div class="card mb-4">
-    <div class="card-header">History <span class="text-muted small">— click a row to show/hide its results; filtered by the Calendar's strategy checkboxes above</span></div>
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span>History <span class="text-muted small">— click a row to show/hide its results; filtered by the Calendar's strategy checkboxes above</span></span>
+      {% if not is_viewer %}
+      <div id="bt-history-bulk-bar" class="d-none">
+        <span id="bt-history-selected-count" class="small text-muted me-2"></span>
+        <button class="btn btn-sm btn-outline-secondary" onclick="archiveSelectedHistory()">Archive selected</button>
+      </div>
+      {% endif %}
+    </div>
     <div class="card-body p-0">
       <table class="table table-sm mb-0">
-        <thead><tr><th>#</th><th>Strategies</th><th>Range</th><th>Days</th><th>Portfolio value ($)</th><th>Status</th><th>Result</th><th>Created</th><th>Duration</th><th></th></tr></thead>
-        <tbody id="bt-history-body"><tr><td colspan="10" class="text-center text-muted">Loading…</td></tr></tbody>
+        <thead><tr>
+          {% if not is_viewer %}<th><input type="checkbox" id="bt-history-select-all" onchange="toggleSelectAllHistory(this.checked)"></th>{% endif %}
+          <th>#</th><th>Strategies</th><th>Range</th><th>Days</th><th>Portfolio value ($)</th><th>Status</th><th>Result</th><th>Created</th><th>Duration</th><th></th>
+        </tr></thead>
+        <tbody id="bt-history-body"><tr><td colspan="{{ 11 if not is_viewer else 10 }}" class="text-center text-muted">Loading…</td></tr></tbody>
       </table>
     </div>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center" style="cursor:pointer" onclick="toggleArchiveCollapse()">
+      <span><span id="archive-chevron">▸</span> Archive <span class="text-muted small">— filed away, excluded from Calendar/Strategy Report/History until restored</span></span>
+      {% if not is_viewer %}
+      <div id="archive-bulk-bar" class="d-none">
+        <span id="archive-selected-count" class="small text-muted me-2"></span>
+        <button class="btn btn-sm btn-outline-secondary" onclick="event.stopPropagation(); restoreSelectedArchive()">Restore selected</button>
+      </div>
+      {% endif %}
+    </div>
+    <div class="card-body d-none" id="archive-body"></div>
   </div>
 
 </div>
@@ -950,15 +974,51 @@ let expandedBacktestIds = new Set();
 let expandedDetailCache = {};
 let lastHistoryRows = [];
 
+// Which History rows are checked for the "Archive selected" bulk action
+// (viewer builds never populate this - the checkbox column isn't rendered
+// for them at all). Persists across a renderHistoryTable() re-render (e.g.
+// the 5s poll) so an in-progress selection isn't silently dropped, same
+// reasoning as expandedBacktestIds above.
+let selectedHistoryIds = new Set();
+
+function renderHistoryBulkBar() {
+  const bar = document.getElementById("bt-history-bulk-bar");
+  if (!bar) return;  // viewer - not rendered at all
+  bar.classList.toggle("d-none", selectedHistoryIds.size === 0);
+  document.getElementById("bt-history-selected-count").textContent = `${selectedHistoryIds.size} selected`;
+}
+
+function toggleHistorySelect(id, checked) {
+  if (checked) selectedHistoryIds.add(id); else selectedHistoryIds.delete(id);
+  renderHistoryBulkBar();
+  const selectAll = document.getElementById("bt-history-select-all");
+  if (selectAll) selectAll.checked = lastVisibleHistoryIds.length > 0 && lastVisibleHistoryIds.every(id => selectedHistoryIds.has(id));
+}
+
+function toggleSelectAllHistory(checked) {
+  for (const id of lastVisibleHistoryIds) {
+    if (checked) selectedHistoryIds.add(id); else selectedHistoryIds.delete(id);
+  }
+  renderHistoryBulkBar();
+  renderHistoryTable();
+}
+
+// Set by every renderHistoryTable() call to whichever ids are currently
+// showing (post strategy-filter) - toggleSelectAllHistory only ever
+// selects what's actually visible, not rows hidden by the Calendar filter.
+let lastVisibleHistoryIds = [];
+
 // Shares the Calendar's own checkbox filter (calHiddenStrategyIds), same as
 // renderStrategyReport - a run shows as long as AT LEAST ONE of its
 // strategies is still checked (a multi-strategy run isn't hidden just
 // because one of several strategies it covered got unchecked).
 function renderHistoryTable() {
   const body = document.getElementById("bt-history-body");
-  if (!lastHistoryRows.length) { body.innerHTML = '<tr><td colspan="10" class="text-center text-muted">No backtests yet</td></tr>'; return; }
+  const colspan = IS_VIEWER ? 10 : 11;
+  if (!lastHistoryRows.length) { body.innerHTML = `<tr><td colspan="${colspan}" class="text-center text-muted">No backtests yet</td></tr>`; lastVisibleHistoryIds = []; return; }
   const visibleRows = lastHistoryRows.filter(r => r.params.strategy_ids.some(sid => !calHiddenStrategyIds.has(String(sid))));
-  if (!visibleRows.length) { body.innerHTML = '<tr><td colspan="10" class="text-center text-muted">Every strategy is hidden — check at least one in the Calendar above.</td></tr>'; return; }
+  lastVisibleHistoryIds = visibleRows.map(r => r.id);
+  if (!visibleRows.length) { body.innerHTML = `<tr><td colspan="${colspan}" class="text-center text-muted">Every strategy is hidden — check at least one in the Calendar above.</td></tr>`; return; }
   const rowsHtml = [];
   for (const r of visibleRows) {
     const names = r.params.strategy_ids.map(sid => {
@@ -979,12 +1039,14 @@ function renderHistoryTable() {
     const expanded = expandedBacktestIds.has(r.id);
     const days = daysTested(r.params.start_date, r.params.end_date);
     const portfolioValue = r.params.portfolio_value;
-    // stopPropagation on the actions cell - clicking Cancel/Delete must not
-    // also toggle the row's own expand/collapse underneath it.
+    // stopPropagation on the actions/checkbox cells - clicking either must
+    // not also toggle the row's own expand/collapse underneath it.
+    const checkboxCell = IS_VIEWER ? "" : `<td onclick="event.stopPropagation()"><input type="checkbox" ${selectedHistoryIds.has(r.id) ? "checked" : ""} onchange="toggleHistorySelect(${r.id}, this.checked)"></td>`;
     const actionBtn = IS_VIEWER ? "" : (r.status === "running" || r.status === "pending")
       ? `<button class="btn btn-sm btn-outline-warning" onclick="event.stopPropagation(); cancelBacktest(${r.id})">Cancel</button>`
       : `<button class="btn btn-sm btn-outline-danger" onclick="event.stopPropagation(); deleteBacktest(${r.id})">Delete</button>`;
     rowsHtml.push(`<tr style="cursor:pointer" onclick="toggleBacktestExpand(${r.id})">
+      ${checkboxCell}
       <td>${expanded ? "▾" : "▸"} ${r.id}</td>
       <td class="small">${names}</td>
       <td class="small mono">${r.params.start_date} → ${r.params.end_date}</td>
@@ -998,10 +1060,38 @@ function renderHistoryTable() {
     </tr>`);
     if (expanded) {
       const detail = expandedDetailCache[r.id];
-      rowsHtml.push(`<tr><td colspan="10" class="bg-body-tertiary">${detail ? renderResultsBody(detail) : '<p class="text-muted small mb-0">Loading…</p>'}</td></tr>`);
+      rowsHtml.push(`<tr><td colspan="${colspan}" class="bg-body-tertiary">${detail ? renderResultsBody(detail) : '<p class="text-muted small mb-0">Loading…</p>'}</td></tr>`);
     }
   }
   body.innerHTML = rowsHtml.join("");
+  const selectAll = document.getElementById("bt-history-select-all");
+  if (selectAll) selectAll.checked = lastVisibleHistoryIds.length > 0 && lastVisibleHistoryIds.every(id => selectedHistoryIds.has(id));
+  renderHistoryBulkBar();
+}
+
+async function archiveSelectedHistory() {
+  const ids = Array.from(selectedHistoryIds);
+  if (!ids.length) return;
+  let existingFolders = [];
+  try { existingFolders = [...new Set((await api("/api/backtests/archive")).map(r => r.archive_folder).filter(Boolean))]; }
+  catch (e) { /* fine to prompt without suggestions if this fails */ }
+  const suggestion = existingFolders.length ? `\n\nExisting folders: ${existingFolders.join(", ")}` : "";
+  const folder = prompt(`Archive ${ids.length} backtest(s). Enter a short reason/folder name:${suggestion}`);
+  if (!folder || !folder.trim()) return;
+  try {
+    await api("/api/backtests/archive", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ backtest_ids: ids, folder: folder.trim() }),
+    });
+  } catch (e) {
+    alert("Could not archive: " + e.message);
+    return;
+  }
+  selectedHistoryIds.clear();
+  refreshHistory();
+  refreshCalendar();
+  refreshStrategyReport();
+  if (archiveLoaded) refreshArchive();
 }
 
 // Self-perpetuating poll while any row is pending/running - without this,
@@ -1214,6 +1304,116 @@ document.getElementById("btn-generate-worker-token")?.addEventListener("click", 
     alert("Could not generate token: " + e.message);
   }
 });
+
+// --- Archive (archive_backtests/unarchive_backtests) -------------------
+let archivedRows = [];
+let archiveLoaded = false;  // lazy-loaded on first expand, not on page load - it's usually empty/rarely opened
+let selectedArchiveIds = new Set();
+
+function toggleArchiveCollapse() {
+  const collapsed = document.getElementById("archive-body").classList.toggle("d-none");
+  document.getElementById("archive-chevron").textContent = collapsed ? "▸" : "▾";
+  if (!collapsed && !archiveLoaded) refreshArchive();
+}
+
+async function refreshArchive() {
+  const body = document.getElementById("archive-body");
+  body.innerHTML = '<p class="small text-muted mb-0 p-3">Loading…</p>';
+  try {
+    archivedRows = await api("/api/backtests/archive");
+  } catch (e) {
+    body.innerHTML = `<p class="small text-danger mb-0 p-3">Could not load: ${e.message}</p>`;
+    return;
+  }
+  archiveLoaded = true;
+  renderArchive();
+}
+
+function renderArchive() {
+  const body = document.getElementById("archive-body");
+  if (!archivedRows.length) { body.innerHTML = '<p class="small text-muted mb-0 p-3">Nothing archived.</p>'; renderArchiveBulkBar(); return; }
+  const byFolder = new Map();
+  for (const r of archivedRows) {
+    const folder = r.archive_folder || "(no reason given)";
+    if (!byFolder.has(folder)) byFolder.set(folder, []);
+    byFolder.get(folder).push(r);
+  }
+  const colspan = IS_VIEWER ? 7 : 8;
+  const groupsHtml = Array.from(byFolder.entries()).map(([folder, rows]) => {
+    const ids = rows.map(r => r.id);
+    const allSelected = !IS_VIEWER && ids.every(id => selectedArchiveIds.has(id));
+    const rowsHtml = rows.map(r => {
+      const names = r.params.strategy_ids.map(sid => {
+        const s = strategiesById[sid];
+        if (!s) return `#${sid}`;
+        return s.key ? `${s.key} (${s.name})` : s.name;
+      }).join(", ");
+      const checkboxCell = IS_VIEWER ? "" : `<td><input type="checkbox" ${selectedArchiveIds.has(r.id) ? "checked" : ""} onchange="toggleArchiveSelect(${r.id}, this.checked)"></td>`;
+      const restoreBtn = IS_VIEWER ? "" : `<button class="btn btn-sm btn-outline-secondary" onclick="restoreOneArchived(${r.id})">Restore</button>`;
+      return `<tr>
+        ${checkboxCell}
+        <td>${r.id}</td>
+        <td class="small">${names}</td>
+        <td class="small mono">${r.params.start_date} → ${r.params.end_date}</td>
+        <td><span class="badge ${r.status === "done" ? "bg-success" : r.status === "failed" ? "bg-danger" : "bg-secondary"}">${r.status}</span></td>
+        <td class="small">${fmtDateTimeET(r.archived_at)}</td>
+        <td>${restoreBtn}</td>
+      </tr>`;
+    }).join("");
+    const selectAllCell = IS_VIEWER ? "" : `<th><input type="checkbox" ${allSelected ? "checked" : ""} onchange="toggleSelectAllArchiveFolder('${folder.replace(/'/g, "\\'")}', this.checked)"></th>`;
+    return `<div class="mb-3">
+      <div class="small fw-bold px-3 pt-2">${folder} <span class="text-muted fw-normal">(${rows.length})</span></div>
+      <table class="table table-sm mb-0">
+        <thead><tr>${selectAllCell}<th>#</th><th>Strategies</th><th>Range</th><th>Status</th><th>Archived</th><th></th></tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </div>`;
+  }).join("");
+  body.innerHTML = groupsHtml;
+  renderArchiveBulkBar();
+}
+
+function renderArchiveBulkBar() {
+  const bar = document.getElementById("archive-bulk-bar");
+  if (!bar) return;  // viewer - not rendered at all
+  bar.classList.toggle("d-none", selectedArchiveIds.size === 0);
+  document.getElementById("archive-selected-count").textContent = `${selectedArchiveIds.size} selected`;
+}
+
+function toggleArchiveSelect(id, checked) {
+  if (checked) selectedArchiveIds.add(id); else selectedArchiveIds.delete(id);
+  renderArchive();
+}
+
+function toggleSelectAllArchiveFolder(folder, checked) {
+  const ids = archivedRows.filter(r => (r.archive_folder || "(no reason given)") === folder).map(r => r.id);
+  for (const id of ids) { if (checked) selectedArchiveIds.add(id); else selectedArchiveIds.delete(id); }
+  renderArchive();
+}
+
+async function unarchiveIds(ids) {
+  try {
+    await api("/api/backtests/unarchive", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ backtest_ids: ids }),
+    });
+  } catch (e) {
+    alert("Could not restore: " + e.message);
+    return;
+  }
+  for (const id of ids) selectedArchiveIds.delete(id);
+  refreshArchive();
+  refreshHistory();
+  refreshCalendar();
+  refreshStrategyReport();
+}
+
+function restoreOneArchived(id) { unarchiveIds([id]); }
+
+function restoreSelectedArchive() {
+  const ids = Array.from(selectedArchiveIds);
+  if (ids.length) unarchiveIds(ids);
+}
 
 document.addEventListener("DOMContentLoaded", async () => {
   document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(el => new bootstrap.Tooltip(el));

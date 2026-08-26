@@ -1349,6 +1349,38 @@ def api_backtests_calendar(account_id: int = Depends(require_account), user: str
     return db.list_backtest_calendar_entries(account_id)
 
 
+# Same registration-order reason as strategy_report above - GET here, not
+# under /api/backtests/{backtest_id}, so it must be registered first too.
+@app.get("/api/backtests/archive")
+def api_list_archived_backtests(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    return db.list_archived_backtests(account_id)
+
+
+@app.post("/api/backtests/archive")
+async def api_archive_backtests(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    body = await request.json()
+    backtest_ids = body.get("backtest_ids") or []
+    folder = (body.get("folder") or "").strip()
+    if not backtest_ids:
+        raise HTTPException(status_code=400, detail="backtest_ids is required")
+    if not folder:
+        raise HTTPException(status_code=400, detail="folder (a short reason) is required")
+    count = db.archive_backtests(account_id, backtest_ids, folder)
+    _log_account_action(account_id, user, action="archive_backtests", backtest_ids=backtest_ids, folder=folder)
+    return {"archived": count}
+
+
+@app.post("/api/backtests/unarchive")
+async def api_unarchive_backtests(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    body = await request.json()
+    backtest_ids = body.get("backtest_ids") or []
+    if not backtest_ids:
+        raise HTTPException(status_code=400, detail="backtest_ids is required")
+    count = db.unarchive_backtests(account_id, backtest_ids)
+    _log_account_action(account_id, user, action="unarchive_backtests", backtest_ids=backtest_ids)
+    return {"restored": count}
+
+
 # ----------------------------------------------------- backtest data fetch ---
 # "Update backtest data" button on the Backtest page - refreshes the local
 # intraday-bars cache from IBKR (see fetch_backtest_data.py). Spawned the
