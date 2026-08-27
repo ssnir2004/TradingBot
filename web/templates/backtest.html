@@ -291,6 +291,9 @@
       {% endif %}
     </div>
     <div class="card-body p-0">
+      <div class="p-3 pb-0">
+        <input type="text" id="bt-history-search" class="form-control form-control-sm" placeholder="Search… (id, strategy, status, dates)">
+      </div>
       <table class="table table-sm mb-0">
         <thead><tr>
           {% if not is_viewer %}<th><input type="checkbox" id="bt-history-select-all" onchange="toggleSelectAllHistory(this.checked)"></th>{% endif %}
@@ -311,7 +314,12 @@
       </div>
       {% endif %}
     </div>
-    <div class="card-body d-none" id="archive-body"></div>
+    <div class="card-body d-none" id="archive-body">
+      <div class="p-3 pb-0">
+        <input type="text" id="archive-search" class="form-control form-control-sm" placeholder="Search… (id, strategy, status, dates, folder)">
+      </div>
+      <div id="archive-rows"></div>
+    </div>
   </div>
 
 </div>
@@ -1127,6 +1135,29 @@ function toggleSelectAllHistory(checked) {
 // selects what's actually visible, not rows hidden by the Calendar filter.
 let lastVisibleHistoryIds = [];
 
+function strategyNamesFor(r) {
+  return r.params.strategy_ids.map(sid => {
+    const s = strategiesById[sid];
+    if (!s) return `#${sid}`;
+    return s.key ? `${s.key} (${s.name})` : s.name;
+  }).join(", ");
+}
+
+// Shared by the History and Archive search boxes (kept as two entirely
+// separate query strings/inputs per-request, not a shared filter) - a
+// free-text substring match against everything already shown in a row
+// (id, strategy names, date range, status, remote/local, and - for
+// Archive rows only, since History rows never have one - the archive
+// folder) rather than a structured field picker, since every one of
+// those is short enough to eyeball in the table already.
+function matchesSearch(r, names, query) {
+  if (!query) return true;
+  const blob = `${r.id} ${names} ${r.params.start_date} ${r.params.end_date} ${r.status} ${r.execution_mode || ""} ${r.archive_folder || ""}`.toLowerCase();
+  return blob.includes(query);
+}
+
+let historySearchQuery = "";
+
 // Shares the Calendar's own checkbox filter (calHiddenStrategyIds), same as
 // renderStrategyReport - a run shows as long as AT LEAST ONE of its
 // strategies is still checked (a multi-strategy run isn't hidden just
@@ -1135,16 +1166,17 @@ function renderHistoryTable() {
   const body = document.getElementById("bt-history-body");
   const colspan = IS_VIEWER ? 10 : 11;
   if (!lastHistoryRows.length) { body.innerHTML = `<tr><td colspan="${colspan}" class="text-center text-muted">No backtests yet</td></tr>`; lastVisibleHistoryIds = []; return; }
-  const visibleRows = lastHistoryRows.filter(r => r.params.strategy_ids.some(sid => !calHiddenStrategyIds.has(String(sid))));
+  let visibleRows = lastHistoryRows.filter(r => r.params.strategy_ids.some(sid => !calHiddenStrategyIds.has(String(sid))));
+  if (historySearchQuery) visibleRows = visibleRows.filter(r => matchesSearch(r, strategyNamesFor(r), historySearchQuery));
   lastVisibleHistoryIds = visibleRows.map(r => r.id);
-  if (!visibleRows.length) { body.innerHTML = `<tr><td colspan="${colspan}" class="text-center text-muted">Every strategy is hidden — check at least one in the Calendar above.</td></tr>`; return; }
+  if (!visibleRows.length) {
+    const msg = historySearchQuery ? "No backtests match your search." : "Every strategy is hidden — check at least one in the Calendar above.";
+    body.innerHTML = `<tr><td colspan="${colspan}" class="text-center text-muted">${msg}</td></tr>`;
+    return;
+  }
   const rowsHtml = [];
   for (const r of visibleRows) {
-    const names = r.params.strategy_ids.map(sid => {
-      const s = strategiesById[sid];
-      if (!s) return `#${sid}`;
-      return s.key ? `${s.key} (${s.name})` : s.name;
-    }).join(", ");
+    const names = strategyNamesFor(r);
     const badgeClass = r.status === "done" ? "bg-success" : r.status === "failed" ? "bg-danger" : "bg-secondary";
     // See renderResults' identical claimed_at-over-created_at comment above -
     // same reasoning, same fallback, just the history-list row's own copy.
@@ -1553,28 +1585,40 @@ function toggleArchiveCollapse() {
 }
 
 async function refreshArchive() {
-  const body = document.getElementById("archive-body");
-  body.innerHTML = '<p class="small text-muted mb-0 p-3">Loading…</p>';
+  // Targets archive-rows, not archive-body - archive-body also carries the
+  // static search input (see the template) as a sibling of this, and
+  // overwriting archive-body's own innerHTML here would wipe that input
+  // out on every refresh.
+  const rowsEl = document.getElementById("archive-rows");
+  rowsEl.innerHTML = '<p class="small text-muted mb-0 p-3">Loading…</p>';
   try {
     archivedRows = await api("/api/backtests/archive");
   } catch (e) {
-    body.innerHTML = `<p class="small text-danger mb-0 p-3">Could not load: ${e.message}</p>`;
+    rowsEl.innerHTML = `<p class="small text-danger mb-0 p-3">Could not load: ${e.message}</p>`;
     return;
   }
   archiveLoaded = true;
   renderArchive();
 }
 
+let archiveSearchQuery = "";
+
 // Same columns/row shape as renderHistoryTable (Days, Portfolio value,
 // Result, Created, Duration, click-to-expand full results via the shared
 // expandedBacktestIds/expandedDetailCache) plus the two things that only
 // make sense here: the Archived timestamp and a Restore button instead
-// of History's Cancel/Retry/Delete actions.
+// of History's Cancel/Retry/Delete actions. Search filters archivedRows
+// itself, before folder-grouping - a folder with zero matches just
+// doesn't render, same as History's row-level filtering above.
 function renderArchive() {
-  const body = document.getElementById("archive-body");
+  const body = document.getElementById("archive-rows");
   if (!archivedRows.length) { body.innerHTML = '<p class="small text-muted mb-0 p-3">Nothing archived.</p>'; renderArchiveBulkBar(); return; }
+  const searchedRows = archiveSearchQuery
+    ? archivedRows.filter(r => matchesSearch(r, strategyNamesFor(r), archiveSearchQuery))
+    : archivedRows;
+  if (!searchedRows.length) { body.innerHTML = '<p class="small text-muted mb-0 p-3">No archived backtests match your search.</p>'; renderArchiveBulkBar(); return; }
   const byFolder = new Map();
-  for (const r of archivedRows) {
+  for (const r of searchedRows) {
     const folder = r.archive_folder || "(no reason given)";
     if (!byFolder.has(folder)) byFolder.set(folder, []);
     byFolder.get(folder).push(r);
@@ -1584,11 +1628,7 @@ function renderArchive() {
     const ids = rows.map(r => r.id);
     const allSelected = !IS_VIEWER && ids.every(id => selectedArchiveIds.has(id));
     const rowsHtml = rows.map(r => {
-      const names = r.params.strategy_ids.map(sid => {
-        const s = strategiesById[sid];
-        if (!s) return `#${sid}`;
-        return s.key ? `${s.key} (${s.name})` : s.name;
-      }).join(", ");
+      const names = strategyNamesFor(r);
       const badgeClass = r.status === "done" ? "bg-success" : r.status === "failed" ? "bg-danger" : "bg-secondary";
       const duration = fmtDuration(r.claimed_at || r.created_at, r.finished_at);
       const resultCell = r.total_pnl_usd == null
@@ -1689,6 +1729,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       // trading day, so nothing is ever run for a weekend either way.
     });
   }
+  document.getElementById("bt-history-search")?.addEventListener("input", (e) => {
+    historySearchQuery = e.target.value.trim().toLowerCase();
+    renderHistoryTable();
+  });
+  document.getElementById("archive-search")?.addEventListener("input", (e) => {
+    archiveSearchQuery = e.target.value.trim().toLowerCase();
+    if (archiveLoaded) renderArchive();  // nothing fetched yet if the Archive card was never opened - no rows to filter
+  });
   await loadStrategyPicker();
   loadUniverseInfo();
   refreshHistory();
