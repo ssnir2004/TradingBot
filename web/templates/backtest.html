@@ -284,7 +284,6 @@
       {% if not is_viewer %}
       <div id="bt-history-bulk-bar" class="d-none">
         <span id="bt-history-selected-count" class="small text-muted me-2"></span>
-        <button class="btn btn-sm btn-outline-warning" onclick="cancelSelectedHistory()">Cancel selected</button>
         <button class="btn btn-sm btn-outline-secondary" onclick="archiveSelectedHistory()">Archive selected</button>
         <button class="btn btn-sm btn-outline-danger" onclick="deleteSelectedHistory()">Delete selected</button>
       </div>
@@ -1255,33 +1254,22 @@ async function archiveSelectedHistory() {
   if (archiveLoaded) refreshArchive();
 }
 
-// Only touches rows actually still pending/running (see db.cancel_backtests) -
-// an already-finished run in the same selection is silently left alone.
-async function cancelSelectedHistory() {
+// Delete used to skip any row still pending/running (db.delete_backtests
+// won't abandon a live subprocess) and required cancelling those first with
+// a separate button - merged into one action here: cancel whatever's still
+// in flight (silently skips anything already finished - see
+// db.cancel_backtests), THEN delete the full selection, which now succeeds
+// on the just-cancelled rows too. One click, one confirm, same end state as
+// the old cancel-then-delete two-step.
+async function deleteSelectedHistory() {
   const ids = Array.from(selectedHistoryIds);
   if (!ids.length) return;
-  if (!confirm(`Cancel ${ids.length} backtest(s)? Any still running lose their progress immediately - already-finished ones in the selection are left alone.`)) return;
+  if (!confirm(`Delete ${ids.length} backtest(s)? This can't be undone - any still running are stopped first and lose their progress.`)) return;
   try {
     await api("/api/backtests/cancel", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ backtest_ids: ids }),
     });
-  } catch (e) {
-    alert("Could not cancel: " + e.message);
-    return;
-  }
-  selectedHistoryIds.clear();
-  refreshHistory();
-}
-
-// Skips any row still pending/running (see db.delete_backtests) rather than
-// abandoning its subprocess - cancel it first (cancelSelectedHistory above)
-// if it needs to go away right now.
-async function deleteSelectedHistory() {
-  const ids = Array.from(selectedHistoryIds);
-  if (!ids.length) return;
-  if (!confirm(`Delete ${ids.length} backtest(s)? This can't be undone. Any still running in the selection are skipped - cancel them first.`)) return;
-  try {
     await api("/api/backtests/delete", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ backtest_ids: ids }),
