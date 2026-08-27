@@ -729,6 +729,7 @@ def _resolve_initial_stop(detail: dict, rules: dict, side: str) -> float:
 def _evaluate_filters_from_bars(
     daily: pd.DataFrame, intraday: pd.DataFrame, rules: dict, side: str,
     prior_day_bars: dict | None = None, signal_side: str | None = None,
+    daily_derived_cache: dict | None = None,
 ) -> dict:
     """The actual D1-D3/I1-I3 decision logic, pulled out of
     _evaluate_entry_filters as a pure function: no data fetching, no
@@ -758,6 +759,16 @@ def _evaluate_filters_from_bars(
     own precomputed prior_day_bars_by_symbol for why it bothers passing
     this in.
 
+    daily_derived_cache is a purely-optional performance hook, exactly
+    like prior_day_bars above: a dict this function memoizes SMA200/
+    SMA50/ATR into, keyed by name. Safe because all three depend only on
+    `daily`, never on `intraday`/the tick being evaluated - the live path
+    (which passes nothing, one call per real tick) computes them fresh
+    every time same as always; backtest_engine.py passes the SAME dict
+    back in across every simulated tick of one (symbol, day), so the
+    identical DataFrame only gets summed/EWM'd once instead of up to
+    ~24 times for an identical result.
+
     signal_side decouples WHICH setup fires entry from WHICH side the
     trade actually executes on - e.g. detect a textbook long breakout
     (D1-D3/I1-I3 evaluated exactly as they'd read for a long strategy)
@@ -775,11 +786,14 @@ def _evaluate_filters_from_bars(
     daily_filters = rules["daily_filters"]
     intraday_filters = rules["intraday_filters"]
     signal_side = signal_side or side
+    cache = daily_derived_cache if daily_derived_cache is not None else {}
 
     if len(daily) < 201:
         return {"pass": False, "side": side, "error": "not enough daily history"}
     prior_day = daily.iloc[-2]
-    sma200 = daily["Close"].iloc[-201:-1].mean()
+    if "sma200" not in cache:
+        cache["sma200"] = daily["Close"].iloc[-201:-1].mean()
+    sma200 = cache["sma200"]
 
     if intraday.empty:
         return {"pass": False, "side": side, "error": "no intraday data"}
@@ -815,7 +829,9 @@ def _evaluate_filters_from_bars(
     else:
         d1 = current_price < float(prior_day["Low"])  # below yesterday's low
         if "D2_prior_close_pct_above_sma50_min" in daily_filters:
-            sma50 = daily["Close"].iloc[-51:-1].mean()
+            if "sma50" not in cache:
+                cache["sma50"] = daily["Close"].iloc[-51:-1].mean()
+            sma50 = cache["sma50"]
             ext_pct = (float(prior_day["Close"]) - float(sma50)) / float(sma50) * 100 if sma50 else 0.0
             d2 = ext_pct >= daily_filters["D2_prior_close_pct_above_sma50_min"]  # overextended above the 50-day SMA
         else:
@@ -845,7 +861,9 @@ def _evaluate_filters_from_bars(
         stop_ref = float(regular_bars["Low"].min()) if not regular_bars.empty else float(today_bars["Low"].min())
     else:
         stop_ref = float(regular_bars["High"].max()) if not regular_bars.empty else float(today_bars["High"].max())
-    atr_value = _compute_atr(daily)
+    if "atr" not in cache:
+        cache["atr"] = _compute_atr(daily)
+    atr_value = cache["atr"]
 
     # I3: relative volume >= threshold (direction-agnostic) - today's
     # volume-so-far against the AVERAGE volume accumulated by this same
