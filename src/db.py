@@ -1932,6 +1932,24 @@ def activate_strategy(account_id: int, strategy_id: int):
         )
 
 
+def deactivate_strategy(account_id: int, strategy_id: int):
+    """Turns off this account's active strategy for this strategy's
+    direction - the bot then simply skips that direction going forward
+    (cycle.py's `if rules is None: continue`), same as if nothing had ever
+    been activated there. Scoped to strategy_id as well as direction so a
+    stale "Deactivate" click can't clear a different strategy that became
+    active in the meantime; only this account's own row is touched, same
+    isolation as activate_strategy."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT direction FROM strategies WHERE id = ?", (strategy_id,)).fetchone()
+        if not row:
+            raise ValueError(f"Strategy {strategy_id} not found")
+        conn.execute(
+            "DELETE FROM account_active_strategy WHERE account_id = ? AND direction = ? AND strategy_id = ?",
+            (account_id, row["direction"], strategy_id),
+        )
+
+
 def delete_strategy(strategy_id: int):
     with get_conn() as conn:
         active = conn.execute(

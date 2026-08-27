@@ -158,7 +158,7 @@
       <button id="btn-new-strategy" class="btn btn-sm btn-primary">+ New strategy</button>
     </div>
     <div class="small text-muted px-3 pt-2">
-      One active strategy per direction — a long and a short strategy can be active and trading at the same time. Activating a strategy only deactivates others of the same direction.
+      At most one active strategy per direction — a long and a short strategy can be active and trading at the same time. Activating a strategy only deactivates others of the same direction; a direction can also have none active, in which case the bot skips it entirely.
     </div>
     <div class="card-body p-0">
       <table class="table table-sm mb-0">
@@ -540,7 +540,9 @@ async function refreshStrategies() {
     <td>${s.is_active ? '<span class="badge bg-success">active</span>' : ""}</td>
     <td class="small">${s.updated_at}</td>
     <td class="text-end">
-      ${s.is_active ? "" : `<button class="btn btn-sm btn-outline-success" onclick="activateStrategy(${s.id}, '${s.risk_rating}')">Activate</button>`}
+      ${s.is_active
+        ? `<button class="btn btn-sm btn-outline-warning" onclick="deactivateStrategy(${s.id})">Deactivate</button>`
+        : `<button class="btn btn-sm btn-outline-success" onclick="activateStrategy(${s.id}, '${s.risk_rating}')">Activate</button>`}
       <button class="btn btn-sm btn-outline-secondary" onclick="editStrategy(${s.id})">Edit</button>
       ${s.is_active ? "" : `<button class="btn btn-sm btn-outline-danger" onclick="deleteStrategy(${s.id})">Delete</button>`}
     </td>
@@ -601,6 +603,18 @@ async function activateStrategy(id, riskRating) {
     refreshActiveStrategyParams();
   } catch (e) {
     alert("Could not activate: " + e.message);
+  }
+}
+
+async function deactivateStrategy(id) {
+  const s = strategiesCache[id];
+  if (!confirm(`Deactivate "${s ? s.name : "this strategy"}"? The bot stops opening new ${s ? s.direction : ""} trades until you activate another strategy on that side.`)) return;
+  try {
+    await api(`/api/strategies/${id}/deactivate`, { method: "POST" });
+    refreshStrategies();
+    refreshActiveStrategyParams();
+  } catch (e) {
+    alert("Could not deactivate: " + e.message);
   }
 }
 async function deleteStrategy(id) {

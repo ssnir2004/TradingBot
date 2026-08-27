@@ -1179,6 +1179,16 @@ async def api_activate_strategy(strategy_id: int, request: Request, account_id: 
     return {"ok": True}
 
 
+@app.post("/api/strategies/{strategy_id}/deactivate")
+async def api_deactivate_strategy(strategy_id: int, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    strategy = db.get_strategy(strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    db.deactivate_strategy(account_id, strategy_id)
+    _log_account_action(account_id, user, action="deactivate_strategy", strategy_id=strategy_id, name=strategy["name"])
+    return {"ok": True}
+
+
 @app.delete("/api/strategies/{strategy_id}")
 def api_delete_strategy(strategy_id: int, account_id: int = Depends(require_account), user: str = Depends(require_admin)):
     try:
