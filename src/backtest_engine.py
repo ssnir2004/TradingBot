@@ -701,6 +701,12 @@ def simulate_orb_strategy(
                         "id": trade_id, "symbol": symbol, "side": action,
                         "fill_price": price, "size": size, "timestamp_iso": bar_ts.isoformat(),
                         "initial_stop": initial_stop, "commission": commission_per_trade,
+                        # Which entry model fired (breakout/retest - see
+                        # orb.evaluate_orb_entry) - carried through by
+                        # perf.pair_trades into each closed pair, so a
+                        # strategy diagnostic (analyze_strategy.py) can break
+                        # performance down by model, not just in aggregate.
+                        "model": detail.get("model"),
                     })
                     open_positions[symbol] = {
                         "entry_price": price, "initial_stop": initial_stop,

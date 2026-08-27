@@ -157,6 +157,26 @@ def print_side_breakdown(pairs: list[dict]):
         print(f"   Win rate {agg['win_rate_pct']}%  Net P&L {fmt_money(agg['net_pnl_usd'])}  Profit factor {agg['profit_factor']}")
 
 
+def print_model_breakdown(pairs: list[dict]):
+    """ORB-only breakdown (see src/orb.py) - which entry model
+    (breakout/retest) actually drove the pooled results. None for every
+    non-ORB strategy's pairs (predates this field), and for a strategy
+    with only one model enabled - both print nothing to compare, same as
+    print_side_breakdown's own single-value guard."""
+    by_model = defaultdict(list)
+    for p in pairs:
+        model = p.get("model")
+        if model:
+            by_model[model].append(p)
+    if len(by_model) <= 1:
+        print("(no per-model data on these pairs, or only one model fired - nothing to compare)")
+        return
+    for model, group in sorted(by_model.items()):
+        agg = perf.aggregate(group)
+        print(f"-- {model} ({agg['total_trades']} trades) --")
+        print(f"   Win rate {agg['win_rate_pct']}%  Net P&L {fmt_money(agg['net_pnl_usd'])}  Profit factor {agg['profit_factor']}")
+
+
 def print_hold_time_breakdown(pairs: list[dict]):
     with_hold = [p for p in pairs if p.get("hold_minutes") is not None]
     if not with_hold:
@@ -299,6 +319,9 @@ def main():
 
     section("Long vs short")
     print_side_breakdown(pairs)
+
+    section("Entry model (ORB only)")
+    print_model_breakdown(pairs)
 
     section("Hold time")
     print_hold_time_breakdown(pairs)

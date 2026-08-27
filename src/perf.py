@@ -86,6 +86,12 @@ def pair_trades(rows: list[dict]) -> list[dict]:
                 "sell_time": row["timestamp_iso"] if side == "long" else open_row["timestamp_iso"],
                 "exit_reason": row.get("exit_reason"),
                 "initial_stop": open_row.get("initial_stop"),
+                # None for every non-ORB trade (predates this field) - only
+                # ever set by src/backtest_engine.simulate_orb_strategy's
+                # entry rows, to "breakout"|"retest" (see orb.evaluate_orb_
+                # entry). Off the OPEN leg, same reasoning as initial_stop
+                # just above - the model that triggered ENTRY, not exit.
+                "model": open_row.get("model"),
                 "commission_usd": open_commission + float(row.get("commission") or 0),
             })
             open_row["_remaining"] -= matched
