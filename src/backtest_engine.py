@@ -310,6 +310,20 @@ def simulate_strategy(
             symbol: {d: bars for d, bars in groups.items() if d < day}
             for symbol, groups in day_groups_by_symbol.items()
         }
+        # daily_derived_cache_by_symbol memoizes SMA200/SMA50/ATR per
+        # symbol for today (see _evaluate_filters_from_bars' own
+        # daily_derived_cache param) - all three depend only on
+        # daily_slice, never on the tick, so recomputing them on every one
+        # of a symbol's ~24 evaluate calls today was pure waste. A fresh
+        # dict per (symbol, day), same lifetime as daily_slice_by_symbol.
+        daily_derived_cache_by_symbol: dict[str, dict] = {}
+        # D2 is the one daily filter with NO intraday/current-price
+        # component at all (unlike D1's "above yesterday's high" or D3's
+        # gap %, both genuinely tick-dependent as price moves through the
+        # day) - once it fails for a symbol today, it can never pass later
+        # today, so every later tick can skip that symbol's evaluate call
+        # entirely rather than re-deriving the same D2=False result.
+        d2_failed_today: set[str] = set()
 
         # Union of this day's regular-session 5-min timestamps across every
         # symbol, walked in chronological order — mirrors run_cycle's own
@@ -399,6 +413,8 @@ def simulate_strategy(
                 for symbol, intraday in intraday_by_symbol.items():
                     if symbol in open_positions:
                         continue
+                    if symbol in d2_failed_today:
+                        continue
                     if len(open_positions) >= max_concurrent or entries_today >= max_trades_per_day:
                         break
                     if bar_ts not in intraday.index:
@@ -426,6 +442,7 @@ def simulate_strategy(
                         daily_slice, intraday_slice, strategy_rules, side,
                         prior_day_bars=prior_day_bars_by_symbol[symbol],
                         signal_side=strategy_rules.get("signal_side"),
+                        daily_derived_cache=daily_derived_cache_by_symbol.setdefault(symbol, {}),
                     )
                     if "error" in detail:
                         filter_stats["insufficient_data"] += 1
@@ -434,6 +451,8 @@ def simulate_strategy(
                     for cond in ("D1", "D2", "D3", "I1", "I2", "I3"):
                         if detail.get(cond):
                             filter_stats[cond] += 1
+                    if not detail.get("D2"):
+                        d2_failed_today.add(symbol)
                     if not detail.get("pass"):
                         continue
 
