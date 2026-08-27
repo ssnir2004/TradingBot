@@ -1745,6 +1745,35 @@ def cancel_backtest(backtest_id: int, account_id: int) -> bool:
     return True
 
 
+def cancel_backtests(account_id: int, backtest_ids: list[int]) -> int:
+    """Bulk cancel_backtest for a multi-select action - loops the same
+    single-row logic (kill the recorded pid, mark failed) since cancelling
+    needs a live status/pid check per row, not a single bulk UPDATE like
+    archive_backtests. Same silent-skip behavior on an id that doesn't
+    belong to this account or isn't in a cancellable state."""
+    return sum(1 for bid in backtest_ids if cancel_backtest(bid, account_id))
+
+
+def delete_backtests(account_id: int, backtest_ids: list[int]) -> int:
+    """Bulk delete_backtest for a multi-select action. Excludes any row
+    currently 'pending'/'running', same as the single-row UI (which only
+    ever offers Delete on an already-finished run) - deleting a
+    still-running backtest's row would abandon its subprocess with
+    nothing left to write its result into (see delete_backtest's own
+    docstring). Silently skips those rather than failing the whole batch;
+    cancel_backtests first if they need to go away right now."""
+    if not backtest_ids:
+        return 0
+    with get_conn() as conn:
+        placeholders = ",".join("?" for _ in backtest_ids)
+        cur = conn.execute(
+            f"DELETE FROM backtests WHERE account_id = ? AND id IN ({placeholders}) "
+            f"AND status NOT IN ('pending', 'running')",
+            (account_id, *backtest_ids),
+        )
+        return cur.rowcount
+
+
 def _backtest_row_to_summary(row) -> dict:
     """Shared by list_backtests/list_archived_backtests: turns one raw
     `backtests` row into a summary dict carrying total_pnl_usd, a
