@@ -231,8 +231,10 @@
       </div>
 
       <div class="small text-muted mb-2" id="bt-universe-info">Checking available historical data…</div>
+      <div class="small text-muted mb-2">A multi-day range runs as one separate backtest per weekday (weekends skipped) — see History/Calendar below once started.</div>
       <button id="btn-run-backtest" class="btn btn-primary btn-sm">Run backtest</button>
       <div id="bt-run-error" class="text-danger small mt-2"></div>
+      <div id="bt-run-status" class="text-muted small mt-2"></div>
     </div>
   </div>
   {% endif %}
@@ -523,6 +525,22 @@ function toISODate(d) {
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
   return `${d.getFullYear()}-${mm}-${dd}`;
+}
+
+// Every weekday (Mon-Fri) from startDate to endDate inclusive, as one
+// Date per calendar day - used to fan a picked range out into one
+// backtest per trading day (see btn-run-backtest below). Walks by local
+// calendar date, same reasoning as toISODate above.
+function weekdaysInRange(startDate, endDate) {
+  const days = [];
+  const cur = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate());
+  const last = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate());
+  while (cur <= last) {
+    const dow = cur.getDay();  // 0 = Sunday, 6 = Saturday
+    if (dow !== 0 && dow !== 6) days.push(new Date(cur));
+    cur.setDate(cur.getDate() + 1);
+  }
+  return days;
 }
 
 let strategiesById = {};
@@ -1366,32 +1384,75 @@ document.getElementById("btn-cancel-current").addEventListener("click", (e) => {
 
 document.getElementById("btn-run-backtest")?.addEventListener("click", async () => {
   const errorEl = document.getElementById("bt-run-error");
+  const statusEl = document.getElementById("bt-run-status");
   errorEl.textContent = "";
+  statusEl.textContent = "";
   const strategyIds = Array.from(document.querySelectorAll(".bt-strategy-checkbox:checked")).map(el => Number(el.value));
   if (!strategyIds.length) { errorEl.textContent = "Pick at least one strategy."; return; }
   const selected = dateRangePicker ? dateRangePicker.selectedDates : [];
   if (selected.length < 2) { errorEl.textContent = "Pick a start and end date on the calendar."; return; }
-  const startDate = toISODate(selected[0]);
-  const endDate = toISODate(selected[1]);
 
-  const payload = {
+  const weekdays = weekdaysInRange(selected[0], selected[1]);
+  if (!weekdays.length) { errorEl.textContent = "The selected range has no weekdays (Mon–Fri) to backtest."; return; }
+
+  const isRemote = document.getElementById("bt-run-remote").checked;
+  // Each weekday runs as its own local subprocess (see _start_backtest) -
+  // firing many of those at once on this same server is exactly the CPU/
+  // memory risk "Run on remote worker" exists to avoid, so a multi-day
+  // local run gets a confirm/cancel gate a single-day run never needed.
+  if (weekdays.length > 1 && !isRemote) {
+    const ok = confirm(
+      `This starts ${weekdays.length} separate backtests (one per weekday, weekends skipped) running locally on this server at the same time - that can be heavy on CPU/memory.\n\n` +
+      `Check "Run on remote worker" first to offload this instead, or press OK to continue running locally.`
+    );
+    if (!ok) return;
+  }
+
+  const basePayload = {
     strategy_ids: strategyIds,
-    start_date: startDate,
-    end_date: endDate,
     portfolio_value: Number(document.getElementById("bt-portfolio-value").value),
     max_risk_pct: Number(document.getElementById("bt-max-risk-pct").value),
     max_trades_per_day: Number(document.getElementById("bt-max-trades-per-day").value),
     commission_per_trade: Number(document.getElementById("bt-commission-per-trade").value),
-    execution_mode: document.getElementById("bt-run-remote").checked ? "remote" : "local",
+    execution_mode: isRemote ? "remote" : "local",
   };
-  try {
-    const { id } = await api("/api/backtests", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
-    });
-    pollBacktest(id);
-  } catch (e) {
-    errorEl.textContent = "Could not start backtest: " + e.message;
+
+  if (weekdays.length === 1) {
+    // Single trading day selected - unchanged from before: open it
+    // directly in the Results panel rather than just dropping it in
+    // History like the multi-day fan-out below does.
+    const dayIso = toISODate(weekdays[0]);
+    try {
+      const { id } = await api("/api/backtests", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...basePayload, start_date: dayIso, end_date: dayIso }),
+      });
+      pollBacktest(id);
+    } catch (e) {
+      errorEl.textContent = "Could not start backtest: " + e.message;
+    }
+    return;
   }
+
+  let started = 0;
+  for (const day of weekdays) {
+    const dayIso = toISODate(day);
+    try {
+      await api("/api/backtests", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...basePayload, start_date: dayIso, end_date: dayIso }),
+      });
+      started++;
+    } catch (e) {
+      errorEl.textContent = `Started ${started}/${weekdays.length} before failing on ${dayIso}: ${e.message}`;
+      refreshHistory();
+      refreshCalendar();
+      return;
+    }
+  }
+  statusEl.textContent = `Started ${started} backtest(s), one per weekday - see History/Calendar below.`;
+  refreshHistory();
+  refreshCalendar();
 });
 
 // Remembers the last-typed risk sizing (portfolio value, max risk/trade,
@@ -1592,6 +1653,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (document.getElementById("bt-date-range")) {  // viewer - the New Backtest card isn't rendered at all
     dateRangePicker = flatpickr("#bt-date-range", {
       mode: "range", dateFormat: "d/m/Y", allowInput: false,
+      // Markets are closed Sat/Sun - no strategy ever has a session on
+      // one, so a weekend can't usefully anchor either end of a backtest
+      // range. Doesn't stop Fri->Mon still spanning a weekend in between
+      // (flatpickr only guards the two endpoints) - weekdaysInRange below
+      // is what actually strips those out when the range gets expanded
+      // into one backtest per day.
+      disable: [(d) => d.getDay() === 0 || d.getDay() === 6],
     });
   }
   await loadStrategyPicker();
