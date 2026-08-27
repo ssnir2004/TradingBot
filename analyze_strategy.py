@@ -209,6 +209,21 @@ def print_symbol_breakdown(pairs: list[dict], top_n: int = 10):
         print(f"  {sym:<8} {count:3d} trades   {fmt_money(total)}")
 
 
+# Condition keys vary by strategy engine: D1-I3 for the standard D1-D3/
+# I1-I3 filter strategies, or_formed/confirmed/volatility_ok for ORB (see
+# src/orb.py) - same reasoning as web/templates/backtest.html's own
+# FILTER_LABELS, which this mirrors so the dashboard and this offline
+# script never disagree on what each key means.
+FILTER_LABELS = {
+    "D1": "D1: above prior day extreme", "D2": "D2: trend side of SMA200",
+    "D3": "D3: gap threshold", "I1": "I1: above premarket extreme",
+    "I2": "I2: new intraday high/low", "I3": "I3: relative volume",
+    "or_formed": "Opening range formed", "confirmed": "5m confirmation close",
+    "volatility_ok": "RVOL + ATR% filters",
+}
+_FILTER_STATS_META_KEYS = {"evaluations", "insufficient_data"}
+
+
 def print_filter_funnel(filter_stats: dict):
     if not filter_stats:
         print("(no filter_stats recorded on these runs)")
@@ -219,11 +234,10 @@ def print_filter_funnel(filter_stats: dict):
     if not evaluations:
         return
     print("Pass rate per condition (share of evaluations where this condition alone passed):")
-    for cond in ("D1", "D2", "D3", "I1", "I2", "I3"):
-        if cond not in filter_stats:
+    for cond, passed in filter_stats.items():
+        if cond in _FILTER_STATS_META_KEYS:
             continue
-        passed = filter_stats[cond]
-        print(f"  {cond}: {passed:6d} / {evaluations}  ({passed/evaluations*100:5.1f}%)")
+        print(f"  {FILTER_LABELS.get(cond, cond)}: {passed:6d} / {evaluations}  ({passed/evaluations*100:5.1f}%)")
 
 
 def print_monthly_trend(pairs: list[dict]):
@@ -295,7 +309,7 @@ def main():
     section("Per-symbol P&L")
     print_symbol_breakdown(pairs)
 
-    section("Entry filter funnel (D1-D3 daily / I1-I3 intraday)")
+    section("Entry filter funnel")
     print_filter_funnel(pooled["filter_stats"])
 
     section("Monthly trend")
