@@ -387,16 +387,17 @@ function fmtDuration(startIso, endIso) {
   return `${s}s`;
 }
 
-// Calendar days spanned by a backtest's start_date..end_date, inclusive of
-// both ends (a same-day backtest is "1 day"), not the count of trading days
-// actually in the market - a quick "how much history did this run cover"
-// figure for the History table, next to the raw date range.
+// Trading days (Mon-Fri) spanned by a backtest's start_date..end_date,
+// inclusive of both ends - matches what the engine actually simulates
+// (it only ever runs on days with real cached bars, i.e. weekdays), not
+// the raw calendar-day span. Shown in the History/Archive tables next to
+// the raw date range.
 function daysTested(startDate, endDate) {
   if (!startDate || !endDate) return null;
   const start = new Date(startDate + "T00:00:00");
   const end = new Date(endDate + "T00:00:00");
-  const days = Math.round((end - start) / 86400000) + 1;
-  return Number.isFinite(days) && days > 0 ? days : null;
+  const days = weekdaysInRange(start, end).length;
+  return days > 0 ? days : null;
 }
 
 // --- Backtest Data (fetch_backtest_data.py "Update" button) ------------
