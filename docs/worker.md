@@ -48,7 +48,7 @@ bars") — same as it would on the server without the fetch.
 That rsync only covers *intraday* bars. Daily bars (SMA200/50, D1-D3) are
 fetched from yfinance directly by `backtest_engine.py` itself and cached
 separately, the first time each symbol is needed — on a cold cache, a
-few hundred symbols can take well past this dashboard's 15-minute
+few hundred symbols can take well past this dashboard's 45-minute
 "abandoned by worker" timeout to fetch, even with the built-in per-symbol
 timeout and worker pool, which can make a perfectly healthy worker look
 stuck on its first few jobs. Run this once (no job-timeout pressure
@@ -119,12 +119,12 @@ You'll see output like:
   result submission is simply rejected (the row's no longer "running") and
   discarded. Harmless, just wasted local compute time.
 - **An abandoned claim (worker crashes, loses network, or you close the
-  laptop mid-run) is automatically detected and marked failed** after 15
+  laptop mid-run) is automatically detected and marked failed** after 45
   minutes with no result — the dashboard checks for this once a minute in
   the background. Just re-run it once your worker's back.
 - **Stopping the worker (Ctrl+C) to `git pull` an update triggers this same
   "abandoned claim" failure if it currently has a job claimed** — the
-  backtest it was working on gets marked failed after 15 minutes, same as a
+  backtest it was working on gets marked failed after 45 minutes, same as a
   crash. Check the worker's terminal output before stopping it: if the last
   line is `[worker] claimed backtest N ...` with no matching "done"/result
   line yet, it's still mid-job. Either wait for it to finish that job first,

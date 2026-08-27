@@ -2566,7 +2566,7 @@ def fail_worker_backtest(backtest_id: int, account_id: int, error: str) -> bool:
     return True
 
 
-def requeue_abandoned_worker_backtests(timeout_minutes: int = 15):
+def requeue_abandoned_worker_backtests(timeout_minutes: int = 45):
     """Called periodically from web/app.py (a background asyncio task, not
     just at startup - a worker can go quiet at any time, not only across a
     dashboard restart). A remote backtest claimed more than timeout_minutes

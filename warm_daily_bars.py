@@ -8,7 +8,7 @@ run against a cold cache: a backtest's own symbol loop fetches whatever
 isn't cached yet inline, bounded by a per-symbol timeout and a small
 worker pool (see backtest_engine._YF_TIMEOUT_SECONDS/_DAILY_FETCH_WORKERS),
 but even with those safeguards, several hundred cold symbols can still
-take well past 15 minutes wall-clock if Yahoo is throttling the box -
+take well past 45 minutes wall-clock if Yahoo is throttling the box -
 which is exactly the "Abandoned by worker" timeout a remote backtest job
 is reaped at (see requeue_abandoned_worker_backtests), so a cold cache can
 make a perfectly healthy worker look stuck/broken on its first few jobs.
