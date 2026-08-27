@@ -223,7 +223,7 @@ def high_of_last_n_bars(bars: pd.DataFrame, n: int) -> float | None:
 
 def evaluate_orb_entry(
     daily: pd.DataFrame, intraday: pd.DataFrame, rules: dict, side: str,
-    prior_day_bars: dict | None = None,
+    prior_day_bars: dict | None = None, signal_side: str | None = None,
 ) -> dict:
     """The ORB decision logic - no data fetching, no wall-clock "now": the
     day being evaluated is whatever the last date in `intraday`'s index
@@ -254,7 +254,23 @@ def evaluate_orb_entry(
     presets). "target_price" is None (not computed) whenever an entry
     model's config omits target_rr - a staged_trail strategy (see
     cycle.manage_position) has no fixed target at all, only a stop that
-    moves via breakeven/trailing."""
+    moves via breakeven/trailing.
+
+    signal_side decouples WHICH breakout/retest setup fires entry from
+    WHICH side the resulting TRADE is placed on - same mechanism and
+    same reasoning as cycle._evaluate_filters_from_bars' own signal_side
+    (defaults to `side`, so every existing ORB strategy is unaffected).
+    Only the signal-detection conditions (confirm_bars' breakout
+    direction, the breakout model's gap direction, the retest model's
+    touch/close conditions, and entry_confluence's trend-alignment check)
+    read signal_side; stop/target/risk placement always reads `side` -
+    a faded short still needs a short's own stop (above price) and
+    target (below price), even though the setup being faded is an
+    up-breakout detected via signal_side="long". The confirm bar's own
+    Low/High still makes a sensible fade-stop unchanged (e.g. a faded
+    short's stop at the up-gap bar's own High: a close back above it
+    means the original breakout thesis held after all)."""
+    signal_side = signal_side or side
     vol_filters = rules["volatility_filters"]
     entry_models = rules["entry_models"]
     confluence_cfg = rules.get("entry_confluence")
@@ -287,7 +303,7 @@ def evaluate_orb_entry(
     volatility_ok = bool(atr_ok and rvol_ok)
 
     post_or_bars = today_bars[today_bars.index > or_end_ts]
-    if side == "long":
+    if signal_side == "long":
         confirm_bars = post_or_bars[post_or_bars["Close"] > or_high]
     else:
         confirm_bars = post_or_bars[post_or_bars["Close"] < or_low]
@@ -298,10 +314,12 @@ def evaluate_orb_entry(
     # carry entry_confluence at all - the original ORB Long/ORB Short
     # presets are unaffected; only a strategy that explicitly opts in
     # (e.g. an "ORB Long v2") pays for/is gated by this extra check.
-    confluence_ok = _trend_confluence_ok(intraday, today_bars, side, confluence_cfg) if confluence_cfg else True
+    # Validated against signal_side - confluence confirms the SETUP being
+    # detected (or faded) is real, not the trade's own direction.
+    confluence_ok = _trend_confluence_ok(intraday, today_bars, signal_side, confluence_cfg) if confluence_cfg else True
 
     detail = {
-        "side": side, "price": current_price, "or_high": or_high, "or_low": or_low,
+        "side": side, "signal_side": signal_side, "price": current_price, "or_high": or_high, "or_low": or_low,
         "rvol": rvol, "atr_pct": atr_pct, "atr_tier_min": atr_tier_min,
         "or_formed": True, "confirmed": confirmed, "volatility_ok": volatility_ok,
         "confluence_ok": confluence_ok,
@@ -318,7 +336,7 @@ def evaluate_orb_entry(
         if bar_pos > 0:
             prev_bar = today_bars.iloc[bar_pos - 1]
             confirm_bar = today_bars.loc[confirm_ts]
-            gap = (confirm_bar["Low"] > prev_bar["High"]) if side == "long" else (confirm_bar["High"] < prev_bar["Low"])
+            gap = (confirm_bar["Low"] > prev_bar["High"]) if signal_side == "long" else (confirm_bar["High"] < prev_bar["Low"])
             if gap:
                 entry_price = float(confirm_bar["Close"])
                 stop = float(confirm_bar["Low"]) if side == "long" else float(confirm_bar["High"])
@@ -333,7 +351,7 @@ def evaluate_orb_entry(
     # opening-range level and closes back on the breakout side (holds it) ---
     if entry_models.get("retest", {}).get("enabled") and current_ts > confirm_ts:
         bar = today_bars.loc[current_ts]
-        if side == "long":
+        if signal_side == "long":
             retest_hit = bar["Low"] <= or_high and bar["Close"] > or_high and bar["Close"] > bar["Open"]
         else:
             retest_hit = bar["High"] >= or_low and bar["Close"] < or_low and bar["Close"] < bar["Open"]

@@ -1071,6 +1071,159 @@ EXTRA_STRATEGY_PRESETS = [
         "אל תפעיל LIVE לפני בדיקה מקיפה.",
     ),
     (
+        # Experimental "fade" pair for ORB v2, same signal_side mechanism
+        # (and same research motivation) as "Long Breakout Fade (Short)"/
+        # "Short Breakdown Fade (Long)" above, extended to
+        # orb.evaluate_orb_entry (see its own "signal_side decouples..."
+        # docstring paragraph) rather than duplicating the whole ORB v2
+        # engine. daily/opening_range/universe_filters/volatility_filters/
+        # entry_confluence/entry_models/time_filter here are LITERALLY ORB
+        # Long v2's own definitions, copied verbatim (same signal,
+        # detected via signal_side="long") - only `direction` (short) and
+        # the exit block's stop/trail mechanics (already side-driven, not
+        # signal_side-driven - see evaluate_orb_entry's docstring) describe
+        # the actual trade being placed. Kept as its own strategy_id
+        # (not an edit of ORB Long v2) for the same backtest-history-
+        # pooling reason every other fade/aggressive variant here follows.
+        "ORB Long v2 Fade (Short)",
+        {
+            "strategy_name": "ORB Long v2 Fade (Short)",
+            "direction": "short_only",
+            "signal_side": "long",
+            "opening_range": {
+                "or_timeframe": "15m",
+                "confirm_timeframe": "5m",
+                "entry_timeframe": "5m",
+                "session": "new_york",
+                "session_open_et": "09:30",
+            },
+            "universe_filters": {
+                "index": "S&P 500",
+                "min_price_usd": 3.0,
+                "custom_universe": "sp500_marketcap_1b",
+            },
+            "volatility_filters": {
+                "V1_rvol_min": 2.0,
+                "V1_rvol_lookback_days": 14,
+                "V2_atr_period": 14,
+                "V2_atr_pct_tiers": [
+                    {"price_min": 3.0, "price_max": 20.0, "atr_pct_min": 4.0},
+                    {"price_min": 20.0, "price_max": 50.0, "atr_pct_min": 3.0},
+                    {"price_min": 50.0, "price_max": 100.0, "atr_pct_min": 2.0},
+                    {"price_min": 100.0, "price_max": None, "atr_pct_min": 1.5},
+                ],
+            },
+            "entry_confluence": {
+                "rsi_period": 14,
+                "rsi_rising_bars": 3,
+                "ema_period": 20,
+            },
+            "entry_models": {
+                "breakout": {"enabled": True},
+                "retest": {"enabled": True},
+            },
+            "time_filter": {"earliest_entry_et": "09:50", "latest_entry_et": "11:30", "force_close_et": "15:51"},
+            "exit": {
+                "management_style": "staged_trail",
+                "breakeven_trigger_R": 2.0,
+                "trailing_trigger_R": 3.0,
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+            },
+        },
+        "aggressive",
+        "short",
+        "## מה זה עושה\n"
+        "אסטרטגיית מחקר ניסיונית: מזהה בדיוק את אותו איתות של ORB Long v2 (פריצת opening range "
+        "כלפי מעלה, עם אישור RVOL/ATR% ו-RSI+מגמה), אבל **מוכרת בשורט** נגד הפריצה במקום לקנות "
+        "איתה - הימור שהפריצה תיכשל ותתהפך, לא שהיא תמשיך.\n\n"
+        "## תנאי כניסה (זהים לחלוטין ל-ORB Long v2)\n"
+        "Opening Range 15 דקות, אישור פריצה כלפי מעלה על נר 5 דקות, RVOL מעל 2.0, ATR% מדורג לפי "
+        "מחיר, RSI(14) עולה על פני 3 נרות, וגם (EMA(20) עולה או מחיר מעל VWAP).\n\n"
+        "## יציאה וניהול פוזיציה (מותאם לפוזיציית שורט, לא ללונג)\n"
+        "סטופ התחלתי: שפל/שיא נר האישור (מעל הכניסה - זו פוזיציית שורט, לא מתחתיה). Staged Trail: "
+        "נשאר קבוע עד 2R, Breakeven ב-2R, טריילינג מ-3R מעל השיא של שני הנרות האחרונים (5 דקות).\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive | סיכון לעסקה: 1% | גודל פוזיציה מקס': 10% | פוזיציות בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "זו לא אסטרטגיה שאומתה - היא ממש את אותו רעיון ניסיוני של Long Breakout Fade (Short) "
+        "(הימור שפריצה תיכשל ותתהפך), מיושם על ORB v2 במקום המודל הקלאסי. אל תפעיל LIVE לפני "
+        "בדיקה מקיפה על פני תקופה ארוכה (שבועות-חודשים, מאות עסקאות). בנוסף, בפוזיציית Short "
+        "אין תקרה תיאורטית להפסד.",
+    ),
+    (
+        # Exact mirror of ORB Long v2 Fade (Short) - see its own comment
+        # above for the full explanation, not repeated here.
+        "ORB Short v2 Fade (Long)",
+        {
+            "strategy_name": "ORB Short v2 Fade (Long)",
+            "direction": "long_only",
+            "signal_side": "short",
+            "opening_range": {
+                "or_timeframe": "15m",
+                "confirm_timeframe": "5m",
+                "entry_timeframe": "5m",
+                "session": "new_york",
+                "session_open_et": "09:30",
+            },
+            "universe_filters": {
+                "index": "S&P 500",
+                "min_price_usd": 3.0,
+                "custom_universe": "sp500_marketcap_1b",
+            },
+            "volatility_filters": {
+                "V1_rvol_min": 2.0,
+                "V1_rvol_lookback_days": 14,
+                "V2_atr_period": 14,
+                "V2_atr_pct_tiers": [
+                    {"price_min": 3.0, "price_max": 20.0, "atr_pct_min": 4.0},
+                    {"price_min": 20.0, "price_max": 50.0, "atr_pct_min": 3.0},
+                    {"price_min": 50.0, "price_max": 100.0, "atr_pct_min": 2.0},
+                    {"price_min": 100.0, "price_max": None, "atr_pct_min": 1.5},
+                ],
+            },
+            "entry_confluence": {
+                "rsi_period": 14,
+                "rsi_rising_bars": 3,
+                "ema_period": 20,
+            },
+            "entry_models": {
+                "breakout": {"enabled": True},
+                "retest": {"enabled": True},
+            },
+            "time_filter": {"earliest_entry_et": "09:50", "latest_entry_et": "11:30", "force_close_et": "15:51"},
+            "exit": {
+                "management_style": "staged_trail",
+                "breakeven_trigger_R": 2.0,
+                "trailing_trigger_R": 3.0,
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+            },
+        },
+        "aggressive",
+        "long",
+        "## מה זה עושה\n"
+        "מראה הפוכה מדויקת של ORB Long v2 Fade (Short) - ראו את התיאור המלא שם. כאן: מזהה בדיוק "
+        "את אותו איתות של ORB Short v2 (פריצת opening range כלפי מטה, RSI יורד, EMA יורד/מחיר "
+        "מתחת ל-VWAP), אבל **קונה בלונג** נגד השבירה במקום למכור בשורט איתה.\n\n"
+        "## יקום, פילטרים, חלון כניסות\n"
+        "זהה לחלוטין ל-ORB Short v2 ול-ORB Long v2 Fade (Short).\n\n"
+        "## יציאה וניהול פוזיציה (מותאם לפוזיציית לונג)\n"
+        "סטופ התחלתי: שפל נר האישור (מתחת לכניסה - זו פוזיציית לונג). Staged Trail: נשאר קבוע עד "
+        "2R, Breakeven ב-2R, טריילינג מ-3R מתחת לשפל של שני הנרות האחרונים.\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive | סיכון לעסקה: 1% | גודל פוזיציה מקס': 10% | פוזיציות בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "כל אזהרות ORB Long v2 Fade (Short) תקפות כאן - זו לא אסטרטגיה שאומתה. אל תפעיל LIVE לפני "
+        "בדיקה מקיפה על פני תקופה ארוכה.",
+    ),
+    (
         # Touch & Turn Scalper - a THIRD, distinct engine from both the
         # classic D1-D3/I1-I3 model and ORB: no daily "yesterday" bias
         # filters, no continuous per-tick "does it pass right now" signal

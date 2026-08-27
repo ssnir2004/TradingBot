@@ -1045,7 +1045,7 @@ def _evaluate_orb_entry(account_id: int, mode: str, ticker: str, rules: dict, si
         intraday = yf.Ticker(yahoo_symbol).history(period=f"{INTRADAY_FETCH_LOOKBACK_DAYS}d", interval="5m", prepost=True)
         if not intraday.empty:
             intraday.index = intraday.index.tz_convert(ET)
-        detail = orb.evaluate_orb_entry(daily, intraday, rules, side)
+        detail = orb.evaluate_orb_entry(daily, intraday, rules, side, signal_side=rules.get("signal_side"))
         detail["side"] = side
         event = "orb_filter_eval" if "error" not in detail else "orb_filter_eval_error"
         log_decision(account_id, mode, {"event": event, "symbol": ticker, **detail})
@@ -1141,7 +1141,19 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
     if len(side_positions) >= max_concurrent:
         return positions
 
-    watchlist = [row["symbol"] for row in db.get_watchlist(account_id, mode, direction=side, universe=_strategy_universe(rules))]
+    # A fade strategy's own filters (D1-D3/I1-I3, or ORB's confirm/gap/
+    # retest conditions once signal_side reaches evaluate_orb_entry too)
+    # are keyed to signal_side's gap direction, not the actual trade side
+    # - a "Long Breakout Fade (Short)" needs GAP-UP candidates (direction
+    # ="long" in the watchlist, tagged by morning_prefilter purely off
+    # each symbol's own gap sign, never a strategy's trade direction) even
+    # though it trades short. Querying by `side` here would silently hand
+    # this scan zero usable candidates (gap-down symbols can never pass a
+    # "gapped up 3%" filter), making the strategy inert without ever
+    # erroring - rules.get("signal_side") is None (falls back to `side`,
+    # unchanged behavior) for every non-fade strategy.
+    watchlist_direction = rules.get("signal_side") or side
+    watchlist = [row["symbol"] for row in db.get_watchlist(account_id, mode, direction=watchlist_direction, universe=_strategy_universe(rules))]
     if not watchlist:
         return positions
 
@@ -1472,7 +1484,11 @@ def scan_watchlist_filters(account_id: int):
             # follow-up, not built yet.
             continue
         is_orb = "opening_range" in rules
-        for row in db.get_watchlist(account_id, "paper", direction=side, universe=_strategy_universe(rules)):
+        # Same signal_side-vs-side watchlist scoping as entry_scan (see
+        # its own comment) - a fade strategy's candidates come from its
+        # signal direction's gap-scan survivors, not its trade side's.
+        watchlist_direction = rules.get("signal_side") or side
+        for row in db.get_watchlist(account_id, "paper", direction=watchlist_direction, universe=_strategy_universe(rules)):
             if is_orb:
                 detail = _evaluate_orb_entry(account_id, "paper", row["symbol"], rules, side)
                 results.append({

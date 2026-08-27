@@ -762,6 +762,7 @@ def simulate_orb_strategy(
                     detail = orb.evaluate_orb_entry(
                         daily_slice, intraday_slice, strategy_rules, side,
                         prior_day_bars=prior_day_bars_by_symbol[symbol],
+                        signal_side=strategy_rules.get("signal_side"),
                     )
                     if "error" in detail:
                         filter_stats["insufficient_data"] += 1
