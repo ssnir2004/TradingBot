@@ -47,7 +47,7 @@ import yfinance as yf
 from dotenv import dotenv_values
 from ib_async import Stock, StopOrder
 
-from src import db, mode_config
+from src import db, mode_config, orb
 from src.ibkr_client import IBKRClient, belongs_to_account, scoped_positions
 from src.notify import notify
 
@@ -572,6 +572,33 @@ def manage_position(account_id: int, mode: str, ib, pos: dict, rules: dict) -> d
     r_multiple = ((entry - price) if side == "short" else (price - entry)) / initial_risk
     pos["r_multiple"] = r_multiple
 
+    if exit_cfg.get("management_style") == "fixed_target_no_trail":
+        # ORB positions: no breakeven flip, no swing trailing - the broker-side
+        # stop placed at entry (initial_stop, never moved) protects the
+        # downside; this only ever watches for the fixed R:R target (see
+        # orb.fixed_target_decision) and exits the WHOLE position there.
+        decision = orb.fixed_target_decision(pos, price, side)
+        if decision["action"] == "close_target":
+            _cancel_stop(ib, pos.get("stop_order_id"))
+            closed = _market_close(account_id, mode, ib, pos["symbol"], pos["qty"], side)
+            if not closed:
+                closed = _broker_position(ib, pos["symbol"]) is None
+            if closed:
+                notify(f"[{mode.upper()}] TARGET {pos['symbol']}", f"closed @ target ~${pos['target_price']:.2f}", "default")
+                log_decision(account_id, mode, {"event": "target_close", "symbol": pos["symbol"], "side": side, "target": pos["target_price"]})
+                db.remove_position(account_id, mode, pos["symbol"])
+                pos["qty"] = 0
+            else:
+                # Same delayed-fill race force_close_all already handles: the
+                # stop was just cancelled to make way for the close attempt,
+                # so re-arm it immediately rather than leaving the position
+                # unprotected, and let the next cycle retry the close.
+                pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], pos["stop_price"], side)
+                notify(f"[{mode.upper()}] TARGET CLOSE FAILED: {pos['symbol']}", "still holding after target-close attempt - stop re-armed, will retry next cycle", "high")
+        if pos["qty"] > 0:
+            db.upsert_position(account_id, mode, pos)
+        return pos
+
     if pos["state"] == "pre_breakeven":
         decision = _breakeven_decision(pos, exit_cfg, r_multiple)
         if decision["action"] == "breakeven_flip":
@@ -917,6 +944,31 @@ def _evaluate_entry_filters(account_id: int, mode: str, ticker: str, rules: dict
         return {"pass": False, "side": side, "error": str(exc)}
 
 
+def _evaluate_orb_entry(account_id: int, mode: str, ticker: str, rules: dict, side: str) -> dict:
+    """ORB's own live wrapper - same fetch shape as _evaluate_entry_filters
+    (fresh yfinance data ending at the real current moment), handed to
+    orb.evaluate_orb_entry instead of cycle's own D1-D3/I1-I3 pure logic.
+    Dispatched from entry_scan whenever this strategy's rules carry an
+    "opening_range" key. ORB doesn't need 200 days of daily history (no
+    SMA200 filter) - only enough for ATR(14) - but fetching the same
+    260-day window as the D1-D3 path is harmless and keeps this one fetch
+    shape shared rather than adding a second, narrower one."""
+    yahoo_symbol = ticker.replace(" ", "-")
+    try:
+        daily = yf.Ticker(yahoo_symbol).history(period="260d", interval="1d")
+        intraday = yf.Ticker(yahoo_symbol).history(period=f"{INTRADAY_FETCH_LOOKBACK_DAYS}d", interval="5m", prepost=True)
+        if not intraday.empty:
+            intraday.index = intraday.index.tz_convert(ET)
+        detail = orb.evaluate_orb_entry(daily, intraday, rules, side)
+        detail["side"] = side
+        event = "orb_filter_eval" if "error" not in detail else "orb_filter_eval_error"
+        log_decision(account_id, mode, {"event": event, "symbol": ticker, **detail})
+        return detail
+    except Exception as exc:  # noqa: BLE001 - one bad ticker must not kill the scan
+        log_decision(account_id, mode, {"event": "orb_filter_eval_error", "symbol": ticker, "side": side, "error": str(exc)})
+        return {"pass": False, "side": side, "error": str(exc)}
+
+
 def _within_entry_window(rules: dict, now_et: datetime | None = None) -> bool:
     """Whether this strategy's own time_filter.earliest_entry_et/
     latest_entry_et currently allow a new entry — the per-strategy floor
@@ -992,12 +1044,18 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
         if db.count_todays_entries(account_id, mode, side) >= risk["max_trades_per_day"]:
             break
 
-        signal = _evaluate_entry_filters(account_id, mode, ticker, rules, side)
+        is_orb = "opening_range" in rules
+        signal = _evaluate_orb_entry(account_id, mode, ticker, rules, side) if is_orb \
+            else _evaluate_entry_filters(account_id, mode, ticker, rules, side)
         if not signal.get("pass"):
             continue
 
         price = signal["price"]
-        initial_stop = _resolve_initial_stop(signal, rules, side)
+        # ORB's stop comes straight off the entry model itself (the gap
+        # candle's or retest bar's own low/high) - not one of
+        # INITIAL_STOP_RULES' generic session-extreme/ATR-multiple rules,
+        # see orb.evaluate_orb_entry's own docstring.
+        initial_stop = signal["initial_stop"] if is_orb else _resolve_initial_stop(signal, rules, side)
         r = (initial_stop - price) if side == "short" else (price - initial_stop)
         if r <= 0:
             continue
@@ -1048,6 +1106,8 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
             "state": "pre_breakeven",
             "r_multiple": 0.0,
         }
+        if is_orb:
+            new_position["target_price"] = signal["target_price"]
         db.upsert_position(account_id, mode, new_position)
         positions.append(new_position)
         side_positions.append(new_position)

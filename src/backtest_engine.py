@@ -45,7 +45,7 @@ import pandas as pd
 import yfinance as yf
 
 import cycle
-from src import backtest_data
+from src import backtest_data, orb
 
 BAR_SIZE = "5 mins"
 DAILY_BAR_SIZE = "1 day"
@@ -466,6 +466,248 @@ def simulate_strategy(
         # reached this day (e.g. a holiday-shortened session that ends
         # before force_close_et) — the loop above already handles the
         # normal case.
+        for symbol, pos in open_positions.items():
+            intraday = intraday_by_symbol[symbol]
+            day_bars = intraday[intraday.index.date == day]
+            if day_bars.empty:
+                continue
+            last_bar = day_bars.iloc[-1]
+            trade_id += 1
+            trades.append({
+                "id": trade_id, "symbol": symbol, "side": close_action,
+                "fill_price": float(last_bar["Close"]), "size": pos["qty"],
+                "timestamp_iso": day_bars.index[-1].isoformat(),
+                "exit_reason": "eod_close", "commission": commission_per_trade,
+            })
+
+    return {"trades": trades, "skipped_symbols": skipped, "filter_stats": filter_stats}
+
+
+def _daily_as_of_light(daily: pd.DataFrame, day, min_days: int) -> pd.DataFrame | None:
+    """Same "yesterday" alignment as _daily_as_of (daily.iloc[-2] must be
+    the prior trading day relative to `day`), but for ORB's own ATR-only
+    need instead of D1-D3's 200-day SMA requirement - only `min_days`
+    complete days are required, not 201, so ORB doesn't need anywhere
+    near as much daily history warmed up before it can start evaluating."""
+    sliced = daily[daily.index.date < day]
+    if len(sliced) < min_days:
+        return None
+    return pd.concat([sliced, sliced.iloc[[-1]]])  # placeholder "today" row, same reasoning as _daily_as_of
+
+
+def _find_target_out(bars: pd.DataFrame, target_price: float, side: str) -> pd.Timestamp | None:
+    """Mirror of _find_stop_out for the fixed target side - first bar (if
+    any) whose range crosses the target, checked against High/Low."""
+    if side == "short":
+        hit = bars[bars["Low"] <= target_price]
+    else:
+        hit = bars[bars["High"] >= target_price]
+    return hit.index[0] if not hit.empty else None
+
+
+def simulate_orb_strategy(
+    strategy_rules: dict,
+    side: str,
+    symbols: list[str],
+    start_date,
+    end_date,
+    portfolio_value: float,
+    max_risk_pct: float,
+    max_trades_per_day: int,
+    commission_per_trade: float = 0.0,
+) -> dict:
+    """ORB's own replay loop - dispatched from src/backtest_runner.py
+    whenever a strategy's rules carry an "opening_range" key, instead of
+    simulate_strategy above. Same day-by-day/bar-by-bar structure and the
+    same {"trades": [...], "skipped_symbols": [...], "filter_stats": {...}}
+    return shape (so perf.py's pipeline works unchanged), but:
+      - entries come from orb.evaluate_orb_entry, not cycle._evaluate_
+        filters_from_bars - no daily_filters/D1-D3 at all, so daily bars
+        only need to cover ATR's own lookback (_daily_as_of_light), not
+        200 days for an SMA.
+      - exits are stop-or-fixed-target, not breakeven+trailing - no
+        position "state" machine, just a stop check and a target check
+        each tick (see orb.fixed_target_decision).
+      - filter_stats' condition keys are ORB's own three diagnostic flags
+        (or_formed/confirmed/volatility_ok) instead of D1-I3, but the
+        shape (an "evaluations" pass-rate per key) is the same convention.
+
+    This is a deliberately separate function rather than a branch inside
+    simulate_strategy - some setup code is duplicated (loading cached
+    bars, the concurrent daily-bar fetch), but it keeps this brand new,
+    unvalidated strategy's replay logic from touching simulate_strategy's
+    own well-exercised code path at all."""
+    max_concurrent = strategy_rules["risk"]["max_concurrent_positions"]
+    max_position_pct = strategy_rules["risk"]["max_position_size_pct_of_portfolio"] / 100
+    action = "BUY" if side == "long" else "SELL"
+    close_action = "SELL" if side == "long" else "BUY"
+    force_close_time = _parse_force_close_time(strategy_rules)
+    atr_period = strategy_rules["volatility_filters"].get("V2_atr_period", 14)
+    min_daily_days = atr_period + 1
+
+    daily_by_symbol: dict[str, pd.DataFrame] = {}
+    intraday_by_symbol: dict[str, pd.DataFrame] = {}
+    skipped = []
+    daily_candidates = {}
+    for symbol in symbols:
+        intraday = backtest_data.load_cached_bars(symbol, BAR_SIZE)
+        if intraday is None or intraday.empty:
+            skipped.append({"symbol": symbol, "reason": "no cached intraday bars"})
+            continue
+        window_start = pd.Timestamp(start_date, tz=intraday.index.tz) - pd.Timedelta(days=INTRADAY_LOOKBACK_DAYS)
+        window_end = pd.Timestamp(end_date, tz=intraday.index.tz) + pd.Timedelta(days=1)
+        intraday = intraday[(intraday.index >= window_start) & (intraday.index < window_end)]
+        if intraday.empty:
+            skipped.append({"symbol": symbol, "reason": "no cached bars in the requested date range"})
+            continue
+        daily_candidates[symbol] = intraday
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_DAILY_FETCH_WORKERS) as pool:
+        future_to_symbol = {pool.submit(fetch_daily_bars, symbol): symbol for symbol in daily_candidates}
+        for future in concurrent.futures.as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            daily = future.result()
+            if daily is None:
+                skipped.append({"symbol": symbol, "reason": "no daily bars"})
+                continue
+            daily_by_symbol[symbol] = daily
+            intraday_by_symbol[symbol] = daily_candidates[symbol]
+
+    filter_stats = {"evaluations": 0, "insufficient_data": 0,
+                     "or_formed": 0, "confirmed": 0, "volatility_ok": 0}
+
+    if not intraday_by_symbol:
+        return {"trades": [], "skipped_symbols": skipped, "filter_stats": filter_stats}
+
+    all_days = sorted(set().union(*[
+        set(_trading_days(intraday, start_date, end_date)) for intraday in intraday_by_symbol.values()
+    ]))
+    day_groups_by_symbol = {
+        symbol: dict(tuple(intraday.groupby(intraday.index.date)))
+        for symbol, intraday in intraday_by_symbol.items()
+    }
+
+    trades = []
+    trade_id = 0
+    for day in all_days:
+        open_positions: dict[str, dict] = {}
+        entries_today = 0
+
+        daily_slice_by_symbol = {
+            symbol: _daily_as_of_light(daily_by_symbol[symbol], day, min_daily_days) for symbol in intraday_by_symbol
+        }
+        prior_day_bars_by_symbol = {
+            symbol: {d: bars for d, bars in groups.items() if d < day}
+            for symbol, groups in day_groups_by_symbol.items()
+        }
+
+        day_bar_times = set()
+        for intraday in intraday_by_symbol.values():
+            day_bars = intraday[intraday.index.date == day]
+            regular_bars = day_bars[day_bars.index.time >= dt_time(9, 30)]
+            day_bar_times.update(regular_bars.index)
+        sorted_times = sorted(day_bar_times)
+
+        for bar_ts in sorted_times:
+            if bar_ts.time() >= force_close_time:
+                for symbol, pos in list(open_positions.items()):
+                    trade_id += 1
+                    trades.append({
+                        "id": trade_id, "symbol": symbol, "side": close_action,
+                        "fill_price": float(intraday_by_symbol[symbol].loc[bar_ts, "Close"])
+                        if bar_ts in intraday_by_symbol[symbol].index else pos["entry_price"],
+                        "size": pos["qty"], "timestamp_iso": bar_ts.isoformat(),
+                        "exit_reason": "eod_close", "commission": commission_per_trade,
+                    })
+                open_positions.clear()
+                break
+
+            # --- Step 1: manage every currently open position (stop or fixed target, whichever hits first this bar) ---
+            for symbol in list(open_positions.keys()):
+                intraday = intraday_by_symbol[symbol]
+                if bar_ts not in intraday.index:
+                    continue
+                pos = open_positions[symbol]
+                this_bar = intraday.loc[[bar_ts]]
+
+                stop_hit = _find_stop_out(this_bar, pos["stop_price"], side)
+                target_hit = _find_target_out(this_bar, pos["target_price"], side)
+                if stop_hit is not None or target_hit is not None:
+                    # Both are always the SAME timestamp when both fire (a
+                    # single-row `this_bar` slice - either hit's index is
+                    # just bar_ts) - OHLC bars alone can't say which one the
+                    # price actually touched first intrabar, so a same-bar
+                    # collision is resolved optimistically (target wins).
+                    # This is a simplification worth knowing about when
+                    # reading backtest results, not a bug.
+                    hit_target = target_hit is not None and (stop_hit is None or target_hit <= stop_hit)
+                    trade_id += 1
+                    trades.append({
+                        "id": trade_id, "symbol": symbol, "side": close_action,
+                        "fill_price": pos["target_price"] if hit_target else pos["stop_price"],
+                        "size": pos["qty"], "timestamp_iso": bar_ts.isoformat(),
+                        "exit_reason": "target" if hit_target else "stop_loss",
+                        "commission": commission_per_trade,
+                    })
+                    del open_positions[symbol]
+
+            # --- Step 2: scan for new entries across the whole universe ---
+            if cycle._within_entry_window(strategy_rules, bar_ts.to_pydatetime()):
+                for symbol, intraday in intraday_by_symbol.items():
+                    if symbol in open_positions:
+                        continue
+                    if len(open_positions) >= max_concurrent or entries_today >= max_trades_per_day:
+                        break
+                    if bar_ts not in intraday.index:
+                        continue
+
+                    daily_slice = daily_slice_by_symbol[symbol]
+                    if daily_slice is None:
+                        continue
+                    today_bars_full = day_groups_by_symbol[symbol].get(day)
+                    if today_bars_full is None:
+                        continue
+                    intraday_slice = today_bars_full[today_bars_full.index <= bar_ts]
+                    detail = orb.evaluate_orb_entry(
+                        daily_slice, intraday_slice, strategy_rules, side,
+                        prior_day_bars=prior_day_bars_by_symbol[symbol],
+                    )
+                    if "error" in detail:
+                        filter_stats["insufficient_data"] += 1
+                        continue
+                    filter_stats["evaluations"] += 1
+                    for cond in ("or_formed", "confirmed", "volatility_ok"):
+                        if detail.get(cond):
+                            filter_stats[cond] += 1
+                    if not detail.get("pass"):
+                        continue
+
+                    price = detail["price"]
+                    initial_stop = detail["initial_stop"]
+                    target_price = detail["target_price"]
+                    r = (initial_stop - price) if side == "short" else (price - initial_stop)
+                    if r <= 0:
+                        continue
+
+                    risk_dollars = portfolio_value * (max_risk_pct / 100)
+                    size_by_risk = math.floor(risk_dollars / r)
+                    size_by_cap = math.floor(portfolio_value * max_position_pct / price)
+                    size = min(size_by_risk, size_by_cap)
+                    if size < 1:
+                        continue
+
+                    trade_id += 1
+                    trades.append({
+                        "id": trade_id, "symbol": symbol, "side": action,
+                        "fill_price": price, "size": size, "timestamp_iso": bar_ts.isoformat(),
+                        "initial_stop": initial_stop, "commission": commission_per_trade,
+                    })
+                    open_positions[symbol] = {
+                        "entry_price": price, "initial_stop": initial_stop,
+                        "stop_price": initial_stop, "target_price": target_price, "qty": size,
+                    }
+                    entries_today += 1
+
         for symbol, pos in open_positions.items():
             intraday = intraday_by_symbol[symbol]
             day_bars = intraday[intraday.index.date == day]
