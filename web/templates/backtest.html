@@ -900,10 +900,20 @@ function renderCalendarGrid(entries) {
     const cur = new Date(e.start_date + "T00:00:00");
     const end = new Date(e.end_date + "T00:00:00");
     while (cur <= end) {
-      const key = toISODateLocal(cur.getFullYear(), cur.getMonth(), cur.getDate());
-      if (!byDate[key]) byDate[key] = new Set();
-      for (const sid of e.strategy_ids) {
-        if (!calHiddenStrategyIds.has(String(sid))) byDate[key].add(String(sid));
+      // Skip Sat/Sun - markets are closed, so the simulation itself never
+      // actually trades those days even when a single backtest entry's
+      // own start_date/end_date span spans a weekend (e.g. a remote-mode
+      // multi-day run, sent as one request covering the whole range - see
+      // btn-run-backtest). Walking every calendar day here regardless
+      // used to be harmless back when every entry was a single day by
+      // construction, but now marks a dot on days nothing was simulated.
+      const dow = cur.getDay();
+      if (dow !== 0 && dow !== 6) {
+        const key = toISODateLocal(cur.getFullYear(), cur.getMonth(), cur.getDate());
+        if (!byDate[key]) byDate[key] = new Set();
+        for (const sid of e.strategy_ids) {
+          if (!calHiddenStrategyIds.has(String(sid))) byDate[key].add(String(sid));
+        }
       }
       cur.setDate(cur.getDate() + 1);
     }
