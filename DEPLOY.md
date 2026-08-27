@@ -139,7 +139,15 @@ just the paper half running.
 sudo cp /opt/tradingbot/deploy/*.service /etc/systemd/system/
 sudo systemctl daemon-reload
 
-sudo systemctl enable --now ibgateway-paper.service
+sudo systemctl start ibgateway-paper.service
+# Deliberately `start`, not `enable --now` - paper's Gateway is meant to be
+# started manually (from here, or the dashboard's Gateway Connection
+# Reconnect control) only when you're actually about to paper-trade or
+# fetch backtest data through it, not always-on. Two Java Gateway
+# processes (paper + live) running around the clock on a small box is a
+# real memory/swap risk - `systemctl enable ibgateway-paper.service` too
+# if you'd rather it always comes back after a reboot instead.
+#
 # Watch it come up — the FIRST login needs you to approve the 2FA push on
 # your phone. Tail the log and wait for it:
 sudo journalctl -u ibgateway-paper.service -f
