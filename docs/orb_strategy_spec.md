@@ -16,22 +16,23 @@ Conservative`): **ORB Long** ו-**ORB Short**, מראה-הפוכה זו של ז�
 2. חכה לסגירת נר **5 דקות** מעל ה-OR High (לונג) / מתחת ל-OR Low (שורט) — אישור.
 3. רד ל-**1 דקה** וחפש כניסה להמשך התנועה.
 
-שלושה מודלים לכניסה: **Breakout** (עם gap/displacement), **Retest** (המועדף על המרצה), **Reversal**
-(כשה-OR נכשל וה-price חוזר ושובר לכיוון ההפוך).
+שני מודלים לכניסה: **Breakout** (עם gap/displacement) ו-**Retest** (המועדף על המרצה). Reversal
+הוסר מהיקף שלב 1 (ראה החלטות למטה) — אפשר להוסיף בעתיד כשלב נפרד.
 
-## החלטות שנסגרו איתך
+## החלטות שנסגרו איתך (סופי)
 
 | נושא | החלטה |
 |---|---|
-| מודלי כניסה | שלושתם: Breakout + Retest + Reversal |
+| מודלי כניסה | **Breakout + Retest בלבד** — Reversal ירד מהיקף שלב 1 |
 | מסגרות זמן | OR על 15m, אישור על 5m, כניסה על 1m |
 | מחיר מינימלי | $3 (כמו הבסיס הקיים) |
-| ATR% | סף שונה למדרגת מחיר (לא סף אחיד) |
+| ATR% | מדרגות לפי מחיר, כמוצע למטה — **אושר** |
 | יקום | S&P 500 בלבד |
 | Market Cap | ≥ $1B |
 | RVOL | ≥ 2.0 |
+| חלון כניסות | 09:50–11:30 ET (שעתיים ראשונות) — **אושר** |
 
-## מדרגות ATR% (הצעה — טעונה אישור)
+## מדרגות ATR% (אושר)
 
 `ATR% = ATR(14) יומי / מחיר נוכחי * 100`. במקום סף אחיד, סף יורד ככל שהמניה יקרה יותר (מניה יקרה
 זזה פחות באחוזים בממוצע, אז דורשים ממנה פחות כדי להיחשב "בתנועה"):
@@ -92,13 +93,6 @@ Conservative`): **ORB Long** ו-**ORB Short**, מראה-הפוכה זו של ז�
       "confirmation": "1m_retest_of_or_high_holds",
       "stop_rule": "below_retest_swing_low",
       "target_rr": 2.0
-    },
-    "reversal": {
-      "enabled": true,
-      "trigger": "5m_close_below_or_low_then_1m_reclaim_above_or_high",
-      "confirmation": "1m_retest_of_order_block_holds",
-      "stop_rule": "below_order_block_low",
-      "target": "high_of_day"
     }
   },
 
@@ -168,13 +162,6 @@ Conservative`): **ORB Long** ו-**ORB Short**, מראה-הפוכה זו של ז�
       "confirmation": "1m_retest_of_or_low_holds",
       "stop_rule": "above_retest_swing_high",
       "target_rr": 2.0
-    },
-    "reversal": {
-      "enabled": true,
-      "trigger": "5m_close_above_or_high_then_1m_reclaim_below_or_low",
-      "confirmation": "1m_retest_of_order_block_holds",
-      "stop_rule": "above_order_block_high",
-      "target": "low_of_day"
     }
   },
 
@@ -207,13 +194,18 @@ Conservative`): **ORB Long** ו-**ORB Short**, מראה-הפוכה זו של ז�
 2. **Displacement/gap detection** — זיהוי "bullish/bearish gap" בין נרות 1 דקה (המרצה קורא לזה
    displacement) צריך היגיון חדש, לא קיים היום בקוד.
 3. **Retest detection** — זיהוי חזרה (pullback) לרמת ה-OR שנפרצה ואישור החזקה שלה.
-4. **Order block / reversal detection** — המורכב מבין השלושה: זיהוי swing high/low, break of
-   structure, ו"order block" (הנר האחרון בכיוון ההפוך לפני התנועה) — טעון הגדרה מדויקת יותר גם
-   מבחינה אלגוריתמית לפני מימוש.
-5. **RVOL + ATR% כבר קיימים בקוד** (`I3_rvol_min` וכו') — אלה ניתנים לשימוש חוזר. שדה `min_market_cap_usd`
+4. **RVOL + ATR% כבר קיימים בקוד** (`I3_rvol_min` וכו') — אלה ניתנים לשימוש חוזר. שדה `min_market_cap_usd`
    גם כבר קיים (בפריסט `Long Breakout NASDAQ Beta`). ATR% מדורג לפי מדרגת מחיר הוא שדה חדש.
-6. **מודל היציאה שונה מכל האסטרטגיות הקיימות** — קבוע R:R (target_rr) בלי breakeven/trailing,
+5. **מודל היציאה שונה מכל האסטרטגיות הקיימות** — קבוע R:R (target_rr) בלי breakeven/trailing,
    לעומת המנגנון הקיים (partial + breakeven + trailing stop). זה גם דורש קוד יציאה נפרד.
+6. **בעיית נתונים קריטית — אין נתוני 1 דקה בכלל.** בדקתי את `fetch_backtest_data.py` ו-
+   `src/backtest_engine.py`: שניהם קבועים על `BAR_SIZE = "5 mins"` — כל צינור הנתונים ההיסטוריים
+   (fetch + cache + backtest) בנוי מהיסוד סביב 5 דקות בלבד, ואין שום cache של נרות 1 דקה. ה-`entry_timeframe: "1m"`
+   במפרט לא ניתן ל-backtest כמו שהוא כתוב עכשיו בלי לבנות fetch/cache נפרד לנתוני 1 דקה (נפח
+   נתונים גדול פי 5, וקריאות API נפרדות מול IBKR). ה-OR עצמו (15m) וה-confirm (5m) כן ניתנים
+   לחישוב מה-cache הקיים היום. זו החלטה שצריך לקבל בשלב 2: להוסיף fetch/cache ל-1m, או להתפשר
+   ולהריץ את הכניסה בפועל על 5m (כלומר לוותר על הדיוק של "ירידה ל-1 דקה לכניסה" מהסרטון ולהיכנס
+   על סגירת נר 5 הדקות של האישור עצמו/הנר הבא אחריו).
 
 כשתאשר את המפרט (או תבקש שינויים במספרים/במודלים), אפשר לעבור לשלב 2: מימוש ב-`cycle.py` +
 backtest על נתונים היסטוריים לפני העלאה ל-paper/live.
