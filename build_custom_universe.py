@@ -26,8 +26,12 @@ import yfinance as yf
 
 from src.custom_universes import CUSTOM_UNIVERSES, ET
 from src.notify import notify
+from src.sp500_tickers import SP500_TICKERS
 
 NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
+# CLI/API defaults - only ever used for a universe whose own spec (see
+# CUSTOM_UNIVERSES) doesn't set default_min_market_cap/beta/recommendation_mean,
+# which none currently do (every registered universe sets its own).
 DEFAULT_MIN_MARKET_CAP = 1_000_000_000
 DEFAULT_MIN_BETA = 1.2
 DEFAULT_MIN_RECOMMENDATION_MEAN = 2.0  # yfinance scale: 1.0=Strong Buy ... 5.0=Strong Sell
@@ -39,6 +43,18 @@ DEFAULT_WORKERS = 2
 
 def _yahoo_to_ibkr(ticker: str) -> str:
     return ticker.replace(".", " ")
+
+
+def _fetch_candidate_symbols(source: str) -> list[str]:
+    """Yahoo-format candidate symbols for whichever source a universe's
+    spec names - "nasdaq_directory" (the original behavior, a live scrape
+    of every NASDAQ-listed common stock) or "sp500" (the project's own
+    hardcoded S&P 500 list, converted from its IBKR format - space before
+    a share class letter, e.g. "BRK B" - to Yahoo's dot form "BRK.B", the
+    same convention _yahoo_to_ibkr already reverses on the way out)."""
+    if source == "sp500":
+        return sorted(t.replace(" ", ".") for t in SP500_TICKERS)
+    return fetch_nasdaq_listed_symbols()
 
 
 def fetch_nasdaq_listed_symbols() -> list[str]:
@@ -87,7 +103,12 @@ def _fetch_info(symbol: str) -> dict | None:
     return None
 
 
-def _screen_one(symbol: str, min_market_cap: float, min_beta: float, min_recommendation_mean: float) -> dict | None:
+def _screen_one(
+    symbol: str, min_market_cap: float, min_beta: float | None, min_recommendation_mean: float | None,
+) -> dict | None:
+    """min_beta/min_recommendation_mean of None skips that check entirely
+    (unlike min_market_cap, which every universe requires) - used by the
+    sp500_marketcap_1b universe, which only screens on market cap."""
     info = _fetch_info(symbol)
     if not info:
         return None
@@ -99,13 +120,14 @@ def _screen_one(symbol: str, min_market_cap: float, min_beta: float, min_recomme
 
     if market_cap is None or market_cap < min_market_cap:
         return None
-    if beta is None or beta < min_beta:
+    if min_beta is not None and (beta is None or beta < min_beta):
         return None
-    rating_ok = recommendation_key in ACCEPTABLE_RECOMMENDATION_KEYS or (
-        recommendation_mean is not None and recommendation_mean <= min_recommendation_mean
-    )
-    if not rating_ok:
-        return None
+    if min_recommendation_mean is not None:
+        rating_ok = recommendation_key in ACCEPTABLE_RECOMMENDATION_KEYS or (
+            recommendation_mean is not None and recommendation_mean <= min_recommendation_mean
+        )
+        if not rating_ok:
+            return None
 
     return {
         "symbol": symbol,
@@ -118,13 +140,20 @@ def _screen_one(symbol: str, min_market_cap: float, min_beta: float, min_recomme
 
 def build_universe(
     universe_key: str,
-    min_market_cap: float,
-    min_beta: float,
-    min_recommendation_mean: float,
-    limit: int | None,
-    workers: int,
-    dry_run: bool,
+    min_market_cap: float | None = None,
+    min_beta: float | None = None,
+    min_recommendation_mean: float | None = None,
+    limit: int | None = None,
+    workers: int = DEFAULT_WORKERS,
+    dry_run: bool = False,
 ) -> dict:
+    """min_market_cap/min_beta/min_recommendation_mean of None (the
+    default) fall back to this universe's OWN default_min_* fields in
+    CUSTOM_UNIVERSES - each universe screens on its own criteria (e.g.
+    sp500_marketcap_1b has no beta/rating requirement at all) instead of
+    every universe being forced through the same global thresholds, which
+    is how run_service.py's weekly rebuild job now calls this for every
+    registered universe uniformly (see its own comment)."""
     started = time.monotonic()
     spec = CUSTOM_UNIVERSES.get(universe_key)
     if spec is None:
@@ -132,10 +161,18 @@ def build_universe(
         print(json.dumps(result))
         return result
 
+    if min_market_cap is None:
+        min_market_cap = spec.get("default_min_market_cap", DEFAULT_MIN_MARKET_CAP)
+    if min_beta is None:
+        min_beta = spec.get("default_min_beta", DEFAULT_MIN_BETA)
+    if min_recommendation_mean is None:
+        min_recommendation_mean = spec.get("default_min_recommendation_mean", DEFAULT_MIN_RECOMMENDATION_MEAN)
+    source = spec.get("symbol_source", "nasdaq_directory")
+
     try:
-        candidates = fetch_nasdaq_listed_symbols()
+        candidates = _fetch_candidate_symbols(source)
     except requests.RequestException as exc:
-        result = {"success": False, "error": f"Failed to fetch NASDAQ-listed directory: {exc}"}
+        result = {"success": False, "error": f"Failed to fetch candidate symbols ({source}): {exc}"}
         print(json.dumps(result))
         notify(f"Universe build FAILED ({universe_key})", result["error"], "high")
         return result
@@ -213,10 +250,15 @@ def build_universe(
 
 def main():
     parser = argparse.ArgumentParser()
+    # These three default to None (not DEFAULT_MIN_*) - build_universe falls
+    # back to the TARGET UNIVERSE's own default_min_* (see CUSTOM_UNIVERSES)
+    # when unset, so leaving them off this command line means "whatever this
+    # universe normally screens on" rather than always forcing every
+    # universe through ixic_large_beta_buy's own numbers.
     parser.add_argument("--universe", default="ixic_large_beta_buy", choices=sorted(CUSTOM_UNIVERSES))
-    parser.add_argument("--min-market-cap", type=float, default=DEFAULT_MIN_MARKET_CAP)
-    parser.add_argument("--min-beta", type=float, default=DEFAULT_MIN_BETA)
-    parser.add_argument("--min-recommendation-mean", type=float, default=DEFAULT_MIN_RECOMMENDATION_MEAN)
+    parser.add_argument("--min-market-cap", type=float, default=None)
+    parser.add_argument("--min-beta", type=float, default=None)
+    parser.add_argument("--min-recommendation-mean", type=float, default=None)
     parser.add_argument("--limit", type=int, default=None, help="Cap candidates screened (testing only)")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--dry-run", action="store_true")

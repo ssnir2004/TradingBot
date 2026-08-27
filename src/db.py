@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS positions (
     state TEXT NOT NULL,
     r_multiple REAL DEFAULT 0.0,
     hold_overnight INTEGER NOT NULL DEFAULT 0,
+    target_price REAL,
     PRIMARY KEY (account_id, mode, symbol)
 );
 
@@ -717,6 +718,159 @@ EXTRA_STRATEGY_PRESETS = [
         "הסטטיסטית ש-overfitting נראה כמוה - זה לא מוכיח יתרון אמיתי וחוזר בשוק. אל תפעיל LIVE לפני "
         "בדיקה מקיפה על פני תקופה ארוכה בהרבה (שבועות-חודשים, מאות עסקאות).",
     ),
+    (
+        # Opening Range Breakout - a genuinely different engine from every
+        # strategy above: no daily_filters/D1-D3 at all (no "yesterday"
+        # bias - see docs/orb_strategy_spec.md), and dispatched to
+        # src/orb.py's own evaluate_orb_entry instead of cycle._evaluate_
+        # filters_from_bars entirely (see cycle.entry_scan's "opening_range"
+        # in rules check). Two entry models (breakout, retest) off a
+        # 15-minute opening range confirmed on a 5-minute candle close -
+        # the video's own third step ("drop to 1-minute for entries") is
+        # evaluated on 5-minute bars instead, a deliberate compromise since
+        # the backtest data pipeline (fetch_backtest_data.py/backtest_
+        # engine.py) only caches 5-minute bars; see the spec doc for what
+        # that costs in entry precision. Exit is a fixed 1:2 R:R target,
+        # not the breakeven+trailing mechanism every other strategy here
+        # uses (exit.management_style: "fixed_target_no_trail" - see
+        # cycle.manage_position's dedicated branch).
+        "ORB Long (Opening Range Breakout)",
+        {
+            "strategy_name": "ORB Long (Opening Range Breakout)",
+            "direction": "long_only",
+            "opening_range": {
+                "or_timeframe": "15m",
+                "confirm_timeframe": "5m",
+                "entry_timeframe": "5m",
+                "session": "new_york",
+                "session_open_et": "09:30",
+            },
+            "universe_filters": {
+                "index": "S&P 500",
+                "min_price_usd": 3.0,
+                "custom_universe": "sp500_marketcap_1b",
+            },
+            "volatility_filters": {
+                "V1_rvol_min": 2.0,
+                "V1_rvol_lookback_days": 14,
+                "V2_atr_period": 14,
+                "V2_atr_pct_tiers": [
+                    {"price_min": 3.0, "price_max": 20.0, "atr_pct_min": 4.0},
+                    {"price_min": 20.0, "price_max": 50.0, "atr_pct_min": 3.0},
+                    {"price_min": 50.0, "price_max": 100.0, "atr_pct_min": 2.0},
+                    {"price_min": 100.0, "price_max": None, "atr_pct_min": 1.5},
+                ],
+            },
+            "entry_models": {
+                "breakout": {"enabled": True, "target_rr": 2.0},
+                "retest": {"enabled": True, "target_rr": 2.0},
+            },
+            "time_filter": {"earliest_entry_et": "09:50", "latest_entry_et": "11:30", "force_close_et": "15:51"},
+            "exit": {"management_style": "fixed_target_no_trail"},
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+            },
+        },
+        "aggressive",
+        "long",
+        "## מה זה עושה\n"
+        "אסטרטגיה מבוססת Opening Range Breakout (ORB): לא בודקת דעה מקדימה מהיום הקודם (אין "
+        "daily_filters בכלל) - כל יום מתחיל מאפס. סוחרת רק את הנר הראשון של פתיחת המסחר בניו יורק "
+        "(9:30 ET), מחכה לאישור פריצה, ואז מחפשת כניסה להמשך התנועה. מקור: תמלול סרטון YouTube "
+        "(bITIVwysCzM) - ראו docs/orb_strategy_spec.md למפרט המלא ולתהליך ההגדרה.\n\n"
+        "## יקום\n"
+        "S&P 500 בלבד, מסונן מראש למניות עם Market Cap מעל $1B (custom_universe: "
+        "sp500_marketcap_1b, נבנה על ידי build_custom_universe.py - כמו Long Breakout NASDAQ Beta) "
+        "ומחיר מינימלי $3.\n\n"
+        "## מנגנון ה-Opening Range\n"
+        "1. סימון High/Low של 3 נרות 5 דקות ראשונים מ-9:30 ET (= 'נר' 15 דקות) - זה ה-Opening Range.\n"
+        "2. אישור: נר 5 דקות שנסגר מעל ה-OR High.\n"
+        "3. כניסה: על אותה מסגרת 5 דקות (**לא 1 דקה כמו בסרטון המקורי** - פשרה כי אין נתוני 1 דקה "
+        "בתשתית ה-backtest הקיימת, ראו הערה בקובץ המפרט).\n\n"
+        "## פילטרים לפני כניסה\n"
+        "RVOL מעל 2.0 (חלון 14 ימים) ו-ATR% (יחסי למחיר, לא אבסולוטי) לפי מדרגת מחיר: "
+        "$3-20 מעל 4%, $20-50 מעל 3%, $50-100 מעל 2%, מעל $100 מעל 1.5%.\n\n"
+        "## מודלי כניסה (2 מתוך 3 בסרטון המקורי - Reversal הוסר מהיקף)\n"
+        "**Breakout**: רק על נר האישור עצמו, ורק אם יש 'gap' (displacement) בינו לנר הקודם - כניסה "
+        "בסגירת הנר, סטופ בשפל/שיא אותו נר.\n"
+        "**Retest**: נר כלשהו אחרי האישור שנוגע בחזרה ברמת ה-OR ונסגר בחזרה בכיוון הפריצה - כניסה "
+        "בסגירת הנר, סטופ בשפל/שיא אותו נר.\n\n"
+        "## יציאה וניהול פוזיציה (שונה מכל שאר האסטרטגיות בפרויקט)\n"
+        "אין breakeven flip ואין טריילינג סטופ - הסטופ ההתחלתי (משלב הכניסה) נשאר קבוע כל הפוזיציה. "
+        "יעד קבוע R:R = 1:2: יציאה מלאה ביעד או בסטופ, מה שמגיע קודם.\n\n"
+        "## חלון כניסות\n"
+        "09:50-11:30 ET בלבד (השעתיים הראשונות של המסחר, כפי שממליץ הסרטון) - force close רגיל "
+        "ב-15:51 ET לכל פוזיציה שעדיין פתוחה.\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive - אסטרטגיה חדשה שלא נבדקה (לא backtest, לא paper trading) - הפעלתה "
+        "דורשת הקלדת אישור כי היא חלה על LIVE מיידית. סיכון לעסקה: 1% | גודל פוזיציה מקס': 10% | "
+        "פוזיציות בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "זו לא אסטרטגיה שאומתה בשום צורה - יש להריץ backtest מקיף (שבועות-חודשים, מאות עסקאות) "
+        "ולבחון paper trading ממושך לפני כל שיקול להעלות ל-LIVE. שימו לב גם לפשרת 1 דקה→5 דקות "
+        "בכניסה: הדיוק בפועל נמוך יותר ממה שהסרטון המקורי מתאר, וה-R:R בפועל עלול להיות שונה מהמתוכנן.",
+    ),
+    (
+        # Exact mirror of ORB Long - see its own comment above for the full
+        # engine explanation, not repeated here.
+        "ORB Short (Opening Range Breakdown)",
+        {
+            "strategy_name": "ORB Short (Opening Range Breakdown)",
+            "direction": "short_only",
+            "opening_range": {
+                "or_timeframe": "15m",
+                "confirm_timeframe": "5m",
+                "entry_timeframe": "5m",
+                "session": "new_york",
+                "session_open_et": "09:30",
+            },
+            "universe_filters": {
+                "index": "S&P 500",
+                "min_price_usd": 3.0,
+                "custom_universe": "sp500_marketcap_1b",
+            },
+            "volatility_filters": {
+                "V1_rvol_min": 2.0,
+                "V1_rvol_lookback_days": 14,
+                "V2_atr_period": 14,
+                "V2_atr_pct_tiers": [
+                    {"price_min": 3.0, "price_max": 20.0, "atr_pct_min": 4.0},
+                    {"price_min": 20.0, "price_max": 50.0, "atr_pct_min": 3.0},
+                    {"price_min": 50.0, "price_max": 100.0, "atr_pct_min": 2.0},
+                    {"price_min": 100.0, "price_max": None, "atr_pct_min": 1.5},
+                ],
+            },
+            "entry_models": {
+                "breakout": {"enabled": True, "target_rr": 2.0},
+                "retest": {"enabled": True, "target_rr": 2.0},
+            },
+            "time_filter": {"earliest_entry_et": "09:50", "latest_entry_et": "11:30", "force_close_et": "15:51"},
+            "exit": {"management_style": "fixed_target_no_trail"},
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+            },
+        },
+        "aggressive",
+        "short",
+        "## מה זה עושה\n"
+        "מראה הפוכה מדויקת של ORB Long (Opening Range Breakout) - ראו את התיאור המלא שם. כאן: "
+        "אישור על נר 5 דקות שנסגר מתחת ל-OR Low, breakout/retest בכיוון ירידה, סטופ מעל שפל/שיא "
+        "הנר הרלוונטי, יעד קבוע R:R 1:2 כלפי מטה.\n\n"
+        "## יקום, פילטרים, חלון כניסות\n"
+        "זהה לחלוטין ל-ORB Long: S&P 500 עם Market Cap מעל $1B, מחיר מינימלי $3, RVOL מעל 2.0, "
+        "ATR% מדורג לפי מחיר, חלון כניסות 09:50-11:30 ET.\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive - אסטרטגיה חדשה שלא נבדקה. סיכון לעסקה: 1% | גודל פוזיציה מקס': 10% | "
+        "פוזיציות בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "בנוסף לכל אזהרות ORB Long (לא נבדקה, פשרת 1m→5m): בפוזיציית Short אין תקרה תיאורטית "
+        "להפסד - מחיר המניה יכול לעלות ללא הגבלה, וה-stop עלול 'לקפוץ מעל' (gap) במקרה של short "
+        "squeeze. אל תפעיל LIVE לפני בדיקה מקיפה.",
+    ),
 ]
 
 
@@ -851,6 +1005,11 @@ def init_db(seed_rules_path: Path | None = None):
         _migrate_add_column(conn, "strategies", "key", "TEXT NOT NULL DEFAULT ''")
         _migrate_add_column(conn, "positions", "side", "TEXT NOT NULL DEFAULT 'long'")
         _migrate_add_column(conn, "positions", "hold_overnight", "INTEGER NOT NULL DEFAULT 0")
+        # NULL for every non-ORB position (the vast majority) - only ever set
+        # by cycle.entry_scan for a "fixed_target_no_trail" strategy (see
+        # src/orb.py), read back by cycle.manage_position's ORB branch to
+        # know when to close the whole position at its fixed R:R target.
+        _migrate_add_column(conn, "positions", "target_price", "REAL")
         _migrate_add_column(conn, "watchlist", "universe", "TEXT NOT NULL DEFAULT ',default,'")
         _migrate_add_column(conn, "watchlist", "direction", "TEXT NOT NULL DEFAULT 'long'")
         # NULL for trades recorded the old way (trade.py/close_position.py's
@@ -1286,16 +1445,19 @@ def get_open_positions(account_id: int, mode: str) -> list[dict]:
 
 def upsert_position(account_id: int, mode: str, pos: dict):
     _check_mode(mode)
-    pos = {"side": "long", **pos}  # default for callers that predate short support
+    # target_price defaults to None for every non-ORB caller (predates this
+    # field, same reasoning as the side default just below).
+    pos = {"side": "long", "target_price": None, **pos}
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO positions (account_id, mode, symbol, side, entry_price, entry_time_iso, qty, initial_stop, "
-            "stop_price, stop_order_id, state, r_multiple) VALUES "
+            "stop_price, stop_order_id, state, r_multiple, target_price) VALUES "
             "(:account_id, :mode, :symbol, :side, :entry_price, :entry_time_iso, :qty, :initial_stop, :stop_price, "
-            ":stop_order_id, :state, :r_multiple) "
+            ":stop_order_id, :state, :r_multiple, :target_price) "
             "ON CONFLICT(account_id, mode, symbol) DO UPDATE SET "
             "qty=excluded.qty, initial_stop=excluded.initial_stop, stop_price=excluded.stop_price, "
-            "stop_order_id=excluded.stop_order_id, state=excluded.state, r_multiple=excluded.r_multiple",
+            "stop_order_id=excluded.stop_order_id, state=excluded.state, r_multiple=excluded.r_multiple, "
+            "target_price=excluded.target_price",
             {**pos, "account_id": account_id, "mode": mode},
         )
 

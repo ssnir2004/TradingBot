@@ -216,7 +216,7 @@ sudo -iu tradingbot bash -c "cd /opt/tradingbot && git pull && .venv/bin/pip ins
 sudo systemctl restart trading-bot-paper.service trading-bot-live.service dashboard.service
 ```
 
-### Custom-universe strategies (e.g. "Long Breakout NASDAQ Beta")
+### Custom-universe strategies (e.g. "Long Breakout NASDAQ Beta", "ORB Long/Short")
 
 A strategy can restrict itself to a fundamentals-screened universe (market
 cap, beta, analyst rating) narrower than the default S&P 500 scan — see
@@ -231,7 +231,13 @@ first scheduled run (up to a week away):
 
 ```bash
 sudo -iu tradingbot bash -c "cd /opt/tradingbot && .venv/bin/python build_custom_universe.py --universe ixic_large_beta_buy"
+sudo -iu tradingbot bash -c "cd /opt/tradingbot && .venv/bin/python build_custom_universe.py --universe sp500_marketcap_1b"
 ```
+
+`sp500_marketcap_1b` (S&P 500 constituents with market cap ≥ $1B, no
+beta/rating requirement) is what ORB Long/ORB Short's `universe_filters.
+custom_universe` points at — same "empty cache until the first manual or
+scheduled run" caveat applies to it.
 
 Takes a while by design — one yfinance fundamentals lookup per NASDAQ-listed
 candidate (several thousand tickers), deliberately throttled (2 workers,

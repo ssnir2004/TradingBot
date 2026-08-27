@@ -654,22 +654,26 @@ const FILTER_LABELS = {
   D1: "D1: above prior day extreme", D2: "D2: trend side of SMA200",
   D3: "D3: gap threshold", I1: "I1: above premarket extreme",
   I2: "I2: new intraday high/low", I3: "I3: relative volume",
+  or_formed: "Opening range formed", confirmed: "5m confirmation close",
+  volatility_ok: "RVOL + ATR% filters",
 };
+const FILTER_STATS_META_KEYS = new Set(["evaluations", "insufficient_data"]);
 
 function renderFilterStats(fs) {
   if (!fs || fs.evaluations === 0) {
     return `<div class="small text-muted mt-2">No entry-window checks were evaluated${fs && fs.insufficient_data ? ` (${fs.insufficient_data.toLocaleString()} skipped for insufficient history)` : ""}.</div>`;
   }
   // Each row is the % of checks where THAT ONE condition held, independent
-  // of the others - not the % where all six held together (that's the
-  // trade count above). Answers "which condition is actually blocking
-  // trades" instead of leaving it to guesswork - a strategy needing a rare
-  // gap AND high relative volume simultaneously can have a near-zero
-  // combined pass rate even though no single condition looks unreasonable.
-  const rows = ["D1", "D2", "D3", "I1", "I2", "I3"].map(k => {
+  // of the others - not the % where all held together (that's the trade
+  // count above). Answers "which condition is actually blocking trades"
+  // instead of leaving it to guesswork. The condition keys themselves vary
+  // by strategy engine (D1-I3 for the standard filters, or_formed/confirmed/
+  // volatility_ok for ORB - see src/orb.py) - read whatever keys this
+  // particular filter_stats actually carries instead of a hardcoded list.
+  const rows = Object.keys(fs).filter(k => !FILTER_STATS_META_KEYS.has(k)).map(k => {
     const pct = (fs[k] / fs.evaluations) * 100;
     return `<div class="d-flex align-items-center mb-1">
-      <div style="width:190px" class="small">${FILTER_LABELS[k]}</div>
+      <div style="width:190px" class="small">${FILTER_LABELS[k] || k}</div>
       <div class="flex-grow-1 hist-bar-track">
         <div class="hist-bar" style="width:${pct}%; background:#0d6efd;"></div>
       </div>
@@ -689,6 +693,7 @@ const EXIT_REASON_LABELS = {
   trailing_stop: "Trailing stop",
   partial_profit: "Partial profit",
   eod_close: "End of day",
+  target: "Fixed target (ORB)",
 };
 
 function renderTrades(pairs) {

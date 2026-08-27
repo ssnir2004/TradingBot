@@ -1,8 +1,12 @@
-# ORB — Opening Range Breakout (הגדרת אסטרטגיה, שלב 1)
+# ORB — Opening Range Breakout
 
 מקור: תמלול סרטון YouTube ([bITIVwysCzM](https://www.youtube.com/watch?v=bITIVwysCzM)) — "This 1 Minute
-Scalping Strategy Works Everyday". זהו **מסמך הגדרה בלבד** — אין כאן עדיין שינוי לקוד. המטרה: לסגור
-מפרט מדויק (rules_json) לפני מעבר לשלב 2 (מימוש ב-`cycle.py` + backtest).
+Scalping Strategy Works Everyday".
+
+**שלב 1 (הגדרה) ✅ ושלב 2 (מימוש) ✅ הושלמו.** ORB Long/ORB Short רשומות ב-`EXTRA_STRATEGY_PRESETS`
+(`src/db.py`), עם מנוע הערכה משלהן ב-`src/orb.py` (מחובר גם ל-`cycle.py` החי וגם ל-`src/
+backtest_engine.simulate_orb_strategy` לבקטסט) - לא פעילות אצל אף חשבון כברירת מחדל (דורש הפעלה
+ידנית מהדשבורד, וגם הקלדת אישור בגלל דירוג `aggressive`). ראו "מה מומש בשלב 2" בתחתית הקובץ.
 
 שתי אסטרטגיות תאומות, בדיוק כמו הזוגות הקיימים (`Long Breakout Conservative` / `Short Breakdown
 Conservative`): **ORB Long** ו-**ORB Short**, מראה-הפוכה זו של זו.
@@ -186,26 +190,51 @@ Conservative`): **ORB Long** ו-**ORB Short**, מראה-הפוכה זו של ז�
 }
 ```
 
-## הערות הנדסיות לשלב 2 (מימוש — עדיין לא בוצע)
+## מה מומש בשלב 2
 
-מנוע ה-filters הקיים ב-`cycle.py` (D1-D3 / I1-I3) בנוי סביב **מסגרת זמן אחת** (`trade_timeframe`)
-ובדיקת daily bias מהיום הקודם. ORB שונה מהותית:
+- **`src/orb.py`** (חדש) — כל הלוגיקה הטהורה: `compute_opening_range` (15m מ-3 נרות 5m),
+  `evaluate_orb_entry` (הפילטרים + שני מודלי הכניסה, מקביל ל-`cycle._evaluate_filters_from_bars`
+  אבל למנוע ORB עצמאי — בלי daily_filters/D1-D3 בכלל), `fixed_target_decision` (יציאה ביעד קבוע).
+  עצמאי לגמרי מ-`cycle.py` (אין import הפוך) כדי למנוע circular import ולשמור על יכולת בדיקה
+  מבודדת. יש כפילות מכוונת וקטנה מול `cycle._compute_atr`/ה-RVOL של I3 (במקום לשנות קוד production
+  קיים כדי לחלוק אותם).
+- **`cycle.py`**: `entry_scan` מפנה ל-`_evaluate_orb_entry` (wrapper חי, אותה צורת fetch כמו
+  `_evaluate_entry_filters`) כל אימת ש-`"opening_range" in rules`; ה-stop נלקח ישירות מהאיתות עצמו
+  (לא מ-`INITIAL_STOP_RULES`). `manage_position` מקבל branch חדש: `exit.management_style ==
+  "fixed_target_no_trail"` מדלג לגמרי על breakeven/trailing ובודק רק אם המחיר הגיע ליעד
+  (`orb.fixed_target_decision`) — אם כן, סוגר את כל הפוזיציה במחיר שוק (אותו מנגנון fallback
+  ל-delayed-fill כמו `force_close_all`). ה-stop ה"רגיל" עדיין מטופל ע"י ההזמנה האמיתית שהוצבה
+  אצל הברוקר בכניסה, כמו בכל אסטרטגיה אחרת.
+- **`src/db.py`**: `ORB Long (Opening Range Breakout)` ו-`ORB Short (Opening Range Breakdown)`
+  נוספו ל-`EXTRA_STRATEGY_PRESETS`, דירוג `aggressive` (דורש הקלדת אישור, לא פעילות כברירת מחדל).
+  טבלת `positions` קיבלה עמודה חדשה `target_price` (migration + עדכון `upsert_position`) לשמירת
+  היעד הקבוע לכל פוזיציית ORB.
+- **`src/custom_universes.py` + `build_custom_universe.py`**: יקום חדש `sp500_marketcap_1b`
+  (S&P 500 מ-`src/sp500_tickers.py`, סינון Market Cap בלבד — בלי דרישת beta/דירוג אנליסטים כמו
+  `ixic_large_beta_buy`). `build_custom_universe.py` הוכלל כך שכל יקום שומר את פרמטרי הסינון
+  המוגדרים-לו-עצמו (`default_min_market_cap/beta/recommendation_mean` ב-`CUSTOM_UNIVERSES`) במקום
+  שכולם ישתמשו באותם ברירות מחדל גלובליות; `run_service.py`'s השבועי שכבר רץ על כל יקום נשאר ללא
+  שינוי במבנה, רק מעביר `None` כדי לתת לכל יקום להשתמש בברירת המחדל שלו.
+- **`src/backtest_engine.py`**: `simulate_orb_strategy` חדש — לולאת יום/בר עצמאית (לא לוגיקה
+  משותפת עם `simulate_strategy` הקיים, כדי לא לגעת בקוד ה-production העובד): כניסות דרך
+  `orb.evaluate_orb_entry`, יציאות stop-או-target (בלי state machine של breakeven). `filter_stats`
+  משתמש במפתחות אבחוניים משלו (`or_formed`/`confirmed`/`volatility_ok`) במקום D1-I3.
+  `src/backtest_runner.py` מפנה לפי `"opening_range" in rules`. `web/templates/backtest.html`
+  עודכן להציג את מפתחות ה-filter_stats בצורה דינמית (לא רשימת D1-I3 קשיחה) ותווית exit_reason
+  חדשה ("target").
+- **נבדק**: יחידה (opening range, breakout/retest לונג ושורט, דחיית volatility, fixed target
+  decision) + בקטסט סינתטי מקצה-לקצה (entry breakout → יציאה ביעד, דרך `perf.pair_trades`/
+  `aggregate`) + migration מלא של ה-DB על בסיס נקי. **לא נבדק**: הרצה אמיתית מול IBKR/yfinance
+  חיים (paper trading) — זה השלב הבא לפני כל שיקול LIVE.
 
-1. **Multi-timeframe** — צריך לעקוב אחרי 2 מסגרות זמן במקביל (15m ל-OR, 5m לאישור+כניסה) באותו
-   יום מסחר, לא רק filter בודד על bar אחד. הודות לפשרה על 1m (ראה טבלת ההחלטות למעלה), כל הנתונים
-   הנדרשים כבר קיימים ב-cache הקיים (`BAR_SIZE = "5 mins"` ב-`fetch_backtest_data.py` /
-   `src/backtest_engine.py`) — 15m נבנה מצירוף שלושה נרות 5m, אין צורך בשום fetch/cache חדש. זה
-   עדיין מנגנון חדש (לא הרחבה ישירה של D1-D3/I1-I3), אבל בלי חסם נתונים.
-2. **Displacement/gap detection** — זיהוי "bullish/bearish gap" בין נרות 5 דקות (המרצה קורא לזה
-   displacement) צריך היגיון חדש, לא קיים היום בקוד.
-3. **Retest detection** — זיהוי חזרה (pullback) לרמת ה-OR שנפרצה ואישור החזקה שלה, על נרות 5 דקות.
-4. **RVOL + ATR% כבר קיימים בקוד** (`I3_rvol_min` וכו') — אלה ניתנים לשימוש חוזר. שדה `min_market_cap_usd`
-   גם כבר קיים (בפריסט `Long Breakout NASDAQ Beta`). ATR% מדורג לפי מדרגת מחיר הוא שדה חדש.
-5. **מודל היציאה שונה מכל האסטרטגיות הקיימות** — קבוע R:R (target_rr) בלי breakeven/trailing,
-   לעומת המנגנון הקיים (partial + breakeven + trailing stop). זה גם דורש קוד יציאה נפרד.
-6. **פשרת 1m→5m משנה את דיוק הכניסה בפועל** — כניסה "על סגירת 5 דקות" תמיד תהיה מרוחקת יותר
-   מהרמה שנפרצה מאשר כניסה על 1 דקה (פחות דיוק, R:R בפועל מעט שונה מהמתוכנן). שווה לזכור את זה
-   כשמנתחים תוצאות backtest מול הציפיות מהסרטון המקורי.
+## מה עוד פתוח (לא נפתר, מתועד בכוונה)
 
-כשתאשר את המפרט (או תבקש שינויים במספרים/במודלים), אפשר לעבור לשלב 2: מימוש ב-`cycle.py` +
-backtest על נתונים היסטוריים לפני העלאה ל-paper/live.
+- **פשרת 1m→5m** עדיין קיימת ומתועדת בקוד עצמו (`src/orb.py`'s docstring) — כניסה על סגירת 5
+  דקות פחות מדויקת מהסרטון המקורי (שרוצה כניסה על 1 דקה), וה-R:R בפועל עלול להיות שונה מהמתוכנן.
+- **מגבלת התזמון בין live לבקטסט** (ראו `src/orb.py`'s docstring "KNOWN LIMITATION") — מודל
+  ה-breakout דורש להיות מוערך בדיוק על נר האישור עצמו; live מריץ tick בזמן אמת אחרי שהנר נסגר,
+  בעוד שהבקטסט מבקר את הנר בדיוק בזמן ה-label שלו — מקרה קצה נדיר (הנר הראשון האפשרי לאישור, 9:45)
+  עלול "להיחסם" ב-`earliest_entry_et` בבקטסט אך לא ב-live.
+- **הבקטסט לא מחיל את `custom_universe` של האסטרטגיה** — מגבלה קיימת מראש בפרויקט (גם
+  `Long Breakout NASDAQ Beta` לא מוגבל ל-universe שלו בבקטסט), לא ספציפית ל-ORB, ולא תוקנה כאן.
+- **אין paper/live run אמיתי עדיין** — השלב הבא, לפני כל שיקול הפעלה.

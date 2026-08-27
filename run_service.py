@@ -142,12 +142,16 @@ def main():
         # is missed. Needs real internet access to nasdaqtrader.com/yfinance
         # (see build_custom_universe.py's own docstring) - fine here since
         # this runs on the deployed server, unlike a sandboxed dev session.
+        # The three None args mean "this universe's own default_min_* from
+        # CUSTOM_UNIVERSES" (see build_universe's own docstring) - each
+        # universe screens on its own criteria (e.g. sp500_marketcap_1b has
+        # no beta/rating requirement) rather than every universe being
+        # forced through the same global numbers.
         for universe_key in CUSTOM_UNIVERSES:
             scheduler.add_job(
                 lambda key=universe_key: _guarded(
                     mode, f"build_universe_{key}", account_id, build_custom_universe.build_universe,
-                    key, build_custom_universe.DEFAULT_MIN_MARKET_CAP, build_custom_universe.DEFAULT_MIN_BETA,
-                    build_custom_universe.DEFAULT_MIN_RECOMMENDATION_MEAN, None,
+                    key, None, None, None, None,
                     build_custom_universe.DEFAULT_WORKERS, False,
                 ),
                 CronTrigger(day_of_week="sun", hour=8, minute=0, timezone=ET),
