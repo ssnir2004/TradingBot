@@ -1705,8 +1705,9 @@ def get_watchlist(account_id: int, mode: str, direction: str | None = None, univ
 
 
 def update_watchlist_filters(account_id: int, mode: str, results: list[dict]):
-    """Stores the latest per-symbol D1-D3/I1-I3 filter snapshot (see
-    cycle.scan_watchlist_filters) for the dashboard's Watchlist table."""
+    """Stores the latest per-symbol filter snapshot (classic D1-D3/I1-I3
+    or ORB, per row's own "model" - see cycle.scan_watchlist_filters) for
+    the dashboard's Watchlist table."""
     _check_mode(mode)
     payload = {"updated_at": datetime.now(ET).isoformat(timespec="seconds"), "results": results}
     set_setting(_scope_key(account_id, mode, "watchlist_filters_json"), json.dumps(payload))

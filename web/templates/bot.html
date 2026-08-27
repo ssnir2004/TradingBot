@@ -17,6 +17,14 @@
   .mode-tab.active-paper { background:#0dcaf0 !important; color:#000 !important; }
   .mode-tab.active-live { background:#dc3545 !important; color:#fff !important; }
   th[data-bs-toggle="tooltip"] { cursor: help; text-decoration: underline dotted; text-underline-offset: 3px; }
+  /* Watchlist table: whole columns hide when no currently active strategy
+     (on either side) needs them, driven by classes JS toggles on
+     #watchlist-table based on which "model"(s) the API response's rows
+     actually carry - see refreshWatchlist. */
+  #watchlist-table.hide-classic [data-col="classic"],
+  #watchlist-table.hide-classic-rsi [data-col="classic-rsi"],
+  #watchlist-table.hide-orb [data-col="orb"],
+  #watchlist-table.hide-orb-confluence [data-col="orb-confluence"] { display: none; }
   #strategy-info-body h6 { font-weight: 700; margin-top: 1rem; }
   #strategy-info-body h6:first-child { margin-top: 0; }
   #strategy-info-body p { white-space: pre-line; margin-bottom: 0.5rem; }
@@ -104,23 +112,28 @@
         <div id="prefilter-error" class="text-danger small px-3"></div>
         <div id="watchlist-active-params" class="row g-2 px-3 pb-2"></div>
         <div class="card-body p-0" style="overflow-x:auto;">
-          <table class="table table-sm mb-0">
+          <table class="table table-sm mb-0" id="watchlist-table">
             <thead><tr>
               <th>Symbol</th>
               <th data-bs-toggle="tooltip" title="Long או Short">Side</th>
-              <th data-bs-toggle="tooltip" title="כמה מ-6 תנאים עברו">Passed</th>
-              <th data-bs-toggle="tooltip" title="מעל שיא אתמול (Long) / מתחת לשפל אתמול (Short)">D1</th>
-              <th data-bs-toggle="tooltip" title="סגירת אתמול מול SMA200">D2</th>
-              <th data-bs-toggle="tooltip" title="gap מסגירת אתמול">D3</th>
-              <th data-bs-toggle="tooltip" title="קיצון המסחר המוקדם (premarket)">I1</th>
-              <th data-bs-toggle="tooltip" title="שיא/שפל תוך-יומי, או RSI(14)>50 - תלוי אסטרטגיה">I2</th>
-              <th data-bs-toggle="tooltip" title="נפח מסחר יחסי לממוצע">I3</th>
+              <th data-bs-toggle="tooltip" title="כמה מתנאי האסטרטגיה הפעילה עברו">Passed</th>
+              <th data-col="classic" data-bs-toggle="tooltip" title="מעל שיא אתמול (Long) / מתחת לשפל אתמול (Short)">D1</th>
+              <th data-col="classic" data-bs-toggle="tooltip" title="סגירת אתמול מול SMA200">D2</th>
+              <th data-col="classic" data-bs-toggle="tooltip" title="gap מסגירת אתמול">D3</th>
+              <th data-col="classic" data-bs-toggle="tooltip" title="קיצון המסחר המוקדם (premarket)">I1</th>
+              <th data-col="classic" data-bs-toggle="tooltip" title="שיא/שפל תוך-יומי, או RSI(14)>50 - תלוי אסטרטגיה">I2</th>
+              <th data-col="classic" data-bs-toggle="tooltip" title="נפח מסחר יחסי לממוצע">I3</th>
+              <th data-col="orb" data-bs-toggle="tooltip" title="ORB: נפח מסחר יחסי (RVOL) מעל הסף">V1</th>
+              <th data-col="orb" data-bs-toggle="tooltip" title="ORB: תנודתיות (ATR%) מעל הסף המדורג לפי מחיר">V2</th>
+              <th data-col="orb" data-bs-toggle="tooltip" title="ORB: המחיר פרץ את רמת ה-opening range">Confirmed</th>
+              <th data-col="orb-confluence" data-bs-toggle="tooltip" title="ORB v2 בלבד: תנאי נוסף של RSI+מגמה">Confluence</th>
               <th data-bs-toggle="tooltip" title="פער % מסגירה קודמת">Gap</th>
               <th data-bs-toggle="tooltip" title="מחזור מסחר יחסי (Relative Volume)">RVOL</th>
-              <th data-bs-toggle="tooltip" title="RSI(14) בנרות 5 דק' - מוצג רק כשה-I2 של האסטרטגיה מבוסס RSI">RSI</th>
+              <th data-col="orb" data-bs-toggle="tooltip" title="ORB: טווח תנודתיות יומי (ATR%)">ATR%</th>
+              <th data-col="classic-rsi" data-bs-toggle="tooltip" title="RSI(14) בנרות 5 דק' - מוצג רק כשה-I2 של האסטרטגיה מבוסס RSI">RSI</th>
               <th data-bs-toggle="tooltip" title="מחיר נוכחי">Price</th>
             </tr></thead>
-            <tbody id="watchlist-body"><tr><td colspan="13" class="text-center text-muted">Loading…</td></tr></tbody>
+            <tbody id="watchlist-body"><tr><td colspan="18" class="text-center text-muted">Loading…</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -385,13 +398,28 @@ document.getElementById("positions-body").addEventListener("click", async (e) =>
   }
 });
 
-const FILTER_KEYS = ["D1", "D2", "D3", "I1", "I2", "I3"];
+const CLASSIC_FILTER_KEYS = ["D1", "D2", "D3", "I1", "I2", "I3"];
+const ORB_FILTER_KEYS = ["V1", "V2", "CONFIRMED", "CONFLUENCE"];
 
-function filterCell(r, key) {
-  if (!(key in r)) return '<td class="text-muted">-</td>';
+// Which of this row's own model's filter keys actually apply to it -
+// filtered by presence for both models, not just named: an unevaluable
+// row (no data yet, or an ORB row whose strategy has no entry_confluence
+// configured) simply lacks the corresponding key(s) - see
+// cycle._evaluate_filters_from_bars/_orb_watchlist_filters, which return
+// either every key of their model together or none at all (never a
+// partial set), so an empty result here reliably means "n/a", not
+// "somehow only 0 of 6 passed".
+function relevantFilterKeys(r) {
+  const keys = r.model === "orb" ? ORB_FILTER_KEYS : CLASSIC_FILTER_KEYS;
+  return keys.filter(k => k in r);
+}
+
+function filterCell(r, key, col) {
+  const attr = col ? ` data-col="${col}"` : "";
+  if (!(key in r)) return `<td class="text-muted"${attr}>-</td>`;
   return r[key]
-    ? '<td class="text-success fw-bold">&check;</td>'
-    : '<td class="text-danger">&cross;</td>';
+    ? `<td class="text-success fw-bold"${attr}>&check;</td>`
+    : `<td class="text-danger"${attr}>&cross;</td>`;
 }
 
 const RISK_BADGE_CLASS = { conservative: "bg-info text-dark", moderate: "bg-warning text-dark", aggressive: "bg-danger" };
@@ -406,6 +434,29 @@ async function refreshActiveStrategyParams() {
     if (!s) return `<div class="col-md-6"><span class="text-muted small">${label}: no active strategy</span></div>`;
     const full = await api(`/api/strategies/${s.id}`);
     const r = full.rules;
+
+    if ("opening_range" in r) {
+      const vf = r.volatility_filters;
+      const models = Object.entries(r.entry_models || {})
+        .filter(([, cfg]) => cfg && cfg.enabled)
+        .map(([name, cfg]) => cfg.target_rr ? `${name} (${cfg.target_rr}R)` : name)
+        .join(", ") || "none";
+      return `<div class="col-md-6">
+        <div class="small mb-1"><strong>${label}: ${full.name}</strong>
+          <span class="badge ${RISK_BADGE_CLASS[full.risk_rating] || "bg-secondary"}">${full.risk_rating}</span>
+          <span class="badge bg-light text-dark border">ORB</span></div>
+        <table class="table table-sm mb-0 mono" style="font-size:0.8rem;">
+          <tbody>
+            <tr><td class="text-muted">V1 RVOL</td><td>x${vf.V1_rvol_min} (${vf.V1_rvol_lookback_days}d)</td><td class="text-muted">V2 ATR</td><td>tiered by price</td></tr>
+            <tr><td class="text-muted">Entry models</td><td colspan="3">${models}</td></tr>
+            <tr><td class="text-muted">Risk/trade</td><td>${r.risk.max_risk_per_trade_pct}%</td><td class="text-muted">Max size</td><td>${r.risk.max_position_size_pct_of_portfolio}%</td></tr>
+            <tr><td class="text-muted">Max positions</td><td>${r.risk.max_concurrent_positions}</td><td class="text-muted">OR window</td><td>${r.opening_range.session_open_et} +${r.opening_range.or_timeframe}</td></tr>
+            <tr><td class="text-muted">Confluence gate</td><td colspan="3">${r.entry_confluence ? "on" : "off"}</td></tr>
+          </tbody>
+        </table>
+      </div>`;
+    }
+
     const d3Key = Object.keys(r.daily_filters).find(k => k.startsWith("D3_"));
     const rsiPeriod = r.intraday_filters.I2_rsi_period || 14;
     const emaPeriod = r.intraday_filters.I2_ema_period || 9;
@@ -440,27 +491,46 @@ async function refreshWatchlist() {
   document.getElementById("watchlist-checked").textContent = data.updated_at || "not checked yet";
   const rows = data.results || [];
   const body = document.getElementById("watchlist-body");
-  if (!rows.length) { body.innerHTML = '<tr><td colspan="13" class="text-center text-muted">Empty</td></tr>'; return; }
+  const table = document.getElementById("watchlist-table");
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="18" class="text-center text-muted">Empty</td></tr>'; return; }
 
-  const withCount = rows.map(r => ({
-    ...r,
-    _passedCount: FILTER_KEYS.reduce((n, k) => n + (r[k] ? 1 : 0), 0),
-  }));
+  // Whole columns only exist when SOME currently active strategy (either
+  // side) actually needs them - each row already carries which model
+  // produced it, so this is derived straight from the response instead of
+  // a second lookup of which strategies are active.
+  const hasClassic = rows.some(r => r.model === "classic");
+  const hasOrb = rows.some(r => r.model === "orb");
+  const hasConfluence = rows.some(r => r.model === "orb" && "CONFLUENCE" in r);
+  const hasRsi = rows.some(r => r.model === "classic" && r.rsi !== undefined && r.rsi !== null);
+  table.classList.toggle("hide-classic", !hasClassic);
+  table.classList.toggle("hide-orb", !hasOrb);
+  table.classList.toggle("hide-orb-confluence", !hasConfluence);
+  table.classList.toggle("hide-classic-rsi", !hasRsi);
+
+  const withCount = rows.map(r => {
+    const keys = relevantFilterKeys(r);
+    return { ...r, _relevantKeys: keys, _passedCount: keys.reduce((n, k) => n + (r[k] ? 1 : 0), 0) };
+  });
   withCount.sort((a, b) => b._passedCount - a._passedCount || Math.abs(b.gap_pct || 0) - Math.abs(a.gap_pct || 0));
 
   body.innerHTML = withCount.map(r => {
-    const hasFilters = FILTER_KEYS.every(k => k in r);
-    const passedBadge = !hasFilters
+    const total = r._relevantKeys.length;
+    const passedBadge = !total
       ? `<span class="badge bg-secondary" title="${r.error || 'no data'}">n/a</span>`
-      : `<span class="badge ${r.pass ? "bg-success" : r._passedCount >= 4 ? "bg-warning text-dark" : "bg-secondary"}">${r._passedCount}/6</span>`;
+      : `<span class="badge ${r.pass ? "bg-success" : r._passedCount >= Math.ceil(total * 0.66) ? "bg-warning text-dark" : "bg-secondary"}">${r._passedCount}/${total}</span>`;
     return `<tr>
       <td class="fw-bold">${symbolLink(r.symbol)}</td>
       <td>${sideBadge(r.side)}</td>
       <td>${passedBadge}</td>
-      ${FILTER_KEYS.map(k => filterCell(r, k)).join("")}
+      ${CLASSIC_FILTER_KEYS.map(k => filterCell(r, k, "classic")).join("")}
+      ${filterCell(r, "V1", "orb")}
+      ${filterCell(r, "V2", "orb")}
+      ${filterCell(r, "CONFIRMED", "orb")}
+      ${filterCell(r, "CONFLUENCE", "orb-confluence")}
       <td>${r.gap_pct !== undefined && r.gap_pct !== null ? Number(r.gap_pct).toFixed(2) + "%" : "-"}</td>
       <td>${r.rvol !== undefined ? "x" + Number(r.rvol).toFixed(2) : "-"}</td>
-      <td>${r.rsi !== undefined && r.rsi !== null ? Number(r.rsi).toFixed(1) : "-"}</td>
+      <td data-col="orb">${r.atr_pct !== undefined && r.atr_pct !== null ? Number(r.atr_pct).toFixed(2) + "%" : "-"}</td>
+      <td data-col="classic-rsi">${r.rsi !== undefined && r.rsi !== null ? Number(r.rsi).toFixed(1) : "-"}</td>
       <td>${fmtMoney(r.price)}</td>
     </tr>`;
   }).join("");

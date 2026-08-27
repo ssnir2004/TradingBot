@@ -1176,8 +1176,38 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
     return positions
 
 
+def _orb_watchlist_filters(detail: dict, rules: dict) -> dict:
+    """Maps orb.evaluate_orb_entry's raw diagnostic detail (see its own
+    docstring) into the same per-filter boolean shape the classic
+    D1-D3/I1-I3 model already returns, for the dashboard's Watchlist
+    table: V1 (RVOL >= threshold), V2 (ATR% clears its price-tiered
+    minimum), CONFIRMED (price has broken the opening-range level).
+    Deliberately excludes "opening range formed" as its own column -
+    evaluate_orb_entry only ever reaches the point of returning these
+    fields once the range HAS formed (an unformed range is one of its
+    "error" early-returns instead, same as this function's own empty-dict
+    return below), so it would always read as a trivial, always-true
+    checkmark. CONFLUENCE is only included when this strategy's rules
+    actually configure entry_confluence (an opt-in extra gate - see
+    evaluate_orb_entry's own docstring) - e.g. ORB Long v2/ORB Short v2
+    but not the original ORB Long/ORB Short - same "only surface what's
+    actually relevant" idea as the classic model's RSI-vs-HOD/LOD I2
+    variants get from the Watchlist table's RSI column."""
+    if "error" in detail:
+        return {}
+    vol_filters = rules["volatility_filters"]
+    out = {
+        "V1": detail.get("rvol", 0) >= vol_filters["V1_rvol_min"],
+        "V2": detail.get("atr_tier_min") is not None and detail.get("atr_pct", 0) >= detail["atr_tier_min"],
+        "CONFIRMED": bool(detail.get("confirmed")),
+    }
+    if rules.get("entry_confluence"):
+        out["CONFLUENCE"] = bool(detail.get("confluence_ok"))
+    return out
+
+
 def scan_watchlist_filters(account_id: int):
-    """Evaluates every watchlist symbol's D1-D3/I1-I3 filters, for whichever
+    """Evaluates every watchlist symbol's entry filters, for whichever
     side(s) currently have an active strategy, and stores a snapshot for
     the dashboard's Watchlist table — independent of entry_scan, which
     stops early once the day's trade/position caps are hit and so doesn't
@@ -1186,7 +1216,15 @@ def scan_watchlist_filters(account_id: int):
     same watchlist and market data), so this runs once and writes the same
     snapshot to both modes — see run_service.py, which schedules it from
     the live instance only. A side with no active strategy is skipped —
-    there's no criteria to check its candidates against."""
+    there's no criteria to check its candidates against.
+
+    Dispatches per-side to the classic D1-D3/I1-I3 evaluator or the ORB
+    one depending on THAT side's own active strategy's rules (same
+    "opening_range" key check entry_scan uses) - long and short can each
+    have a different model active at once, so results carries a "model"
+    tag per row ("classic"/"orb") the dashboard uses to show only the
+    columns relevant to whichever strategy produced that row, instead of
+    hard-coding one filter set for the whole table."""
     status = time_gate()
     if status in ("weekend", "too_early", "closed"):
         return
@@ -1196,9 +1234,17 @@ def scan_watchlist_filters(account_id: int):
         rules = db.get_active_rules(account_id, side)
         if rules is None:
             continue
+        is_orb = "opening_range" in rules
         for row in db.get_watchlist(account_id, "paper", direction=side, universe=_strategy_universe(rules)):
-            detail = _evaluate_entry_filters(account_id, "paper", row["symbol"], rules, side)
-            results.append({"symbol": row["symbol"], "gap_pct": row["gap_pct"], **detail})
+            if is_orb:
+                detail = _evaluate_orb_entry(account_id, "paper", row["symbol"], rules, side)
+                results.append({
+                    "symbol": row["symbol"], "gap_pct": row["gap_pct"], "model": "orb",
+                    **detail, **_orb_watchlist_filters(detail, rules),
+                })
+            else:
+                detail = _evaluate_entry_filters(account_id, "paper", row["symbol"], rules, side)
+                results.append({"symbol": row["symbol"], "gap_pct": row["gap_pct"], "model": "classic", **detail})
 
     for mode in db.MODES:
         db.update_watchlist_filters(account_id, mode, results)
