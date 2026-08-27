@@ -231,7 +231,7 @@
       </div>
 
       <div class="small text-muted mb-2" id="bt-universe-info">Checking available historical data…</div>
-      <div class="small text-muted mb-2">A multi-day range runs as one separate backtest per weekday (weekends skipped) — see History/Calendar below once started.</div>
+      <div class="small text-muted mb-2">A multi-day range run locally splits into one separate backtest per weekday (weekends skipped) — see History/Calendar below once started. Run on remote worker always sends the whole range as a single job (a worker runs one job at a time, so splitting would only add overhead there).</div>
       <button id="btn-run-backtest" class="btn btn-primary btn-sm">Run backtest</button>
       <div id="bt-run-error" class="text-danger small mt-2"></div>
       <div id="bt-run-status" class="text-muted small mt-2"></div>
@@ -1424,22 +1424,7 @@ document.getElementById("btn-run-backtest")?.addEventListener("click", async () 
   const selected = dateRangePicker ? dateRangePicker.selectedDates : [];
   if (selected.length < 2) { errorEl.textContent = "Pick a start and end date on the calendar."; return; }
 
-  const weekdays = weekdaysInRange(selected[0], selected[1]);
-  if (!weekdays.length) { errorEl.textContent = "The selected range has no weekdays (Mon–Fri) to backtest."; return; }
-
   const isRemote = document.getElementById("bt-run-remote").checked;
-  // Each weekday runs as its own local subprocess (see _start_backtest) -
-  // firing many of those at once on this same server is exactly the CPU/
-  // memory risk "Run on remote worker" exists to avoid, so a multi-day
-  // local run gets a confirm/cancel gate a single-day run never needed.
-  if (weekdays.length > 1 && !isRemote) {
-    const ok = confirm(
-      `This starts ${weekdays.length} separate backtests (one per weekday, weekends skipped) running locally on this server at the same time - that can be heavy on CPU/memory.\n\n` +
-      `Check "Run on remote worker" first to offload this instead, or press OK to continue running locally.`
-    );
-    if (!ok) return;
-  }
-
   const basePayload = {
     strategy_ids: strategyIds,
     portfolio_value: Number(document.getElementById("bt-portfolio-value").value),
@@ -1448,6 +1433,46 @@ document.getElementById("btn-run-backtest")?.addEventListener("click", async () 
     commission_per_trade: Number(document.getElementById("bt-commission-per-trade").value),
     execution_mode: isRemote ? "remote" : "local",
   };
+
+  if (isRemote) {
+    // A remote worker claims and runs jobs ONE AT A TIME (see docs/
+    // worker.md) - unlike a local run, splitting a multi-day range into
+    // one job per weekday buys no parallelism at all here, only N times
+    // the per-job overhead (a worker claim round-trip, reloading the
+    // whole cached universe from disk) for nothing. Always a single
+    // request covering the whole picked range - exactly how this worked
+    // before per-weekday splitting existed for local runs. Weekends
+    // inside the range are still skipped, same as always, just by
+    // _trading_days on the server side rather than by anything here.
+    try {
+      const { id } = await api("/api/backtests", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...basePayload, start_date: toISODate(selected[0]), end_date: toISODate(selected[1]) }),
+      });
+      pollBacktest(id);
+    } catch (e) {
+      errorEl.textContent = "Could not start backtest: " + e.message;
+    }
+    return;
+  }
+
+  // Local mode: split into one weekday per backtest - real, separate OS
+  // subprocesses (see _start_backtest) genuinely run concurrently on this
+  // server, so this is where splitting actually buys parallelism instead
+  // of just overhead.
+  const weekdays = weekdaysInRange(selected[0], selected[1]);
+  if (!weekdays.length) { errorEl.textContent = "The selected range has no weekdays (Mon–Fri) to backtest."; return; }
+
+  // Firing many local subprocesses at once is exactly the CPU/memory risk
+  // "Run on remote worker" exists to avoid, so a multi-day local run gets
+  // a confirm/cancel gate a single-day run never needed.
+  if (weekdays.length > 1) {
+    const ok = confirm(
+      `This starts ${weekdays.length} separate backtests (one per weekday, weekends skipped) running locally on this server at the same time - that can be heavy on CPU/memory.\n\n` +
+      `Check "Run on remote worker" first to offload this instead, or press OK to continue running locally.`
+    );
+    if (!ok) return;
+  }
 
   if (weekdays.length === 1) {
     // Single trading day selected - unchanged from before: open it
