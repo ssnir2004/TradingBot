@@ -237,20 +237,6 @@
   </div>
   {% endif %}
 
-  <div class="card mb-4 d-none" id="bt-results-card">
-    <div class="card-header d-flex justify-content-between align-items-center">
-      <span>Results</span>
-      <span>
-        <span id="bt-duration" class="small text-muted me-2"></span>
-        <button id="btn-cancel-current" class="btn btn-sm btn-outline-warning me-2 d-none">Cancel</button>
-        <span id="bt-status-badge" class="badge bg-secondary">...</span>
-        <button class="btn btn-sm btn-outline-secondary ms-2" onclick="hideResults()" title="Close">×</button>
-      </span>
-    </div>
-    <div class="small text-muted px-3 pt-2" id="bt-results-meta"></div>
-    <div class="card-body" id="bt-results-body"></div>
-  </div>
-
   <div class="card mb-4">
     <div class="card-header d-flex justify-content-between align-items-center">
       <span>Backtest Calendar</span>
@@ -266,6 +252,20 @@
       <div id="cal-legend" class="d-flex flex-wrap gap-3 mt-3"></div>
       <div id="cal-dot-detail" class="small mt-3"></div>
     </div>
+  </div>
+
+  <div class="card mb-4 d-none" id="bt-results-card">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span>Results</span>
+      <span>
+        <span id="bt-duration" class="small text-muted me-2"></span>
+        <button id="btn-cancel-current" class="btn btn-sm btn-outline-warning me-2 d-none">Cancel</button>
+        <span id="bt-status-badge" class="badge bg-secondary">...</span>
+        <button class="btn btn-sm btn-outline-secondary ms-2" onclick="hideResults()" title="Close">×</button>
+      </span>
+    </div>
+    <div class="small text-muted px-3 pt-2" id="bt-results-meta"></div>
+    <div class="card-body" id="bt-results-body"></div>
   </div>
 
   <div class="card mb-4">
