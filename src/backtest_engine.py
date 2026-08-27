@@ -45,7 +45,7 @@ import pandas as pd
 import yfinance as yf
 
 import cycle
-from src import backtest_data, orb
+from src import backtest_data, orb, touch_turn
 
 BAR_SIZE = "5 mins"
 DAILY_BAR_SIZE = "1 day"
@@ -812,6 +812,246 @@ def simulate_orb_strategy(
                         "state": "pre_breakeven",
                     }
                     entries_today += 1
+
+        for symbol, pos in open_positions.items():
+            intraday = intraday_by_symbol[symbol]
+            day_bars = intraday[intraday.index.date == day]
+            if day_bars.empty:
+                continue
+            last_bar = day_bars.iloc[-1]
+            trade_id += 1
+            trades.append({
+                "id": trade_id, "symbol": symbol, "side": close_action,
+                "fill_price": float(last_bar["Close"]), "size": pos["qty"],
+                "timestamp_iso": day_bars.index[-1].isoformat(),
+                "exit_reason": "eod_close", "commission": commission_per_trade,
+            })
+
+    return {"trades": trades, "skipped_symbols": skipped, "filter_stats": filter_stats}
+
+
+def simulate_touch_turn_strategy(
+    strategy_rules: dict,
+    side: str,
+    symbols: list[str],
+    start_date,
+    end_date,
+    portfolio_value: float,
+    max_risk_pct: float,
+    max_trades_per_day: int,
+    commission_per_trade: float = 0.0,
+) -> dict:
+    """Touch & Turn's own replay loop - dispatched from src/backtest_
+    runner.py whenever a strategy's rules carry an "opening_candle" key,
+    instead of simulate_strategy/simulate_orb_strategy above. Same
+    day-by-day/bar-by-bar structure and {"trades": [...],
+    "skipped_symbols": [...], "filter_stats": {...}} return shape as
+    simulate_orb_strategy (so perf.py's pipeline works unchanged), but a
+    genuinely different entry mechanic: touch_turn.evaluate_touch_turn_
+    entry is called once per symbol per day (retried each bar until the
+    opening candle has enough bars to form, then not again that day - see
+    the "evaluated_today" set below), not on every bar the way the other
+    two models' entry signal is. A pass doesn't fill immediately - it
+    opens a "resting limit order" state (`pending_orders`) that
+    subsequent bars check for a touch (reusing _find_stop_out - despite
+    its name, it's exactly "first bar whose range crosses a price, in
+    this side's own fill direction", which is exactly the condition a
+    resting Buy/Sell Limit's fill needs too) up to time_filter.
+    entry_window_minutes later, or cancels unfilled at that deadline -
+    mirroring the live engine's own cycle.touch_turn_entry_scan/
+    check_pending_touch_turn_orders (a real IBKR GTD limit order there)
+    as faithfully as an OHLC-bar replay can. max_concurrent_positions
+    only ever gates NEW placements (Step 3 below), never a touch/fill
+    already in flight (Step 2) - a real resting broker order doesn't know
+    or care about this bot's own concurrency bookkeeping, exactly
+    mirroring check_pending_touch_turn_orders never gating a fill either.
+
+    Exit is always "fixed_target_no_trail" for this strategy (see the
+    Touch & Turn presets) - the same stop-or-target-whichever-first logic
+    as simulate_orb_strategy's own fixed_target_no_trail branch, kept as
+    its own copy here rather than shared, same "deliberately separate
+    function, don't touch a well-exercised path" reasoning simulate_orb_
+    strategy's own docstring explains for why IT doesn't call into
+    simulate_strategy either."""
+    max_concurrent = strategy_rules["risk"]["max_concurrent_positions"]
+    max_position_pct = strategy_rules["risk"]["max_position_size_pct_of_portfolio"] / 100
+    action = "BUY" if side == "long" else "SELL"
+    close_action = "SELL" if side == "long" else "BUY"
+    force_close_time = _parse_force_close_time(strategy_rules)
+    atr_period = strategy_rules["liquidity_filter"]["atr_period"]
+    min_daily_days = atr_period + 1
+    entry_window_minutes = strategy_rules["time_filter"]["entry_window_minutes"]
+
+    daily_by_symbol: dict[str, pd.DataFrame] = {}
+    intraday_by_symbol: dict[str, pd.DataFrame] = {}
+    skipped = []
+    daily_candidates = {}
+    for symbol in symbols:
+        intraday = backtest_data.load_cached_bars(symbol, BAR_SIZE)
+        if intraday is None or intraday.empty:
+            skipped.append({"symbol": symbol, "reason": "no cached intraday bars"})
+            continue
+        window_start = pd.Timestamp(start_date, tz=intraday.index.tz) - pd.Timedelta(days=INTRADAY_LOOKBACK_DAYS)
+        window_end = pd.Timestamp(end_date, tz=intraday.index.tz) + pd.Timedelta(days=1)
+        intraday = intraday[(intraday.index >= window_start) & (intraday.index < window_end)]
+        if intraday.empty:
+            skipped.append({"symbol": symbol, "reason": "no cached bars in the requested date range"})
+            continue
+        daily_candidates[symbol] = intraday
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_DAILY_FETCH_WORKERS) as pool:
+        future_to_symbol = {pool.submit(fetch_daily_bars, symbol): symbol for symbol in daily_candidates}
+        for future in concurrent.futures.as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            daily = future.result()
+            if daily is None:
+                skipped.append({"symbol": symbol, "reason": "no daily bars"})
+                continue
+            daily_by_symbol[symbol] = daily
+            intraday_by_symbol[symbol] = daily_candidates[symbol]
+
+    filter_stats = {"evaluations": 0, "insufficient_data": 0, "liquidity_ok": 0, "bias_match": 0}
+
+    if not intraday_by_symbol:
+        return {"trades": [], "skipped_symbols": skipped, "filter_stats": filter_stats}
+
+    all_days = sorted(set().union(*[
+        set(_trading_days(intraday, start_date, end_date)) for intraday in intraday_by_symbol.values()
+    ]))
+    day_groups_by_symbol = {
+        symbol: dict(tuple(intraday.groupby(intraday.index.date)))
+        for symbol, intraday in intraday_by_symbol.items()
+    }
+
+    trades = []
+    trade_id = 0
+    for day in all_days:
+        open_positions: dict[str, dict] = {}
+        pending_orders: dict[str, dict] = {}
+        evaluated_today: set[str] = set()
+        entries_today = 0
+
+        daily_slice_by_symbol = {
+            symbol: _daily_as_of_light(daily_by_symbol[symbol], day, min_daily_days) for symbol in intraday_by_symbol
+        }
+
+        day_bar_times = set()
+        for intraday in intraday_by_symbol.values():
+            day_bars = intraday[intraday.index.date == day]
+            regular_bars = day_bars[day_bars.index.time >= dt_time(9, 30)]
+            day_bar_times.update(regular_bars.index)
+        sorted_times = sorted(day_bar_times)
+
+        for bar_ts in sorted_times:
+            if bar_ts.time() >= force_close_time:
+                for symbol, pos in list(open_positions.items()):
+                    trade_id += 1
+                    trades.append({
+                        "id": trade_id, "symbol": symbol, "side": close_action,
+                        "fill_price": float(intraday_by_symbol[symbol].loc[bar_ts, "Close"])
+                        if bar_ts in intraday_by_symbol[symbol].index else pos["entry_price"],
+                        "size": pos["qty"], "timestamp_iso": bar_ts.isoformat(),
+                        "exit_reason": "eod_close", "commission": commission_per_trade,
+                    })
+                open_positions.clear()
+                pending_orders.clear()  # nothing left resting once the trading day's over
+                break
+
+            # --- Step 1: manage every currently open (FILLED) position - fixed target only, no trailing ---
+            for symbol in list(open_positions.keys()):
+                intraday = intraday_by_symbol[symbol]
+                if bar_ts not in intraday.index:
+                    continue
+                pos = open_positions[symbol]
+                this_bar = intraday.loc[[bar_ts]]
+                stop_hit = _find_stop_out(this_bar, pos["stop_price"], side)
+                target_hit = _find_target_out(this_bar, pos["target_price"], side)
+                if stop_hit is not None or target_hit is not None:
+                    # Same same-bar-collision simplification as simulate_orb_
+                    # strategy's own fixed_target_no_trail branch (target
+                    # wins on a tie - see its comment for the full reasoning).
+                    hit_target = target_hit is not None and (stop_hit is None or target_hit <= stop_hit)
+                    trade_id += 1
+                    trades.append({
+                        "id": trade_id, "symbol": symbol, "side": close_action,
+                        "fill_price": pos["target_price"] if hit_target else pos["stop_price"],
+                        "size": pos["qty"], "timestamp_iso": bar_ts.isoformat(),
+                        "exit_reason": "target" if hit_target else "stop_loss",
+                        "commission": commission_per_trade,
+                    })
+                    del open_positions[symbol]
+
+            # --- Step 2: check every resting order for a touch, or expiry - never gated by max_concurrent (see docstring) ---
+            for symbol in list(pending_orders.keys()):
+                intraday = intraday_by_symbol[symbol]
+                po = pending_orders[symbol]
+                if bar_ts >= po["expiry_ts"]:
+                    del pending_orders[symbol]
+                    continue
+                if bar_ts not in intraday.index:
+                    continue
+                this_bar = intraday.loc[[bar_ts]]
+                touch = _find_stop_out(this_bar, po["limit_price"], side)
+                if touch is None:
+                    continue
+                trade_id += 1
+                trades.append({
+                    "id": trade_id, "symbol": symbol, "side": action,
+                    "fill_price": po["limit_price"], "size": po["qty"], "timestamp_iso": bar_ts.isoformat(),
+                    "initial_stop": po["initial_stop"], "commission": commission_per_trade,
+                })
+                open_positions[symbol] = {
+                    "side": side, "entry_price": po["limit_price"], "initial_stop": po["initial_stop"],
+                    "stop_price": po["initial_stop"], "target_price": po["target_price"], "qty": po["qty"],
+                    "state": "pre_breakeven",
+                }
+                entries_today += 1
+                del pending_orders[symbol]
+
+            # --- Step 3: evaluate the gate once per symbol per day, retried each bar until decidable ---
+            for symbol, intraday in intraday_by_symbol.items():
+                if symbol in evaluated_today or symbol in open_positions or symbol in pending_orders:
+                    continue
+                if bar_ts not in intraday.index:
+                    continue
+                daily_slice = daily_slice_by_symbol[symbol]
+                if daily_slice is None:
+                    continue
+                today_bars_full = day_groups_by_symbol[symbol].get(day)
+                if today_bars_full is None:
+                    continue
+                intraday_slice = today_bars_full[today_bars_full.index <= bar_ts]
+                detail = touch_turn.evaluate_touch_turn_entry(daily_slice, intraday_slice, strategy_rules, side)
+                if "error" in detail:
+                    filter_stats["insufficient_data"] += 1
+                    continue  # opening candle not formed yet at this bar - retried next bar, not counted as a real evaluation
+                evaluated_today.add(symbol)
+                filter_stats["evaluations"] += 1
+                if detail.get("liquidity_ok"):
+                    filter_stats["liquidity_ok"] += 1
+                if detail.get("bias") == side:
+                    filter_stats["bias_match"] += 1
+                if not detail.get("pass"):
+                    continue
+                if len(open_positions) + len(pending_orders) >= max_concurrent or entries_today >= max_trades_per_day:
+                    continue
+
+                limit_price, initial_stop, target_price = detail["limit_price"], detail["initial_stop"], detail["target_price"]
+                r = abs(limit_price - initial_stop)
+                if r <= 0:
+                    continue
+                risk_dollars = portfolio_value * (max_risk_pct / 100)
+                size_by_risk = math.floor(risk_dollars / r)
+                size_by_cap = math.floor(portfolio_value * max_position_pct / limit_price)
+                size = min(size_by_risk, size_by_cap)
+                if size < 1:
+                    continue
+
+                session_open_ts = pd.Timestamp.combine(day, dt_time(9, 30)).tz_localize(intraday.index.tz)
+                pending_orders[symbol] = {
+                    "limit_price": limit_price, "target_price": target_price, "initial_stop": initial_stop,
+                    "qty": size, "expiry_ts": session_open_ts + pd.Timedelta(minutes=entry_window_minutes),
+                }
 
         for symbol, pos in open_positions.items():
             intraday = intraday_by_symbol[symbol]

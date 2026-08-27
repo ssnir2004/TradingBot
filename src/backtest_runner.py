@@ -17,11 +17,19 @@ def run_one_strategy(
     portfolio_value: float, max_risk_pct: float, max_trades_per_day: int,
     commission_per_trade: float,
 ) -> dict:
-    # ORB strategies (see src/orb.py) carry an "opening_range" key and are
-    # replayed by a dedicated simulator - a genuinely different engine
-    # (no D1-D3 daily bias, fixed-target exits instead of breakeven/
-    # trailing), not just a different rules_json for the same one.
-    simulate = backtest_engine.simulate_orb_strategy if "opening_range" in rules else backtest_engine.simulate_strategy
+    # ORB strategies (see src/orb.py) carry an "opening_range" key, Touch &
+    # Turn strategies (see src/touch_turn.py) an "opening_candle" key -
+    # both replayed by their own dedicated simulator (genuinely different
+    # engines - no D1-D3 daily bias, fixed-target exits instead of
+    # breakeven/trailing, and for Touch & Turn a resting-limit-order fill
+    # model instead of an instant-on-signal one), not just a different
+    # rules_json for the same one.
+    if "opening_range" in rules:
+        simulate = backtest_engine.simulate_orb_strategy
+    elif "opening_candle" in rules:
+        simulate = backtest_engine.simulate_touch_turn_strategy
+    else:
+        simulate = backtest_engine.simulate_strategy
     sim = simulate(
         rules, direction, symbols, start_date, end_date,
         portfolio_value, max_risk_pct, max_trades_per_day,

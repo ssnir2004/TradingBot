@@ -232,6 +232,37 @@ CREATE TABLE IF NOT EXISTS worker_tokens (
     created_at TEXT NOT NULL,
     last_seen_at TEXT
 );
+
+-- One row per Touch & Turn resting limit order attempt (see
+-- cycle.touch_turn_entry_scan/check_pending_touch_turn_orders and
+-- src/touch_turn.py) - unlike every other strategy here, this one places
+-- a REAL broker-side limit order that sits unfilled for up to
+-- time_filter.entry_window_minutes rather than buying at market the
+-- instant a signal passes, so its lifecycle needs its own tracking
+-- separate from `positions` (which only ever holds already-FILLED
+-- entries). placed_date (an ET calendar date) is part of the primary
+-- key specifically so "has this symbol already had an order attempt
+-- today" (this strategy's own max-one-trade-per-symbol-per-day rule) is
+-- a simple existence check regardless of that attempt's outcome, and a
+-- fresh attempt is naturally allowed again the next trading day. status
+-- stays 'filled'/'cancelled'/'expired' after resolution (not deleted)
+-- for the same audit-trail reasoning trades/decision_log are kept.
+CREATE TABLE IF NOT EXISTS pending_orders (
+    account_id INTEGER NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'paper',
+    symbol TEXT NOT NULL,
+    placed_date TEXT NOT NULL,
+    side TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    broker_order_id INTEGER,
+    limit_price REAL NOT NULL,
+    target_price REAL NOT NULL,
+    initial_stop REAL NOT NULL,
+    qty INTEGER NOT NULL,
+    placed_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, mode, symbol, placed_date)
+);
 """
 
 # Created after the mode-column migrations run below — an older DB's
@@ -1039,6 +1070,129 @@ EXTRA_STRATEGY_PRESETS = [
         "המניה יכול לעלות ללא הגבלה, וה-stop עלול 'לקפוץ מעל' (gap) במקרה של short squeeze. "
         "אל תפעיל LIVE לפני בדיקה מקיפה.",
     ),
+    (
+        # Touch & Turn Scalper - a THIRD, distinct engine from both the
+        # classic D1-D3/I1-I3 model and ORB: no daily "yesterday" bias
+        # filters, no continuous per-tick "does it pass right now" signal
+        # either - the opening N-minute candle is evaluated ONCE (right
+        # after it closes) to decide whether today qualifies at all
+        # (Liquidity Candle: opening_range >= ATR(14) x atr_multiplier)
+        # and which way to fade it (bias: a red/bearish candle fades UP,
+        # a green/bullish one fades DOWN - see src/touch_turn.py's own
+        # docstring for the exact math, including the doji tie-break).
+        # Dispatched to src/touch_turn.py's own evaluate_touch_turn_entry
+        # (see cycle.entry_scan's "opening_candle" in rules check) instead
+        # of either the classic or ORB pure logic.
+        #
+        # Unlike every other strategy here, a pass doesn't buy/sell at
+        # market - it places a REAL resting IBKR limit order (a Buy Limit
+        # at the opening candle's low for this Long variant, waiting for
+        # price to retest/"touch" it and reverse/"turn") that sits in the
+        # market for time_filter.entry_window_minutes (90) before IBKR's
+        # own GTD time-in-force auto-cancels it unfilled - see cycle.
+        # touch_turn_entry_scan/check_pending_touch_turn_orders and the
+        # pending_orders table. Direction fits the one-active-strategy-
+        # per-side model exactly: THIS variant only ever fires on a red
+        # opening candle (bias must equal this strategy's own "long")
+        # - activate the Short variant on the other side to cover green-
+        # candle days too, each side only ever having a live setup on the
+        # days its own bias actually occurs.
+        #
+        # Exit is a fixed Fibonacci target with R:R computed as
+        # reward/reward_risk_ratio (2.0, i.e. Risk = Reward/2, matching
+        # the spec's literal "2:1" wording) - same exit.management_style:
+        # "fixed_target_no_trail" ORB already uses (no breakeven flip, no
+        # trailing - orb.fixed_target_decision is fully generic despite
+        # living in orb.py, so it's reused verbatim, not duplicated).
+        "Touch & Turn Scalper - Long",
+        {
+            "strategy_name": "Touch & Turn Scalper - Long",
+            "direction": "long_only",
+            "opening_candle": {"timeframe_minutes": 15, "session_open_et": "09:30"},
+            "universe_filters": {"index": "S&P 500", "min_price_usd": 3.0},
+            "liquidity_filter": {"atr_period": 14, "atr_multiplier": 0.25},
+            "fib_targets": {"long_target_pct": 38.2, "short_target_pct": 61.8},
+            "reward_risk_ratio": 2.0,
+            "time_filter": {"entry_window_minutes": 90},
+            "exit": {"management_style": "fixed_target_no_trail"},
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+            },
+        },
+        "aggressive",
+        "long",
+        "## מה זה עושה\n"
+        "אסטרטגיית סקאלפינג יומית: נר הפתיחה הראשון (15 דקות, נבנה מ-3 נרות 5 דקות: 9:30-9:45 ET) "
+        "לפעמים מייצג 'Liquidity Candle' - מהלך חריג ביחס לתנודתיות הרגילה של המניה. כשזה קורה, "
+        "המחיר נוטה לחזור ולגעת ('Touch') בקצה הטווח של אותו נר ואז להתהפך ('Turn') בחזרה למרכז. "
+        "וריאציה זו (Long) פועלת רק בימים שבהם נר הפתיחה **אדום** (בשפל).\n\n"
+        "## שלב 1: זיהוי Liquidity Candle\n"
+        "טווח נר הפתיחה (High-Low) מושווה ל-ATR(14) היומי × 0.25. אם הטווח קטן מהסף - אין עסקה "
+        "היום בכלל, לא רק בסימבול הזה.\n\n"
+        "## שלב 2: קביעת כיוון (Bias)\n"
+        "נר אדום (סגירה ≤ פתיחה) → Bias=Long (וריאציה זו פועלת). נר ירוק → Bias=Short (וריאציה זו "
+        "מדלגת - הפעילו את Touch & Turn Scalper - Short בצד ה-Short כדי לכסות גם ימים כאלה).\n\n"
+        "## שלב 3: כניסה - הזמנת Limit אמיתית\n"
+        "**שונה מכל אסטרטגיה אחרת כאן**: לא קונה בשוק ברגע שהתנאים מתקיימים - מציבה הזמנת Buy "
+        "Limit אמיתית ב-IBKR בשפל נר הפתיחה, וממתינה. ההזמנה משתמשת ב-GTD (Good-Till-Date) של "
+        "IBKR עצמו כדי להתבטל אוטומטית אחרי 90 דקות (11:00 ET) אם לא מולאה - הבוט גם בודק זאת "
+        "בעצמו כגיבוי. עד שהיא נמלאת או מתבטלת, זו לא פוזיציה עוקבת (stop/target) - רק הזמנה "
+        "רדומה בשוק. מקסימום ניסיון אחד לסימבול ביום.\n\n"
+        "## יעד ה-Take Profit וה-Stop\n"
+        "יעד: רמת Fibonacci 38.2% (נמדד מהשיא של נר הפתיחה כלפי השפל). הסיכון מחושב **מהיעד**, לא "
+        "מרמה טכנית: Reward = מרחק מהכניסה ליעד, Risk = Reward ÷ 2 (יחס 2:1), Stop = כניסה פחות "
+        "Risk. לאחר מילוי - יעד קבוע בלבד, ללא breakeven וללא טריילינג (management_style: "
+        "fixed_target_no_trail, כמו ORB).\n\n"
+        "## חלון זמן\n"
+        "רק ב-90 הדקות הראשונות של המסחר (9:30-11:00 ET) - גם להצבת ההזמנה וגם לתוקף שלה.\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive - אסטרטגיה חדשה שלא נבדקה, ומשתמשת במנגנון הזמנה שלא קיים באף אסטרטגיה "
+        "אחרת (Limit אמיתי, לא Market). סיכון לעסקה: 1% | גודל פוזיציה מקס': 10% | פוזיציות "
+        "בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "זו לא אסטרטגיה שאומתה בשום צורה - יש להריץ backtest מקיף (שבועות-חודשים, מאות עסקאות) "
+        "ולבחון paper trading ממושך לפני כל שיקול להעלות ל-LIVE. שימו לב שה-Stop כאן נגזר מיחס "
+        "הסיכוי/סיכון ולא מרמה טכנית קונקרטית - זה עלול להניח סטופ קרוב מדי או רחוק מדי ביחס "
+        "לתנודתיות בפועל של המניה.",
+    ),
+    (
+        # Exact mirror of Touch & Turn Scalper - Long, see its own comment
+        # above for the full engine explanation, not repeated here.
+        "Touch & Turn Scalper - Short",
+        {
+            "strategy_name": "Touch & Turn Scalper - Short",
+            "direction": "short_only",
+            "opening_candle": {"timeframe_minutes": 15, "session_open_et": "09:30"},
+            "universe_filters": {"index": "S&P 500", "min_price_usd": 3.0},
+            "liquidity_filter": {"atr_period": 14, "atr_multiplier": 0.25},
+            "fib_targets": {"long_target_pct": 38.2, "short_target_pct": 61.8},
+            "reward_risk_ratio": 2.0,
+            "time_filter": {"entry_window_minutes": 90},
+            "exit": {"management_style": "fixed_target_no_trail"},
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+            },
+        },
+        "aggressive",
+        "short",
+        "## מה זה עושה\n"
+        "מראה הפוכה מדויקת של Touch & Turn Scalper - Long - ראו את התיאור המלא שם. כאן: פועלת רק "
+        "בימים שבהם נר הפתיחה **ירוק** (Bias=Short), מציבה Sell Limit אמיתי ב-IBKR בשיא נר הפתיחה "
+        "וממתינה למגע חוזר, יעד ב-Fibonacci 61.8% (קרוב יותר לשפל), Stop = כניסה + Reward÷2.\n\n"
+        "## יקום, זיהוי Liquidity Candle, חלון זמן\n"
+        "זהה לחלוטין ל-Touch & Turn Scalper - Long: S&P 500, ATR(14)×0.25, חלון 9:30-11:00 ET, "
+        "מקסימום ניסיון אחד לסימבול ביום, הזמנת Limit אמיתית עם GTD.\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive - אסטרטגיה חדשה שלא נבדקה. סיכון לעסקה: 1% | גודל פוזיציה מקס': 10% | "
+        "פוזיציות בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "כל אזהרות Touch & Turn Scalper - Long תקפות כאן, ובנוסף: בפוזיציית Short אין תקרה "
+        "תיאורטית להפסד - מחיר המניה יכול לעלות ללא הגבלה. אל תפעיל LIVE לפני בדיקה מקיפה.",
+    ),
 ]
 
 
@@ -1635,6 +1789,70 @@ def remove_position(account_id: int, mode: str, symbol: str):
     with get_conn() as conn:
         conn.execute(
             "DELETE FROM positions WHERE account_id = ? AND mode = ? AND symbol = ?", (account_id, mode, symbol)
+        )
+
+
+def has_pending_order_today(account_id: int, mode: str, symbol: str, placed_date: str) -> bool:
+    """Touch & Turn's max-one-attempt-per-symbol-per-day gate (see
+    pending_orders' own schema comment) - True regardless of that
+    attempt's outcome (pending/filled/cancelled/expired)."""
+    _check_mode(mode)
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM pending_orders WHERE account_id = ? AND mode = ? AND symbol = ? AND placed_date = ?",
+            (account_id, mode, symbol, placed_date),
+        ).fetchone()
+        return row is not None
+
+
+def create_pending_order(account_id: int, mode: str, order: dict) -> bool:
+    """Returns whether a new row was actually inserted - False (a no-op,
+    not an error) if this exact (account_id, mode, symbol, placed_date)
+    already has an attempt on record, so a caller that raced past
+    has_pending_order_today's own check (two cycle ticks close together)
+    still can't double-place. `order` needs symbol, placed_date, side,
+    limit_price, target_price, initial_stop, qty, placed_at, expires_at."""
+    _check_mode(mode)
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO pending_orders (account_id, mode, symbol, placed_date, side, "
+            "limit_price, target_price, initial_stop, qty, placed_at, expires_at) VALUES "
+            "(:account_id, :mode, :symbol, :placed_date, :side, :limit_price, :target_price, "
+            ":initial_stop, :qty, :placed_at, :expires_at)",
+            {**order, "account_id": account_id, "mode": mode},
+        )
+        return cur.rowcount > 0
+
+
+def set_pending_order_broker_id(account_id: int, mode: str, symbol: str, placed_date: str, broker_order_id: int):
+    _check_mode(mode)
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE pending_orders SET broker_order_id = ? "
+            "WHERE account_id = ? AND mode = ? AND symbol = ? AND placed_date = ?",
+            (broker_order_id, account_id, mode, symbol, placed_date),
+        )
+
+
+def get_pending_orders(account_id: int, mode: str, status: str = "pending") -> list[dict]:
+    _check_mode(mode)
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM pending_orders WHERE account_id = ? AND mode = ? AND status = ?",
+            (account_id, mode, status),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def resolve_pending_order(account_id: int, mode: str, symbol: str, placed_date: str, status: str):
+    """status: 'filled', 'cancelled', or 'expired' - the row is kept (not
+    deleted), both as an audit trail and so has_pending_order_today keeps
+    blocking a same-day re-attempt after resolution."""
+    _check_mode(mode)
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE pending_orders SET status = ? WHERE account_id = ? AND mode = ? AND symbol = ? AND placed_date = ?",
+            (status, account_id, mode, symbol, placed_date),
         )
 
 

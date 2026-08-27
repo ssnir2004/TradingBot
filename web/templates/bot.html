@@ -457,6 +457,22 @@ async function refreshActiveStrategyParams() {
       </div>`;
     }
 
+    if ("opening_candle" in r) {
+      return `<div class="col-md-6">
+        <div class="small mb-1"><strong>${label}: ${full.name}</strong>
+          <span class="badge ${RISK_BADGE_CLASS[full.risk_rating] || "bg-secondary"}">${full.risk_rating}</span>
+          <span class="badge bg-light text-dark border">Touch &amp; Turn</span></div>
+        <table class="table table-sm mb-0 mono" style="font-size:0.8rem;">
+          <tbody>
+            <tr><td class="text-muted">Liquidity gate</td><td colspan="3">ATR(${r.liquidity_filter.atr_period}) x${r.liquidity_filter.atr_multiplier}</td></tr>
+            <tr><td class="text-muted">Fib target</td><td>${r.fib_targets.long_target_pct}% / ${r.fib_targets.short_target_pct}%</td><td class="text-muted">R:R</td><td>1:${r.reward_risk_ratio}</td></tr>
+            <tr><td class="text-muted">Risk/trade</td><td>${r.risk.max_risk_per_trade_pct}%</td><td class="text-muted">Max size</td><td>${r.risk.max_position_size_pct_of_portfolio}%</td></tr>
+            <tr><td class="text-muted">Max positions</td><td>${r.risk.max_concurrent_positions}</td><td class="text-muted">Entry window</td><td>${r.opening_candle.session_open_et} +${r.time_filter.entry_window_minutes}m</td></tr>
+          </tbody>
+        </table>
+      </div>`;
+    }
+
     const d3Key = Object.keys(r.daily_filters).find(k => k.startsWith("D3_"));
     const rsiPeriod = r.intraday_filters.I2_rsi_period || 14;
     const emaPeriod = r.intraday_filters.I2_ema_period || 9;

@@ -45,9 +45,9 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import yfinance as yf
 from dotenv import dotenv_values
-from ib_async import Stock, StopOrder
+from ib_async import LimitOrder, Stock, StopOrder
 
-from src import db, mode_config, orb
+from src import db, mode_config, orb, touch_turn
 from src.ibkr_client import IBKRClient, belongs_to_account, scoped_positions
 from src.notify import notify
 
@@ -176,6 +176,34 @@ def _place_stop(ib, symbol: str, quantity: int, stop_price: float, side: str) ->
     contract = _qualify(ib, symbol)
     action = "SELL" if side == "long" else "BUY"
     order = StopOrder(action, quantity, round(stop_price, 2))
+    if getattr(ib, "account", None):
+        order.account = ib.account
+    trade = ib.placeOrder(contract, order)
+    ib.sleep(1)
+    return trade.order.orderId
+
+
+def _place_touch_turn_limit(ib, symbol: str, quantity: int, limit_price: float, side: str, good_till_et: datetime) -> int:
+    """Places the REAL resting limit order Touch & Turn's retest entry
+    needs (see src/touch_turn.py) - a BUY waiting at the opening candle's
+    low for a long, a SELL waiting at its high for a short. Placed
+    directly through the orchestrator's own `ib` connection, same as
+    _place_stop just above - only ENTRY/EXIT orders that need synchronous
+    fill-waiting go through the trade.py subprocess (see its own
+    docstring); a stop or a resting limit order doesn't need that.
+
+    Uses IBKR's own GTD (Good-Till-Date) time-in-force so the broker
+    itself auto-cancels the order at good_till_et even if this bot's own
+    polling loop is down when that time arrives -
+    check_pending_touch_turn_orders still independently checks and
+    cancels on its own schedule too, as a second line of defense (same
+    "don't rely on a single mechanism for something this important"
+    reasoning the protective stop order already gets)."""
+    contract = _qualify(ib, symbol)
+    action = "BUY" if side == "long" else "SELL"
+    order = LimitOrder(action, quantity, round(limit_price, 2))
+    order.tif = "GTD"
+    order.goodTillDate = good_till_et.strftime("%Y%m%d %H:%M:%S US/Eastern")
     if getattr(ib, "account", None):
         order.account = ib.account
     trade = ib.placeOrder(contract, order)
@@ -1027,6 +1055,28 @@ def _evaluate_orb_entry(account_id: int, mode: str, ticker: str, rules: dict, si
         return {"pass": False, "side": side, "error": str(exc)}
 
 
+def _evaluate_touch_turn_entry(account_id: int, mode: str, ticker: str, rules: dict, side: str) -> dict:
+    """Touch & Turn's own live wrapper - same fetch shape as
+    _evaluate_entry_filters/_evaluate_orb_entry (fresh yfinance data
+    ending at the real current moment), handed to
+    touch_turn.evaluate_touch_turn_entry instead. Dispatched from
+    touch_turn_entry_scan (entry_scan itself skips any strategy whose
+    rules carry an "opening_candle" key - see its own docstring)."""
+    yahoo_symbol = ticker.replace(" ", "-")
+    try:
+        daily = yf.Ticker(yahoo_symbol).history(period="260d", interval="1d")
+        intraday = yf.Ticker(yahoo_symbol).history(period=f"{INTRADAY_FETCH_LOOKBACK_DAYS}d", interval="5m", prepost=True)
+        if not intraday.empty:
+            intraday.index = intraday.index.tz_convert(ET)
+        detail = touch_turn.evaluate_touch_turn_entry(daily, intraday, rules, side)
+        event = "touch_turn_eval" if "error" not in detail else "touch_turn_eval_error"
+        log_decision(account_id, mode, {"event": event, "symbol": ticker, **detail})
+        return detail
+    except Exception as exc:  # noqa: BLE001 - one bad ticker must not kill the scan
+        log_decision(account_id, mode, {"event": "touch_turn_eval_error", "symbol": ticker, "side": side, "error": str(exc)})
+        return {"side": side, "error": str(exc)}
+
+
 def _within_entry_window(rules: dict, now_et: datetime | None = None) -> bool:
     """Whether this strategy's own time_filter.earliest_entry_et/
     latest_entry_et currently allow a new entry — the per-strategy floor
@@ -1067,7 +1117,18 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
     same growing list, so each sees what the other already opened this
     cycle. Concurrent-position and daily-entry caps are enforced per side
     (this side's own count against this side's own rules), not pooled
-    across both directions."""
+    across both directions.
+
+    Touch & Turn strategies ("opening_candle" in rules) have their own
+    separate scan (touch_turn_entry_scan, called alongside this one from
+    run_cycle) - a resting broker-side limit order that can fill anywhere
+    from the next tick to 90 minutes later, not an immediate market buy
+    the instant a signal passes like every strategy this function DOES
+    handle, so it's skipped here entirely rather than falling through to
+    the classic D1-D3/I1-I3 evaluator below, which would either error or
+    silently misread its unrelated rules."""
+    if "opening_candle" in rules:
+        return positions
     if not _within_entry_window(rules):
         return positions
 
@@ -1176,6 +1237,170 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
     return positions
 
 
+def touch_turn_entry_scan(account_id: int, mode: str, ib, rules: dict, env: dict, side: str):
+    """Touch & Turn's own entry scan - the counterpart to entry_scan
+    above, called alongside it from run_cycle for a strategy whose rules
+    carry an "opening_candle" key (see entry_scan's own docstring for why
+    that function skips these entirely). Unlike entry_scan, this doesn't
+    buy anything or return/mutate `positions` - it only ever PLACES a
+    resting limit order (see _place_touch_turn_limit); a fill is only
+    confirmed later, by check_pending_touch_turn_orders, which is what
+    actually creates the tracked position. db.has_pending_order_today
+    (checked via db.create_pending_order's own atomic INSERT OR IGNORE)
+    makes repeat calls across a single day's many 5-minute cycle ticks
+    harmless no-ops once a symbol's already had an attempt today,
+    regardless of that attempt's eventual outcome - this function has no
+    memory of its own between calls."""
+    if "opening_candle" not in rules:
+        return
+    if not db.is_bot_enabled(account_id, mode):
+        return
+
+    risk = mode_config.risk_params(env, account_id, mode)
+    if db.count_todays_entries(account_id, mode, side) >= risk["max_trades_per_day"]:
+        return
+
+    now_et = datetime.now(ET)
+    session_open_et = datetime.combine(now_et.date(), dt_time(9, 30), tzinfo=ET)
+    expiry_et = session_open_et + timedelta(minutes=rules["time_filter"]["entry_window_minutes"])
+    if now_et >= expiry_et:
+        return  # today's entry window has already closed - nothing new to attempt
+
+    watchlist = [row["symbol"] for row in db.get_watchlist(account_id, mode, direction=side, universe=_strategy_universe(rules))]
+    if not watchlist:
+        return
+
+    held_symbols = {p.contract.symbol for p in scoped_positions(ib) if p.position != 0}
+    held_symbols |= {p["symbol"] for p in db.get_open_positions(account_id, mode)}
+    placed_date = now_et.date().isoformat()
+
+    portfolio_value = risk["portfolio_value"]
+    max_risk_pct = risk["max_risk_pct"]
+    max_position_pct = rules["risk"]["max_position_size_pct_of_portfolio"] / 100
+    max_concurrent = rules["risk"]["max_concurrent_positions"]
+    # A resting order isn't a position yet, but it WILL become one the
+    # moment it fills - counting it against max_concurrent_positions
+    # alongside already-filled ones now (not just at fill time) keeps
+    # total exposure bounded even if several symbols' orders all happen
+    # to fill close together, which entry_scan's own held_symbols/
+    # side_positions check achieves the same way for its immediate-fill
+    # market orders.
+    side_open_count = sum(1 for p in db.get_open_positions(account_id, mode) if p.get("side", "long") == side)
+    side_pending_count = sum(1 for po in db.get_pending_orders(account_id, mode, "pending") if po["side"] == side)
+
+    for ticker in watchlist:
+        if side_open_count + side_pending_count >= max_concurrent:
+            break
+        if ticker in held_symbols:
+            continue
+        if db.has_pending_order_today(account_id, mode, ticker, placed_date):
+            continue
+
+        signal = _evaluate_touch_turn_entry(account_id, mode, ticker, rules, side)
+        if not signal.get("pass"):
+            continue
+
+        limit_price, initial_stop = signal["limit_price"], signal["initial_stop"]
+        r = abs(limit_price - initial_stop)
+        if r <= 0:
+            continue
+
+        risk_dollars = portfolio_value * (max_risk_pct / 100)
+        size_by_risk = math.floor(risk_dollars / r)
+        size_by_cap = math.floor(portfolio_value * max_position_pct / limit_price)
+        size = min(size_by_risk, size_by_cap)
+        if size < 1:
+            continue
+
+        inserted = db.create_pending_order(account_id, mode, {
+            "symbol": ticker, "placed_date": placed_date, "side": side,
+            "limit_price": limit_price, "target_price": signal["target_price"], "initial_stop": initial_stop,
+            "qty": size, "placed_at": now_et.isoformat(timespec="seconds"), "expires_at": expiry_et.isoformat(timespec="seconds"),
+        })
+        if not inserted:
+            continue  # another tick already claimed this symbol/day between the check above and here
+        side_pending_count += 1
+
+        try:
+            order_id = _place_touch_turn_limit(ib, ticker, size, limit_price, side, expiry_et)
+            db.set_pending_order_broker_id(account_id, mode, ticker, placed_date, order_id)
+            notify(
+                f"[{mode.upper()}] Touch&Turn order placed: {ticker}",
+                f"{side} limit @ ${limit_price:.2f}, target ${signal['target_price']:.2f}, stop ${initial_stop:.2f}, "
+                f"expires {expiry_et.strftime('%H:%M')} ET", "default",
+            )
+            log_decision(account_id, mode, {
+                "event": "touch_turn_order_placed", "symbol": ticker, "side": side,
+                "limit_price": limit_price, "target_price": signal["target_price"], "initial_stop": initial_stop, "qty": size,
+            })
+        except Exception as exc:  # noqa: BLE001 - one bad ticker must not kill the scan
+            db.resolve_pending_order(account_id, mode, ticker, placed_date, "cancelled")
+            log_decision(account_id, mode, {"event": "touch_turn_order_error", "symbol": ticker, "side": side, "error": str(exc)})
+
+
+def check_pending_touch_turn_orders(account_id: int, mode: str, ib, positions: list[dict]) -> list[dict]:
+    """Runs every cycle tick regardless of the bot's enabled flag (same
+    reasoning as check_stop_outs/manage_position - see run_cycle's Step
+    3/4) - a resting limit order can fill, or need cancelling, whether or
+    not new entries are currently paused.
+
+    Fill detection reads _broker_position, not an order-id/fill-price
+    lookup - Touch & Turn only ever has at most one attempt per symbol
+    per day (see touch_turn_entry_scan), so a newly-nonzero broker
+    position in that exact symbol unambiguously means THIS order filled.
+    On a fill, promotes it into a normal tracked position exactly like
+    entry_scan's own tail does (broker-side protective stop via
+    _place_stop, then db.upsert_position) - management_style:
+    "fixed_target_no_trail" (see the Touch & Turn presets) then handles
+    it identically to an ORB position from here on, via orb.
+    fixed_target_decision, which is fully generic (just target_price/
+    price/side) despite living in orb.py.
+
+    Cancelling (via _cancel_stop, which despite its name is generic - find
+    an order by id, cancel it) and marking 'expired' anything past its own
+    expires_at that hasn't filled is mostly a backstop for IBKR's own GTD
+    auto-cancel (see _place_touch_turn_limit) - not the primary mechanism,
+    but this bot shouldn't just trust a single point of failure for
+    something that leaves a resting order in the market."""
+    now_et = datetime.now(ET)
+    for po in db.get_pending_orders(account_id, mode, "pending"):
+        symbol, side = po["symbol"], po["side"]
+        broker_pos = _broker_position(ib, symbol)
+        if broker_pos is not None:
+            fill_qty, fill_price = abs(broker_pos["qty"]), broker_pos["avg_cost"]
+            stop_order_id = _place_stop(ib, symbol, fill_qty, po["initial_stop"], side)
+            new_position = {
+                "symbol": symbol, "side": side, "entry_price": fill_price,
+                "entry_time_iso": now_et.isoformat(timespec="seconds"), "qty": fill_qty,
+                "initial_stop": po["initial_stop"], "stop_price": po["initial_stop"],
+                "stop_order_id": stop_order_id, "state": "pre_breakeven", "r_multiple": 0.0,
+                "target_price": po["target_price"],
+            }
+            db.upsert_position(account_id, mode, new_position)
+            positions.append(new_position)
+            db.resolve_pending_order(account_id, mode, symbol, po["placed_date"], "filled")
+            notify(f"[{mode.upper()}] Touch&Turn FILLED: {symbol}", f"@ ${fill_price:.2f}, target ${po['target_price']:.2f}, stop ${po['initial_stop']:.2f}", "default")
+            log_decision(account_id, mode, {"event": "touch_turn_fill", "symbol": symbol, "side": side, "price": fill_price, "qty": fill_qty})
+            continue
+
+        expires_at = datetime.fromisoformat(po["expires_at"])
+        if now_et >= expires_at:
+            _cancel_pending_touch_turn_order(account_id, mode, ib, po, "expired")
+
+    return positions
+
+
+def _cancel_pending_touch_turn_order(account_id: int, mode: str, ib, po: dict, status: str):
+    """Shared by check_pending_touch_turn_orders' own expiry check and
+    run_cycle's "flatten everything now" path - _cancel_stop despite its
+    name is generic (find a broker order by id, cancel it), so it works
+    equally well on a resting entry limit order."""
+    if po.get("broker_order_id"):
+        _cancel_stop(ib, po["broker_order_id"])
+    db.resolve_pending_order(account_id, mode, po["symbol"], po["placed_date"], status)
+    log_decision(account_id, mode, {"event": f"touch_turn_{status}", "symbol": po["symbol"], "side": po["side"]})
+
+
 def _orb_watchlist_filters(detail: dict, rules: dict) -> dict:
     """Maps orb.evaluate_orb_entry's raw diagnostic detail (see its own
     docstring) into the same per-filter boolean shape the classic
@@ -1234,6 +1459,18 @@ def scan_watchlist_filters(account_id: int):
         rules = db.get_active_rules(account_id, side)
         if rules is None:
             continue
+        if "opening_candle" in rules:
+            # Touch & Turn doesn't fit this table's "continuously re-check
+            # every candidate" model at all - its own signal is evaluated
+            # ONCE right after the opening candle closes, and a pass
+            # places a resting order rather than something with a
+            # per-tick pass/fail to show (see cycle.touch_turn_entry_scan/
+            # src/touch_turn.py). Skipped here entirely rather than
+            # falling through to the classic evaluator below, which would
+            # either error or silently misread its unrelated rules -
+            # dedicated Watchlist UI support for this model is a known
+            # follow-up, not built yet.
+            continue
         is_orb = "opening_range" in rules
         for row in db.get_watchlist(account_id, "paper", direction=side, universe=_strategy_universe(rules)):
             if is_orb:
@@ -1277,10 +1514,15 @@ def run_cycle(account_id: int, mode: str):
 
         # Emergency "flatten everything now" request from the dashboard takes
         # priority over the normal cycle, but position management always runs
-        # first regardless of the enabled flag, per Step 3/4 below.
+        # first regardless of the enabled flag, per Step 3/4 below. Any
+        # Touch & Turn order still resting in the market gets cancelled too
+        # - force_close_all only ever knows about already-FILLED positions,
+        # so a pending, unfilled limit order needs its own cancellation here.
         if db.consume_flatten_request(account_id, mode):
             positions = check_stop_outs(account_id, mode, ib, positions)
             force_close_all(account_id, mode, ib, positions)
+            for po in db.get_pending_orders(account_id, mode, "pending"):
+                _cancel_pending_touch_turn_order(account_id, mode, ib, po, "cancelled")
             db.record_cycle_run(account_id, mode, "flattened_on_request")
             return "flattened_on_request"
 
@@ -1290,6 +1532,7 @@ def run_cycle(account_id: int, mode: str):
             manage_position(account_id, mode, ib, p, rules_by_side.get(p.get("side", "long")) or {"exit": _FALLBACK_EXIT_CFG})
             for p in positions
         ]  # Step 4
+        positions = check_pending_touch_turn_orders(account_id, mode, ib, positions)  # Step 4.5 - fills/expiry, always runs
 
         if status == "force_close":  # Step 6
             force_close_all(account_id, mode, ib, positions)
@@ -1303,8 +1546,10 @@ def run_cycle(account_id: int, mode: str):
         if db.is_bot_enabled(account_id, mode):  # Step 8 — each direction scans under its own active strategy
             if long_rules is not None:
                 positions = entry_scan(account_id, mode, ib, positions, long_rules, env, "long")
+                touch_turn_entry_scan(account_id, mode, ib, long_rules, env, "long")
             if short_rules is not None:
                 positions = entry_scan(account_id, mode, ib, positions, short_rules, env, "short")
+                touch_turn_entry_scan(account_id, mode, ib, short_rules, env, "short")
         else:
             log_decision(account_id, mode, {"event": "entries_paused", "reason": "bot_disabled"})
 
