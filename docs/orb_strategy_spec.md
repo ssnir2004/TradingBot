@@ -14,7 +14,8 @@ Conservative`): **ORB Long** ו-**ORB Short**, מראה-הפוכה זו של ז�
 
 1. סמן High/Low של נר ה-**15 דקות** הראשון מ-9:30 ET → זה ה-OR (Opening Range).
 2. חכה לסגירת נר **5 דקות** מעל ה-OR High (לונג) / מתחת ל-OR Low (שורט) — אישור.
-3. רד ל-**1 דקה** וחפש כניסה להמשך התנועה.
+3. חפש כניסה להמשך התנועה **על אותה מסגרת 5 דקות** (במקור בסרטון: ירידה ל-1 דקה לכניסה — הוחלף
+   בפשרה בגלל זמינות נתונים, ראה החלטות למטה).
 
 שני מודלים לכניסה: **Breakout** (עם gap/displacement) ו-**Retest** (המועדף על המרצה). Reversal
 הוסר מהיקף שלב 1 (ראה החלטות למטה) — אפשר להוסיף בעתיד כשלב נפרד.
@@ -24,13 +25,14 @@ Conservative`): **ORB Long** ו-**ORB Short**, מראה-הפוכה זו של ז�
 | נושא | החלטה |
 |---|---|
 | מודלי כניסה | **Breakout + Retest בלבד** — Reversal ירד מהיקף שלב 1 |
-| מסגרות זמן | OR על 15m, אישור על 5m, כניסה על 1m |
+| מסגרות זמן | OR על 15m, אישור **וגם כניסה** על 5m (לא 1m — ראה "נתוני 1m" למטה) |
 | מחיר מינימלי | $3 (כמו הבסיס הקיים) |
 | ATR% | מדרגות לפי מחיר, כמוצע למטה — **אושר** |
 | יקום | S&P 500 בלבד |
 | Market Cap | ≥ $1B |
 | RVOL | ≥ 2.0 |
 | חלון כניסות | 09:50–11:30 ET (שעתיים ראשונות) — **אושר** |
+| נתוני 1m | **אין** cache ל-1 דקה (התשתית בנויה על 5m בלבד) — הוחלט על **פשרה**: הכניסה בפועל תהיה על סגירת נר 5 דקות במקום 1 דקה כמו בסרטון המקורי, כדי להישאר תואמים לתשתית הקיימת בלי לבנות fetch/cache חדש |
 
 ## מדרגות ATR% (אושר)
 
@@ -56,7 +58,7 @@ Conservative`): **ORB Long** ו-**ORB Short**, מראה-הפוכה זו של ז�
   "opening_range": {
     "or_timeframe": "15m",
     "confirm_timeframe": "5m",
-    "entry_timeframe": "1m",
+    "entry_timeframe": "5m",
     "session": "new_york",
     "session_open_et": "09:30"
   },
@@ -83,14 +85,14 @@ Conservative`): **ORB Long** ו-**ORB Short**, מראה-הפוכה זו של ז�
     "breakout": {
       "enabled": true,
       "trigger": "5m_close_above_or_high",
-      "confirmation": "1m_bullish_displacement_gap",
+      "confirmation": "5m_bullish_displacement_gap",
       "stop_rule": "below_gap_candle_low",
       "target_rr": 2.0
     },
     "retest": {
       "enabled": true,
       "trigger": "5m_close_above_or_high",
-      "confirmation": "1m_retest_of_or_high_holds",
+      "confirmation": "5m_retest_of_or_high_holds",
       "stop_rule": "below_retest_swing_low",
       "target_rr": 2.0
     }
@@ -125,7 +127,7 @@ Conservative`): **ORB Long** ו-**ORB Short**, מראה-הפוכה זו של ז�
   "opening_range": {
     "or_timeframe": "15m",
     "confirm_timeframe": "5m",
-    "entry_timeframe": "1m",
+    "entry_timeframe": "5m",
     "session": "new_york",
     "session_open_et": "09:30"
   },
@@ -152,14 +154,14 @@ Conservative`): **ORB Long** ו-**ORB Short**, מראה-הפוכה זו של ז�
     "breakout": {
       "enabled": true,
       "trigger": "5m_close_below_or_low",
-      "confirmation": "1m_bearish_displacement_gap",
+      "confirmation": "5m_bearish_displacement_gap",
       "stop_rule": "above_gap_candle_high",
       "target_rr": 2.0
     },
     "retest": {
       "enabled": true,
       "trigger": "5m_close_below_or_low",
-      "confirmation": "1m_retest_of_or_low_holds",
+      "confirmation": "5m_retest_of_or_low_holds",
       "stop_rule": "above_retest_swing_high",
       "target_rr": 2.0
     }
@@ -189,23 +191,21 @@ Conservative`): **ORB Long** ו-**ORB Short**, מראה-הפוכה זו של ז�
 מנוע ה-filters הקיים ב-`cycle.py` (D1-D3 / I1-I3) בנוי סביב **מסגרת זמן אחת** (`trade_timeframe`)
 ובדיקת daily bias מהיום הקודם. ORB שונה מהותית:
 
-1. **Multi-timeframe אמיתי** — צריך לעקוב אחרי 3 מסגרות זמן במקביל (15m ל-OR, 5m לאישור, 1m
-   לכניסה) באותו יום מסחר, לא רק filter בודד על bar אחד. זה מנגנון חדש, לא הרחבה של D1-D3/I1-I3.
-2. **Displacement/gap detection** — זיהוי "bullish/bearish gap" בין נרות 1 דקה (המרצה קורא לזה
+1. **Multi-timeframe** — צריך לעקוב אחרי 2 מסגרות זמן במקביל (15m ל-OR, 5m לאישור+כניסה) באותו
+   יום מסחר, לא רק filter בודד על bar אחד. הודות לפשרה על 1m (ראה טבלת ההחלטות למעלה), כל הנתונים
+   הנדרשים כבר קיימים ב-cache הקיים (`BAR_SIZE = "5 mins"` ב-`fetch_backtest_data.py` /
+   `src/backtest_engine.py`) — 15m נבנה מצירוף שלושה נרות 5m, אין צורך בשום fetch/cache חדש. זה
+   עדיין מנגנון חדש (לא הרחבה ישירה של D1-D3/I1-I3), אבל בלי חסם נתונים.
+2. **Displacement/gap detection** — זיהוי "bullish/bearish gap" בין נרות 5 דקות (המרצה קורא לזה
    displacement) צריך היגיון חדש, לא קיים היום בקוד.
-3. **Retest detection** — זיהוי חזרה (pullback) לרמת ה-OR שנפרצה ואישור החזקה שלה.
+3. **Retest detection** — זיהוי חזרה (pullback) לרמת ה-OR שנפרצה ואישור החזקה שלה, על נרות 5 דקות.
 4. **RVOL + ATR% כבר קיימים בקוד** (`I3_rvol_min` וכו') — אלה ניתנים לשימוש חוזר. שדה `min_market_cap_usd`
    גם כבר קיים (בפריסט `Long Breakout NASDAQ Beta`). ATR% מדורג לפי מדרגת מחיר הוא שדה חדש.
 5. **מודל היציאה שונה מכל האסטרטגיות הקיימות** — קבוע R:R (target_rr) בלי breakeven/trailing,
    לעומת המנגנון הקיים (partial + breakeven + trailing stop). זה גם דורש קוד יציאה נפרד.
-6. **בעיית נתונים קריטית — אין נתוני 1 דקה בכלל.** בדקתי את `fetch_backtest_data.py` ו-
-   `src/backtest_engine.py`: שניהם קבועים על `BAR_SIZE = "5 mins"` — כל צינור הנתונים ההיסטוריים
-   (fetch + cache + backtest) בנוי מהיסוד סביב 5 דקות בלבד, ואין שום cache של נרות 1 דקה. ה-`entry_timeframe: "1m"`
-   במפרט לא ניתן ל-backtest כמו שהוא כתוב עכשיו בלי לבנות fetch/cache נפרד לנתוני 1 דקה (נפח
-   נתונים גדול פי 5, וקריאות API נפרדות מול IBKR). ה-OR עצמו (15m) וה-confirm (5m) כן ניתנים
-   לחישוב מה-cache הקיים היום. זו החלטה שצריך לקבל בשלב 2: להוסיף fetch/cache ל-1m, או להתפשר
-   ולהריץ את הכניסה בפועל על 5m (כלומר לוותר על הדיוק של "ירידה ל-1 דקה לכניסה" מהסרטון ולהיכנס
-   על סגירת נר 5 הדקות של האישור עצמו/הנר הבא אחריו).
+6. **פשרת 1m→5m משנה את דיוק הכניסה בפועל** — כניסה "על סגירת 5 דקות" תמיד תהיה מרוחקת יותר
+   מהרמה שנפרצה מאשר כניסה על 1 דקה (פחות דיוק, R:R בפועל מעט שונה מהמתוכנן). שווה לזכור את זה
+   כשמנתחים תוצאות backtest מול הציפיות מהסרטון המקורי.
 
 כשתאשר את המפרט (או תבקש שינויים במספרים/במודלים), אפשר לעבור לשלב 2: מימוש ב-`cycle.py` +
 backtest על נתונים היסטוריים לפני העלאה ל-paper/live.
