@@ -4,6 +4,7 @@ pandas
 numpy
 yfinance
 requests
+truststore
 APScheduler
 fastapi
 uvicorn[standard]
