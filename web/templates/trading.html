@@ -114,14 +114,13 @@
         <div id="broker-positions-error" class="text-danger small px-3"></div>
         <div class="card-body p-0">
           <table class="table table-sm mb-0">
-            <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Current</th><th data-bs-toggle="tooltip" title="שינוי ערך מאז סגירת אתמול">Daily P&amp;L</th><th>Unrealized P&amp;L</th><th data-bs-toggle="tooltip" data-bs-html="true" title="מחיר טרום-פתיחה (04:00-09:30 ET) או אפטר-מרקט (16:00-20:00 ET), אם קיים כרגע - ריק בשעות המסחר הרגילות.<br>הסכום ($) מחושב לפי (מחיר טרום/אפטר &minus; מחיר ייחוס) &times; כמות: ביחס לסגירת <u>אתמול</u> בטרום-פתיחה, וביחס לסגירת <u>היום</u> באפטר-מרקט.">Pre/Post</th><th data-bs-toggle="tooltip" data-bs-html="true" title="המחיר האחרון הידוע לכל אורך היממה - כמו LAST PRICE/CHNG באפליקציית IBKR - בניגוד ל-Pre/Post שמוצג רק בתוך חלונות הטרום/אפטר הספציפיים, כאן תמיד יש ערך (המחיר האחרון שנסחר, מכל שעה).<br>הסכום ($) מחושב לפי (מחיר אחרון &minus; סגירת אתמול) &times; כמות.">Last Price</th><th data-bs-toggle="tooltip" title="הזמנת Stop אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש. אפשר להוסיף Stop קבוע (+ Add) או Stop נגרר לפי ATR (+ ATR trail) שנגזר מ-IBKR ומנוהל אוטומטית על ידי הברוקר.">Stop</th><th data-bs-toggle="tooltip" title="הזמנת Limit (Take Profit) אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש">Take Profit</th><th>Close</th></tr></thead>
-            <tbody id="broker-positions-body"><tr><td colspan="11" class="text-center text-muted">Loading…</td></tr></tbody>
+            <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Current</th><th data-bs-toggle="tooltip" title="שינוי ערך מאז סגירת אתמול">Daily P&amp;L</th><th>Unrealized P&amp;L</th><th data-bs-toggle="tooltip" data-bs-html="true" title="המחיר האחרון הידוע לכל אורך היממה - כמו LAST PRICE/CHNG באפליקציית IBKR, תמיד ביחס לסגירת אתמול.<br>בשעות טרום-פתיחה/אפטר-מרקט מסומן בהתאם; באפטר-מרקט מוצגת גם שורה נוספת ביחס לסגירת <u>היום</u> (הנתון שהיה קודם בעמודת Pre/Post הנפרדת - שני מספרים זהים בטרום-פתיחה לא היו באמת שני נתונים, רק אותו נתון פעמיים).">Last Price</th><th data-bs-toggle="tooltip" title="הזמנת Stop אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש. אפשר להוסיף Stop קבוע (+ Add) או Stop נגרר לפי ATR (+ ATR trail) שנגזר מ-IBKR ומנוהל אוטומטית על ידי הברוקר - הכל ניתן לערוך כאן, בטבלה עצמה.">Stop</th><th data-bs-toggle="tooltip" title="הזמנת Limit (Take Profit) אמיתית שרובצת אצל הברוקר עבור המניה הזו, אם יש - ניתנת לעריכה כאן, בטבלה עצמה.">Take Profit</th><th>Close</th></tr></thead>
+            <tbody id="broker-positions-body"><tr><td colspan="10" class="text-center text-muted">Loading…</td></tr></tbody>
             <tfoot id="broker-positions-totals" class="d-none">
               <tr class="table-light fw-bold">
                 <td colspan="4" class="text-end">Total</td>
                 <td id="broker-positions-total-daily"></td>
                 <td id="broker-positions-total-unrealized"></td>
-                <td id="broker-positions-total-extended"></td>
                 <td id="broker-positions-total-lastprice"></td>
                 <td colspan="3"></td>
               </tr>
@@ -177,6 +176,16 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="/static/shared.js"></script>
 <script>
+// The single inline add-form currently open (at most one at a time,
+// across the whole table - opening a different one just replaces this)
+// - replaces the old +Add/+ATR trail flow's sequence of browser prompt()
+// popups with fields inside the row itself. Field values live here, not
+// just in the DOM, because refreshBrokerPositions() re-renders this
+// whole table every 5s (see POLL_MS/refreshAll in shared.js) - without
+// this, an in-progress edit would get silently wiped mid-keystroke by
+// the next poll.
+let openOrderForm = null;  // { symbol, orderType, price, atrMultiplier, atrPeriod, qty, confirm, error } | null
+
 function ordersCell(symbol, orders, orderType, remaining) {
   const label = orderType === "stop" ? "stop" : "take-profit";
   const rows = (orders || []).map(o => {
@@ -190,37 +199,75 @@ function ordersCell(symbol, orders, orderType, remaining) {
       <button class="btn btn-sm btn-outline-danger py-0 px-1 broker-order-cancel-btn" data-symbol="${symbol}" data-order-id="${o.order_id}" title="Cancel this ${label}">&times;</button>
     </div>`;
   }).join("");
-  const addBtn = `<button class="btn btn-sm btn-outline-secondary broker-order-add-btn" data-symbol="${symbol}" data-order-type="${orderType}" data-remaining="${remaining}" title="Add another ${label}">+ Add</button>`;
+
+  // A stop's own "+ Add"/"+ ATR trail" are two different orderType values
+  // (stop / atr_trailing_stop) that both live in the Stop column - either
+  // one open counts as "this stop cell has an open form".
+  const formOpenHere = openOrderForm && openOrderForm.symbol === symbol &&
+    (openOrderForm.orderType === orderType || (orderType === "stop" && openOrderForm.orderType === "atr_trailing_stop"));
+  if (formOpenHere) return rows + inlineOrderForm();
+
+  const addBtn = `<button class="btn btn-sm btn-outline-secondary broker-order-open-btn" data-symbol="${symbol}" data-order-type="${orderType}" data-remaining="${remaining}" title="Add another ${label}">+ Add</button>`;
   const atrBtn = orderType === "stop"
-    ? ` <button class="btn btn-sm btn-outline-secondary broker-order-add-btn" data-symbol="${symbol}" data-order-type="atr_trailing_stop" data-remaining="${remaining}" title="Add an ATR-based trailing stop">+ ATR trail</button>`
+    ? ` <button class="btn btn-sm btn-outline-secondary broker-order-open-btn" data-symbol="${symbol}" data-order-type="atr_trailing_stop" data-remaining="${remaining}" title="Add an ATR-based trailing stop">+ ATR trail</button>`
     : "";
   return rows + addBtn + atrBtn;
 }
 
-function extendedHoursCell(eh) {
-  if (!eh || !eh.session || eh.price === null || eh.price === undefined) return '<span class="text-muted">-</span>';
-  const label = eh.session === "pre" ? "Pre" : "Post";
-  const refLabel = eh.session === "pre" ? "vs yesterday's close" : "vs today's close";
-  const pctText = (eh.change_pct === null || eh.change_pct === undefined) ? "" : ` (${eh.change_pct >= 0 ? "+" : ""}${eh.change_pct.toFixed(2)}%)`;
-  const refText = (eh.ref_price === null || eh.ref_price === undefined) ? "" : ` ${refLabel} ${fmtMoney(eh.ref_price)}`;
-  // The $ figure (below) is qty/side-aware - already correct for a short
-  // (a price rise there is a loss). The raw price+% above it is the
-  // SYMBOL's own move, not the position's P&L, so it's shown muted/
-  // uncolored on purpose - coloring it by its own sign would repeat the
-  // exact bug this replaced (a short showing green on a price that's
-  // actually moving against it). The reference price is spelled out here
-  // too, since "which close is this measured against" isn't obvious from
-  // the % alone (pre-market uses yesterday's, after-hours uses today's).
-  return `${fmtPnl(eh.pnl)}<br><span class="small text-muted">${label}: ${fmtMoney(eh.price)}${pctText}${refText}</span>`;
+// Renders from openOrderForm's own state (see its declaration above),
+// never from fresh defaults - so a mid-typing re-render (the 5s poll,
+// or opening/closing a DIFFERENT row's form) never loses what's already
+// been typed here.
+function inlineOrderForm() {
+  const f = openOrderForm;
+  const isAtr = f.orderType === "atr_trailing_stop";
+  const priceFields = isAtr
+    ? `<input type="number" step="0.1" min="0.1" value="${f.atrMultiplier}" oninput="openOrderForm.atrMultiplier = this.value" class="form-control form-control-sm" placeholder="ATR &times;" style="width:64px" title="ATR multiplier">
+       <input type="number" step="1" min="2" value="${f.atrPeriod}" oninput="openOrderForm.atrPeriod = this.value" class="form-control form-control-sm" placeholder="Period" style="width:60px" title="ATR period">`
+    : `<input type="number" step="0.01" min="0.01" value="${f.price}" oninput="openOrderForm.price = this.value" class="form-control form-control-sm" placeholder="Price" style="width:75px" autofocus>`;
+  const liveConfirmField = currentMode === "live"
+    ? `<input type="text" value="${f.confirm}" oninput="openOrderForm.confirm = this.value" class="form-control form-control-sm" placeholder='type "${CLOSE_LIVE_CONFIRM_PHRASE}"' style="width:85px">`
+    : "";
+  const errorHtml = f.error ? `<div class="text-danger small w-100">${f.error}</div>` : "";
+  return `<div class="d-flex flex-wrap align-items-center gap-1 mt-1">
+    ${priceFields}
+    <input type="number" step="1" min="1" value="${f.qty}" oninput="openOrderForm.qty = this.value" class="form-control form-control-sm" placeholder="Qty" style="width:55px">
+    ${liveConfirmField}
+    <button class="btn btn-sm btn-success order-form-submit" title="Add">&check;</button>
+    <button class="btn btn-sm btn-outline-secondary order-form-cancel" title="Cancel">&times;</button>
+    ${errorHtml}
+  </div>`;
 }
 
-function lastPriceCell(lp) {
+// Replaces the old separate extendedHoursCell()+lastPriceCell() pair -
+// those two columns showed IDENTICAL numbers whenever currently in
+// pre-market (both measured against yesterday's close, off the same
+// live last-traded price), which read as duplicated data rather than
+// two real facts. lp (last_price_quote) is always-on and always vs
+// yesterday's close - that's now the only line shown by default, with
+// its own reference price spelled out inline (not just in a tooltip).
+// eh (extended_hours) only adds a second line when it has something
+// lastPriceCell doesn't already say: currently after-hours, the
+// reference is TODAY's close instead of yesterday's - a genuinely
+// different number, not a repeat. Pre-market gets just a badge, since
+// eh's own number there would be identical to lp's.
+function lastPriceCell(lp, eh) {
   if (!lp || lp.price === null || lp.price === undefined) return '<span class="text-muted">-</span>';
   const pctText = (lp.change_pct === null || lp.change_pct === undefined) ? "" : ` (${lp.change_pct >= 0 ? "+" : ""}${lp.change_pct.toFixed(2)}%)`;
-  // Same qty/side-aware $ figure vs muted raw-price convention as
-  // extendedHoursCell above, for the same reason - only always-on,
-  // 24/7 instead of pre/post-only.
-  return `${fmtPnl(lp.pnl)}<br><span class="small text-muted">${fmtMoney(lp.price)}${pctText}</span>`;
+  const refText = (lp.ref_price === null || lp.ref_price === undefined) ? "" : ` vs yesterday's close ${fmtMoney(lp.ref_price)}`;
+  const sessionTag = eh && eh.session === "pre" ? ' <span class="badge bg-light text-dark border">pre-market</span>'
+    : eh && eh.session === "post" ? ' <span class="badge bg-light text-dark border">after-hours</span>' : "";
+  let extra = "";
+  if (eh && eh.session === "post" && eh.price !== null && eh.price !== undefined && eh.ref_price !== null && eh.ref_price !== undefined) {
+    const ehPctText = (eh.change_pct === null || eh.change_pct === undefined) ? "" : ` (${eh.change_pct >= 0 ? "+" : ""}${eh.change_pct.toFixed(2)}%)`;
+    extra = `<br><span class="small text-muted">${fmtPnl(eh.pnl)}${ehPctText} vs today's close ${fmtMoney(eh.ref_price)}</span>`;
+  }
+  // The $ figure is qty/side-aware (already correct for a short - a price
+  // rise there is a loss); the raw price+% is the SYMBOL's own move, not
+  // the position's P&L, so it stays muted/uncolored on purpose - coloring
+  // it by its own sign would repeat the exact bug this convention avoids
+  // (a short showing green on a price that's actually moving against it).
+  return `${fmtPnl(lp.pnl)}${sessionTag}<br><span class="small text-muted">${fmtMoney(lp.price)}${pctText}${refText}</span>${extra}`;
 }
 
 function orderTypeBadge(orderType) {
@@ -329,14 +376,25 @@ document.getElementById("orders-body").addEventListener("click", async (e) => {
   }
 });
 
+// Split from renderBrokerPositions (below) so opening/closing/typing into
+// the inline order form (see openOrderForm) can re-render instantly from
+// the last-fetched data, without a network round-trip - and so the 5s
+// poll's fetch never has to guess whether a re-render is also needed.
+let lastBrokerPositions = [];
+
 async function refreshBrokerPositions() {
   const data = await modeApi("/api/broker_positions");
   document.getElementById("broker-positions-updated").textContent = data.updated_at || "not refreshed yet";
-  const rows = data.positions || [];
+  lastBrokerPositions = data.positions || [];
+  renderBrokerPositions();
+}
+
+function renderBrokerPositions() {
+  const rows = lastBrokerPositions;
   const body = document.getElementById("broker-positions-body");
   const totals = document.getElementById("broker-positions-totals");
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="11" class="text-center text-muted">No holdings</td></tr>';
+    body.innerHTML = '<tr><td colspan="10" class="text-center text-muted">No holdings</td></tr>';
     totals.classList.add("d-none");
     return;
   }
@@ -344,14 +402,13 @@ async function refreshBrokerPositions() {
     const full = Math.abs(p.qty);
     // Stop and take-profit allocate independently (a full stop plus a
     // full take-profit on the same shares is the normal bracket pattern),
-    // so each gets its own "not yet covered" default for the Add prompt.
+    // so each gets its own "not yet covered" default for the Add form.
     const stopRemaining = Math.max(0, full - (p.stop_orders || []).reduce((s, o) => s + o.qty, 0));
     const tpRemaining = Math.max(0, full - (p.take_profit_orders || []).reduce((s, o) => s + o.qty, 0));
     return `<tr>
       <td>${symbolLink(p.symbol)}</td><td>${p.qty}</td><td>${fmtMoney(p.avg_cost)}</td>
       <td>${fmtMoney(p.current_price)}</td><td>${fmtPnl(p.daily_pnl)}</td><td>${fmtPnl(p.unrealized_pnl)}</td>
-      <td>${extendedHoursCell(p.extended_hours)}</td>
-      <td>${lastPriceCell(p.last_price_quote)}</td>
+      <td>${lastPriceCell(p.last_price_quote, p.extended_hours)}</td>
       <td>${ordersCell(p.symbol, p.stop_orders, "stop", stopRemaining)}</td>
       <td>${ordersCell(p.symbol, p.take_profit_orders, "take_profit", tpRemaining)}</td>
       <td>
@@ -365,9 +422,6 @@ async function refreshBrokerPositions() {
 
   const sum = (key) => rows.reduce((s, p) => s + (p[key] !== null && p[key] !== undefined ? p[key] : 0), 0);
   const hasAny = (key) => rows.some(p => p[key] !== null && p[key] !== undefined);
-  const extendedPnls = rows.map(p => p.extended_hours && p.extended_hours.pnl).filter(v => v !== null && v !== undefined);
-  document.getElementById("broker-positions-total-extended").innerHTML =
-    extendedPnls.length ? fmtPnl(extendedPnls.reduce((s, v) => s + v, 0)) : "-";
   const lastPricePnls = rows.map(p => p.last_price_quote && p.last_price_quote.pnl).filter(v => v !== null && v !== undefined);
   document.getElementById("broker-positions-total-lastprice").innerHTML =
     lastPricePnls.length ? fmtPnl(lastPricePnls.reduce((s, v) => s + v, 0)) : "-";
@@ -377,59 +431,62 @@ async function refreshBrokerPositions() {
 }
 
 document.getElementById("broker-positions-body").addEventListener("click", async (e) => {
-  const addBtn = e.target.closest(".broker-order-add-btn");
-  if (addBtn) {
-    const symbol = addBtn.dataset.symbol;
-    const orderType = addBtn.dataset.orderType;
-    const remaining = addBtn.dataset.remaining;
-    const isAtrTrail = orderType === "atr_trailing_stop";
-    const label = orderType === "stop" ? "stop" : orderType === "take_profit" ? "take-profit" : "ATR trailing stop";
+  const openBtn = e.target.closest(".broker-order-open-btn");
+  if (openBtn) {
+    openOrderForm = {
+      symbol: openBtn.dataset.symbol, orderType: openBtn.dataset.orderType,
+      price: "", atrMultiplier: "2.0", atrPeriod: "14", qty: openBtn.dataset.remaining, confirm: "", error: "",
+    };
+    renderBrokerPositions();
+    return;
+  }
 
-    const payload = { order_type: orderType };
-    let confirmDetail;
-    if (isAtrTrail) {
-      const multTyped = prompt(`ATR multiplier for the trailing stop on ${symbol} (trail distance = ATR(14, 5-min bars) × multiplier):`, "2.0");
-      if (multTyped === null) return;
-      const atrMultiplier = Number(multTyped);
-      if (!Number.isFinite(atrMultiplier) || atrMultiplier <= 0) { alert("Enter a valid positive multiplier."); return; }
-      const periodTyped = prompt(`ATR period for ${symbol}:`, "14");
-      if (periodTyped === null) return;
-      const atrPeriod = parseInt(periodTyped, 10);
-      if (!Number.isFinite(atrPeriod) || atrPeriod < 2) { alert("Enter a valid ATR period (2 or more)."); return; }
+  const cancelFormBtn = e.target.closest(".order-form-cancel");
+  if (cancelFormBtn) {
+    openOrderForm = null;
+    renderBrokerPositions();
+    return;
+  }
+
+  const submitBtn = e.target.closest(".order-form-submit");
+  if (submitBtn) {
+    const f = openOrderForm;
+    const isAtr = f.orderType === "atr_trailing_stop";
+    const label = f.orderType === "stop" ? "stop" : f.orderType === "take_profit" ? "take-profit" : "ATR trailing stop";
+    f.error = "";
+
+    const payload = { order_type: f.orderType };
+    if (isAtr) {
+      const atrMultiplier = Number(f.atrMultiplier);
+      const atrPeriod = parseInt(f.atrPeriod, 10);
+      if (!Number.isFinite(atrMultiplier) || atrMultiplier <= 0) { f.error = "Enter a valid positive ATR multiplier."; renderBrokerPositions(); return; }
+      if (!Number.isFinite(atrPeriod) || atrPeriod < 2) { f.error = "Enter a valid ATR period (2 or more)."; renderBrokerPositions(); return; }
       payload.atr_multiplier = atrMultiplier;
       payload.atr_period = atrPeriod;
-      confirmDetail = `an ATR(${atrPeriod}) × ${atrMultiplier} trailing stop`;
     } else {
-      const priceTyped = prompt(`${label[0].toUpperCase()}${label.slice(1)} price for ${symbol}:`);
-      if (priceTyped === null) return;
-      const price = Number(priceTyped);
-      if (!Number.isFinite(price) || price <= 0) { alert("Enter a valid positive price."); return; }
+      const price = Number(f.price);
+      if (!Number.isFinite(price) || price <= 0) { f.error = `Enter a valid positive ${label} price.`; renderBrokerPositions(); return; }
       payload.price = price;
-      confirmDetail = `a new ${label} order @ $${price.toFixed(2)}`;
     }
-
-    const qtyTyped = prompt(`Quantity for this ${label} (${remaining} share(s) not yet covered by an existing stop/take-profit order):`, remaining);
-    if (qtyTyped === null) return;
-    const qty = parseInt(qtyTyped, 10);
-    if (!Number.isFinite(qty) || qty <= 0) { alert("Enter a valid positive quantity."); return; }
+    const qty = parseInt(f.qty, 10);
+    if (!Number.isFinite(qty) || qty <= 0) { f.error = "Enter a valid positive quantity."; renderBrokerPositions(); return; }
     payload.qty = qty;
 
     if (currentMode === "live") {
-      const confirmTyped = prompt(
-        `This adds ${confirmDetail} for ${qty} share(s) of ${symbol} in your LIVE account. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
-      );
-      if (confirmTyped !== CLOSE_LIVE_CONFIRM_PHRASE) return;
-      payload.confirm = confirmTyped;
+      if (f.confirm !== CLOSE_LIVE_CONFIRM_PHRASE) { f.error = `Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm this LIVE order.`; renderBrokerPositions(); return; }
+      payload.confirm = f.confirm;
     }
-    addBtn.disabled = true;
+    submitBtn.disabled = true;
     try {
-      await modeApi(`/api/broker_positions/${symbol}/order`, {
+      await modeApi(`/api/broker_positions/${f.symbol}/order`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
       });
+      openOrderForm = null;
       refreshAccountAndOrders();
     } catch (err) {
-      alert("Failed: " + err.message);
-      addBtn.disabled = false;
+      f.error = "Failed: " + err.message;
+      submitBtn.disabled = false;
+      renderBrokerPositions();
     }
     return;
   }
