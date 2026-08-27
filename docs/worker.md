@@ -45,6 +45,25 @@ backtest that requests a symbol or date range your local cache doesn't
 have will just come back with that symbol skipped ("no cached intraday
 bars") — same as it would on the server without the fetch.
 
+That rsync only covers *intraday* bars. Daily bars (SMA200/50, D1-D3) are
+fetched from yfinance directly by `backtest_engine.py` itself and cached
+separately, the first time each symbol is needed — on a cold cache, a
+few hundred symbols can take well past this dashboard's 15-minute
+"abandoned by worker" timeout to fetch, even with the built-in per-symbol
+timeout and worker pool, which can make a perfectly healthy worker look
+stuck on its first few jobs. Run this once (no job-timeout pressure
+attached) before relying on the worker for real:
+
+```bash
+python3 warm_daily_bars.py --universe ixic_large_beta_buy
+```
+
+(needs `data/universes/ixic_large_beta_buy.json` on this machine too —
+copy it from the server the same way as the bars cache above, or pass
+`--symbols-file` with a plain ticker list instead.) Already-cached
+symbols are skipped fast, so it's safe to re-run occasionally to pick up
+new additions to the universe.
+
 ## 3. Generate a worker token
 
 On the dashboard's Backtest page, under the **Remote Worker** card, type a
