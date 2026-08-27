@@ -1185,7 +1185,7 @@ def scan_watchlist_filters(account_id: int):
     needed. Mode-agnostic like morning_prefilter (paper and live share the
     same watchlist and market data), so this runs once and writes the same
     snapshot to both modes — see run_service.py, which schedules it from
-    the paper instance only. A side with no active strategy is skipped —
+    the live instance only. A side with no active strategy is skipped —
     there's no criteria to check its candidates against."""
     status = time_gate()
     if status in ("weekend", "too_early", "closed"):

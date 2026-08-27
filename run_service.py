@@ -8,7 +8,7 @@ the shared SQLite DB; it never talks to IBKR directly.
 
 The premarket prefilter scan and DB maintenance are mode-agnostic (the scan
 is market data, not account data, and writes both modes' watchlists in one
-pass — see morning_prefilter.py) so only the paper instance runs them, to
+pass — see morning_prefilter.py) so only the live instance runs them, to
 avoid doing the same yfinance scan twice in parallel.
 """
 import argparse
@@ -108,21 +108,21 @@ def main():
         next_run_time=datetime.now(ET),  # fire once immediately, then every 5 min
     )
 
-    if mode == "paper":
+    if mode == "live":
         # watchlist_filters reflects THIS account's own active strategy
         # rules against the shared candidate list, so every account's own
-        # paper instance runs it for itself.
+        # live instance runs it for itself.
         scheduler.add_job(
             lambda: _guarded(mode, "watchlist_filters", account_id, cycle.scan_watchlist_filters, account_id),
             IntervalTrigger(minutes=5),
             id="watchlist_filters", misfire_grace_time=60,
         )
 
-    if mode == "paper" and account_id == db.get_default_account_id():
+    if mode == "live" and account_id == db.get_default_account_id():
         # True shared/account-agnostic jobs — the gap scan is plain market
         # data (fanned out to every account's own watchlist by
         # morning_prefilter itself) and maintenance is account-agnostic
-        # housekeeping, so only the admin's paper instance runs these, not
+        # housekeeping, so only the admin's live instance runs these, not
         # every account's, to avoid re-scanning yfinance N times over.
         scheduler.add_job(
             lambda: _guarded(mode, "prefilter", account_id, morning_prefilter.run_scan,
