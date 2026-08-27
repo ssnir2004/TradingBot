@@ -1648,13 +1648,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (document.getElementById("bt-date-range")) {  // viewer - the New Backtest card isn't rendered at all
     dateRangePicker = flatpickr("#bt-date-range", {
       mode: "range", dateFormat: "d/m/Y", allowInput: false,
-      // Markets are closed Sat/Sun - no strategy ever has a session on
-      // one, so a weekend can't usefully anchor either end of a backtest
-      // range. Doesn't stop Fri->Mon still spanning a weekend in between
-      // (flatpickr only guards the two endpoints) - weekdaysInRange below
-      // is what actually strips those out when the range gets expanded
-      // into one backtest per day.
-      disable: [(d) => d.getDay() === 0 || d.getDay() === 6],
+      // Sat/Sun stay pickable as endpoints (e.g. "the last 2 weeks" often
+      // lands on one) - weekdaysInRange below is what actually strips
+      // them back out when the range gets expanded into one backtest per
+      // trading day, so nothing is ever run for a weekend either way.
     });
   }
   await loadStrategyPicker();
