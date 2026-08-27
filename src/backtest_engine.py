@@ -525,12 +525,20 @@ def simulate_orb_strategy(
         filters_from_bars - no daily_filters/D1-D3 at all, so daily bars
         only need to cover ATR's own lookback (_daily_as_of_light), not
         200 days for an SMA.
-      - exits are stop-or-fixed-target, not breakeven+trailing - no
+      - exits depend on exit.management_style: "fixed_target_no_trail"
+        (the original ORB Long/ORB Short) is stop-or-fixed-target, no
         position "state" machine, just a stop check and a target check
-        each tick (see orb.fixed_target_decision).
-      - filter_stats' condition keys are ORB's own three diagnostic flags
-        (or_formed/confirmed/volatility_ok) instead of D1-I3, but the
-        shape (an "evaluations" pass-rate per key) is the same convention.
+        each tick (see orb.fixed_target_decision). "staged_trail" (an
+        "improve ORB" v2 variant) instead reuses cycle._breakeven_
+        decision/_trailing_stop_decision - same pure functions
+        simulate_strategy above already shares with the live bot - gated
+        by exit.trailing_trigger_R before trailing starts, and trailing
+        off orb.low_of_last_n_bars/high_of_last_n_bars instead of a
+        swing-pivot detection.
+      - filter_stats' condition keys are ORB's own diagnostic flags
+        (or_formed/confirmed/volatility_ok/confluence_ok) instead of
+        D1-I3, but the shape (an "evaluations" pass-rate per key) is the
+        same convention.
 
     This is a deliberately separate function rather than a branch inside
     simulate_strategy - some setup code is duplicated (loading cached
@@ -544,6 +552,9 @@ def simulate_orb_strategy(
     force_close_time = _parse_force_close_time(strategy_rules)
     atr_period = strategy_rules["volatility_filters"].get("V2_atr_period", 14)
     min_daily_days = atr_period + 1
+    exit_cfg = strategy_rules["exit"]
+    management_style = exit_cfg.get("management_style", "fixed_target_no_trail")
+    trailing_trigger_r = exit_cfg.get("trailing_trigger_R", 3.0)
 
     daily_by_symbol: dict[str, pd.DataFrame] = {}
     intraday_by_symbol: dict[str, pd.DataFrame] = {}
@@ -573,8 +584,15 @@ def simulate_orb_strategy(
             daily_by_symbol[symbol] = daily
             intraday_by_symbol[symbol] = daily_candidates[symbol]
 
-    filter_stats = {"evaluations": 0, "insufficient_data": 0,
-                     "or_formed": 0, "confirmed": 0, "volatility_ok": 0}
+    # confluence_ok is only a real (non-trivial) filter for a strategy
+    # that actually configures entry_confluence (see orb.evaluate_orb_
+    # entry) - omitted here for a v1-style strategy so its filter_stats
+    # output stays identical to before (a filter that's always True isn't
+    # useful signal, just noise in the funnel).
+    has_confluence = "entry_confluence" in strategy_rules
+    filter_stats = {"evaluations": 0, "insufficient_data": 0, "or_formed": 0, "confirmed": 0, "volatility_ok": 0}
+    if has_confluence:
+        filter_stats["confluence_ok"] = 0
 
     if not intraday_by_symbol:
         return {"trades": [], "skipped_symbols": skipped, "filter_stats": filter_stats}
@@ -622,7 +640,7 @@ def simulate_orb_strategy(
                 open_positions.clear()
                 break
 
-            # --- Step 1: manage every currently open position (stop or fixed target, whichever hits first this bar) ---
+            # --- Step 1: manage every currently open position ---
             for symbol in list(open_positions.keys()):
                 intraday = intraday_by_symbol[symbol]
                 if bar_ts not in intraday.index:
@@ -630,26 +648,66 @@ def simulate_orb_strategy(
                 pos = open_positions[symbol]
                 this_bar = intraday.loc[[bar_ts]]
 
+                if management_style == "fixed_target_no_trail":
+                    # Stop or fixed target, whichever hits first this bar.
+                    stop_hit = _find_stop_out(this_bar, pos["stop_price"], side)
+                    target_hit = _find_target_out(this_bar, pos["target_price"], side)
+                    if stop_hit is not None or target_hit is not None:
+                        # Both are always the SAME timestamp when both fire (a
+                        # single-row `this_bar` slice - either hit's index is
+                        # just bar_ts) - OHLC bars alone can't say which one the
+                        # price actually touched first intrabar, so a same-bar
+                        # collision is resolved optimistically (target wins).
+                        # This is a simplification worth knowing about when
+                        # reading backtest results, not a bug.
+                        hit_target = target_hit is not None and (stop_hit is None or target_hit <= stop_hit)
+                        trade_id += 1
+                        trades.append({
+                            "id": trade_id, "symbol": symbol, "side": close_action,
+                            "fill_price": pos["target_price"] if hit_target else pos["stop_price"],
+                            "size": pos["qty"], "timestamp_iso": bar_ts.isoformat(),
+                            "exit_reason": "target" if hit_target else "stop_loss",
+                            "commission": commission_per_trade,
+                        })
+                        del open_positions[symbol]
+                    continue
+
+                # staged_trail: stop-out check first (against whatever
+                # stop_price currently is - initial, breakeven, or
+                # trailing), then breakeven-flip and gated-trailing, same
+                # pattern simulate_strategy's own D1-D3 loop already uses,
+                # just with orb's own trailing reference/gate.
                 stop_hit = _find_stop_out(this_bar, pos["stop_price"], side)
-                target_hit = _find_target_out(this_bar, pos["target_price"], side)
-                if stop_hit is not None or target_hit is not None:
-                    # Both are always the SAME timestamp when both fire (a
-                    # single-row `this_bar` slice - either hit's index is
-                    # just bar_ts) - OHLC bars alone can't say which one the
-                    # price actually touched first intrabar, so a same-bar
-                    # collision is resolved optimistically (target wins).
-                    # This is a simplification worth knowing about when
-                    # reading backtest results, not a bug.
-                    hit_target = target_hit is not None and (stop_hit is None or target_hit <= stop_hit)
+                if stop_hit is not None:
                     trade_id += 1
                     trades.append({
                         "id": trade_id, "symbol": symbol, "side": close_action,
-                        "fill_price": pos["target_price"] if hit_target else pos["stop_price"],
-                        "size": pos["qty"], "timestamp_iso": bar_ts.isoformat(),
-                        "exit_reason": "target" if hit_target else "stop_loss",
+                        "fill_price": pos["stop_price"], "size": pos["qty"],
+                        "timestamp_iso": bar_ts.isoformat(),
+                        "exit_reason": "stop_loss" if pos["state"] == "pre_breakeven" else "trailing_stop",
                         "commission": commission_per_trade,
                     })
                     del open_positions[symbol]
+                    continue
+
+                price = float(this_bar["Close"].iloc[0])
+                initial_risk = (pos["initial_stop"] - pos["entry_price"]) if side == "short" else (pos["entry_price"] - pos["initial_stop"])
+                r_multiple = ((pos["entry_price"] - price) if side == "short" else (price - pos["entry_price"])) / initial_risk if initial_risk > 0 else 0.0
+
+                if pos["state"] == "pre_breakeven":
+                    decision = cycle._breakeven_decision(pos, exit_cfg, r_multiple)
+                    if decision["action"] == "breakeven_flip":
+                        pos["stop_price"] = decision["new_stop_price"]
+                        pos["state"] = decision["new_state"]
+
+                if pos["state"].startswith("post_breakeven") and r_multiple >= trailing_trigger_r:
+                    recent_bars = intraday[intraday.index <= bar_ts].tail(2)
+                    candidate = (
+                        orb.low_of_last_n_bars(recent_bars, 2) if side == "long" else orb.high_of_last_n_bars(recent_bars, 2)
+                    )
+                    trail_decision = cycle._trailing_stop_decision(pos, candidate)
+                    if trail_decision["action"] == "trail_stop":
+                        pos["stop_price"] = trail_decision["new_stop_price"]
 
             # --- Step 2: scan for new entries across the whole universe ---
             if cycle._within_entry_window(strategy_rules, bar_ts.to_pydatetime()):
@@ -667,7 +725,21 @@ def simulate_orb_strategy(
                     today_bars_full = day_groups_by_symbol[symbol].get(day)
                     if today_bars_full is None:
                         continue
-                    intraday_slice = today_bars_full[today_bars_full.index <= bar_ts]
+                    if has_confluence:
+                        # entry_confluence's RSI/EMA need the CONTINUOUS
+                        # multi-day close series to have actually warmed up
+                        # (same "closes across session boundaries"
+                        # convention as cycle._compute_ema/_compute_rsi) -
+                        # a today-only slice (a handful of bars) starves
+                        # them of history and orb._trend_confluence_ok
+                        # would see them as insufficient every time (RSI/
+                        # EMA are correctly "False, not unknown" on too
+                        # little data - see its own docstring). RVOL is
+                        # unaffected either way since it always reads
+                        # prior_day_bars, never this param, when supplied.
+                        intraday_slice = intraday[intraday.index <= bar_ts]
+                    else:
+                        intraday_slice = today_bars_full[today_bars_full.index <= bar_ts]
                     detail = orb.evaluate_orb_entry(
                         daily_slice, intraday_slice, strategy_rules, side,
                         prior_day_bars=prior_day_bars_by_symbol[symbol],
@@ -676,7 +748,8 @@ def simulate_orb_strategy(
                         filter_stats["insufficient_data"] += 1
                         continue
                     filter_stats["evaluations"] += 1
-                    for cond in ("or_formed", "confirmed", "volatility_ok"):
+                    tracked_conditions = ("or_formed", "confirmed", "volatility_ok", "confluence_ok") if has_confluence else ("or_formed", "confirmed", "volatility_ok")
+                    for cond in tracked_conditions:
                         if detail.get(cond):
                             filter_stats[cond] += 1
                     if not detail.get("pass"):
@@ -709,8 +782,15 @@ def simulate_orb_strategy(
                         "model": detail.get("model"),
                     })
                     open_positions[symbol] = {
+                        # "side" is read internally by cycle._trailing_stop_
+                        # decision (pos.get("side", "long")) - without it, a
+                        # staged_trail ORB SHORT's trailing candidate would
+                        # silently be validated/compared as if it were a
+                        # long, defaulting wrong.
+                        "side": side,
                         "entry_price": price, "initial_stop": initial_stop,
                         "stop_price": initial_stop, "target_price": target_price, "qty": size,
+                        "state": "pre_breakeven",
                     }
                     entries_today += 1
 

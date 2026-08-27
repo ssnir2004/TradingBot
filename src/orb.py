@@ -119,6 +119,108 @@ def _compute_rvol(
     return today_volume_so_far / avg_volume if avg_volume else 0.0
 
 
+def _compute_rsi_series(closes: pd.Series, period: int) -> pd.Series:
+    """Wilder's RSI at every bar of `closes` - intentional near-duplicate
+    of cycle._compute_rsi_series (see this module's own docstring for why
+    it isn't imported instead)."""
+    delta = closes.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.mask(avg_loss == 0, 100.0)
+
+
+def _compute_ema_series(closes: pd.Series, period: int) -> pd.Series:
+    """Standard EMA at every bar of `closes` - intentional near-duplicate
+    of cycle._compute_ema (which only returns the latest value; this
+    module needs the recent trend, not just the current level, for the
+    "EMA rising" confluence check below)."""
+    return closes.ewm(span=period, adjust=False).mean()
+
+
+def _compute_vwap_series(today_bars: pd.DataFrame) -> pd.Series:
+    """Session VWAP (volume-weighted average price) at every bar of
+    `today_bars` - unlike RSI/EMA above, this resets every trading day by
+    construction (today_bars is already sliced to a single day), which is
+    the standard convention for an intraday VWAP: cumulative(typical
+    price * volume) / cumulative(volume) since the session open."""
+    typical_price = (today_bars["High"] + today_bars["Low"] + today_bars["Close"]) / 3
+    cum_vol = today_bars["Volume"].cumsum()
+    cum_pv = (typical_price * today_bars["Volume"]).cumsum()
+    return cum_pv / cum_vol.replace(0, pd.NA)
+
+
+def _rsi_trending(rsi_series: pd.Series, side: str, bars: int) -> bool:
+    """True if the last `bars` RSI values are strictly increasing (long)
+    or strictly decreasing (short) - e.g. bars=3 means rsi[t-2] < rsi[t-1]
+    < rsi[t] for a long. Requires `bars` non-NaN values at the tail;
+    returns False (not "unknown") when there isn't enough history yet -
+    an entry filter that can't be evaluated must not silently pass."""
+    if len(rsi_series) < bars:
+        return False
+    tail = rsi_series.iloc[-bars:]
+    if tail.isna().any():
+        return False
+    diffs = tail.diff().iloc[1:]  # bars-1 consecutive deltas
+    return bool((diffs > 0).all()) if side == "long" else bool((diffs < 0).all())
+
+
+def _trend_confluence_ok(intraday: pd.DataFrame, today_bars: pd.DataFrame, side: str, cfg: dict) -> bool:
+    """Two extra entry conditions layered on top of the opening-range
+    breakout/retest signal itself (see docs/orb_strategy_spec.md's
+    "improve ORB" follow-up): RSI must be trending in the trade's
+    direction over the last `rsi_rising_bars` bars, AND (EMA(ema_period)
+    is trending the same direction OR price is on the "right side" of
+    session VWAP - above it for a long, below it for a short). RSI/EMA
+    are computed on the full multi-day `intraday` closes (same
+    continues-across-session-boundaries convention as cycle._compute_ema/
+    _compute_rsi), VWAP on `today_bars` only (session-reset, see
+    _compute_vwap_series). Returns False (not "unknown") on insufficient
+    history - same reasoning as _rsi_trending."""
+    rsi_series = _compute_rsi_series(intraday["Close"], cfg.get("rsi_period", 14))
+    if not _rsi_trending(rsi_series, side, cfg.get("rsi_rising_bars", 3)):
+        return False
+
+    ema_series = _compute_ema_series(intraday["Close"], cfg.get("ema_period", 20))
+    if len(ema_series) < 2 or ema_series.iloc[-2:].isna().any():
+        ema_trending = False
+    else:
+        ema_trending = bool(ema_series.iloc[-1] > ema_series.iloc[-2]) if side == "long" else bool(ema_series.iloc[-1] < ema_series.iloc[-2])
+
+    vwap_series = _compute_vwap_series(today_bars)
+    current_vwap = vwap_series.iloc[-1] if not vwap_series.empty else None
+    current_price = float(today_bars["Close"].iloc[-1])
+    if current_vwap is None or pd.isna(current_vwap):
+        vwap_ok = False
+    else:
+        vwap_ok = (current_price > float(current_vwap)) if side == "long" else (current_price < float(current_vwap))
+
+    return bool(ema_trending or vwap_ok)
+
+
+def low_of_last_n_bars(bars: pd.DataFrame, n: int) -> float | None:
+    """The trailing-stop reference for a long once staged_trail's
+    trailing_trigger_R is reached (see cycle.manage_position's ORB
+    branch) - simply the lowest Low of the last `n` 5-minute bars, NOT a
+    swing-pivot detection like cycle._find_latest_swing_low (the user
+    explicitly asked for "low of two 5-minute candles", a plainer,
+    always-computable reference rather than waiting for a proper pivot
+    to form). None if there aren't `n` bars yet."""
+    if len(bars) < n:
+        return None
+    return float(bars["Low"].tail(n).min())
+
+
+def high_of_last_n_bars(bars: pd.DataFrame, n: int) -> float | None:
+    """Mirror of low_of_last_n_bars, for a short's trailing stop."""
+    if len(bars) < n:
+        return None
+    return float(bars["High"].tail(n).max())
+
+
 def evaluate_orb_entry(
     daily: pd.DataFrame, intraday: pd.DataFrame, rules: dict, side: str,
     prior_day_bars: dict | None = None,
@@ -143,9 +245,19 @@ def evaluate_orb_entry(
     stop (the gap candle's own low/high, or the retest bar's swing
     low/high), not one of INITIAL_STOP_RULES' generic session-extreme/
     ATR-multiple rules. Callers must read "initial_stop"/"target_price"
-    directly off this function's own result instead."""
+    directly off this function's own result instead.
+
+    An optional rules["entry_confluence"] block (RSI trend + EMA-trend-
+    or-VWAP, see _trend_confluence_ok) is an EXTRA gate on top of the
+    opening-range signal itself - a strategy without this key skips it
+    entirely (unchanged behavior for the original ORB Long/ORB Short
+    presets). "target_price" is None (not computed) whenever an entry
+    model's config omits target_rr - a staged_trail strategy (see
+    cycle.manage_position) has no fixed target at all, only a stop that
+    moves via breakeven/trailing."""
     vol_filters = rules["volatility_filters"]
     entry_models = rules["entry_models"]
+    confluence_cfg = rules.get("entry_confluence")
 
     if intraday.empty:
         return {"pass": False, "side": side, "error": "no intraday data"}
@@ -182,13 +294,20 @@ def evaluate_orb_entry(
     confirmed = not confirm_bars.empty
     confirm_ts = confirm_bars.index[0] if confirmed else None
 
+    # confluence_ok defaults to True (no-op) when a strategy's rules don't
+    # carry entry_confluence at all - the original ORB Long/ORB Short
+    # presets are unaffected; only a strategy that explicitly opts in
+    # (e.g. an "ORB Long v2") pays for/is gated by this extra check.
+    confluence_ok = _trend_confluence_ok(intraday, today_bars, side, confluence_cfg) if confluence_cfg else True
+
     detail = {
         "side": side, "price": current_price, "or_high": or_high, "or_low": or_low,
         "rvol": rvol, "atr_pct": atr_pct, "atr_tier_min": atr_tier_min,
         "or_formed": True, "confirmed": confirmed, "volatility_ok": volatility_ok,
+        "confluence_ok": confluence_ok,
     }
 
-    if not volatility_ok or not confirmed:
+    if not volatility_ok or not confirmed or not confluence_ok:
         return {"pass": False, **detail}
 
     # --- breakout: only exactly at the confirmation bar itself, and only
@@ -205,8 +324,8 @@ def evaluate_orb_entry(
                 stop = float(confirm_bar["Low"]) if side == "long" else float(confirm_bar["High"])
                 risk = (entry_price - stop) if side == "long" else (stop - entry_price)
                 if risk > 0:
-                    target_rr = entry_models["breakout"]["target_rr"]
-                    target = entry_price + target_rr * risk if side == "long" else entry_price - target_rr * risk
+                    target_rr = entry_models["breakout"].get("target_rr")
+                    target = (entry_price + target_rr * risk if side == "long" else entry_price - target_rr * risk) if target_rr is not None else None
                     return {"pass": True, "model": "breakout", "initial_stop": stop, "target_price": target,
                             **detail, "price": entry_price}
 
@@ -223,8 +342,8 @@ def evaluate_orb_entry(
             stop = float(bar["Low"]) if side == "long" else float(bar["High"])
             risk = (entry_price - stop) if side == "long" else (stop - entry_price)
             if risk > 0:
-                target_rr = entry_models["retest"]["target_rr"]
-                target = entry_price + target_rr * risk if side == "long" else entry_price - target_rr * risk
+                target_rr = entry_models["retest"].get("target_rr")
+                target = (entry_price + target_rr * risk if side == "long" else entry_price - target_rr * risk) if target_rr is not None else None
                 return {"pass": True, "model": "retest", "initial_stop": stop, "target_price": target,
                         **detail, "price": entry_price}
 

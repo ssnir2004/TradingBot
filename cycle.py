@@ -599,6 +599,46 @@ def manage_position(account_id: int, mode: str, ib, pos: dict, rules: dict) -> d
             db.upsert_position(account_id, mode, pos)
         return pos
 
+    if exit_cfg.get("management_style") == "staged_trail":
+        # ORB v2 positions: original stop stays untouched up to
+        # breakeven_trigger_R (2R by default), then flips to breakeven -
+        # same _breakeven_decision every other strategy already uses, no
+        # ORB-specific logic needed there. Trailing then only STARTS once
+        # r_multiple also clears trailing_trigger_R (3R by default) - an
+        # extra gate _trailing_stop_decision alone doesn't have - and
+        # trails below the low (long) / above the high (short) of the
+        # last 2 5-minute bars (orb.low_of_last_n_bars/high_of_last_n_bars),
+        # not a swing-pivot detection like the legacy strategies' own
+        # trailing (_find_latest_swing_low/high).
+        if pos["state"] == "pre_breakeven":
+            decision = _breakeven_decision(pos, exit_cfg, r_multiple)
+            if decision["action"] == "breakeven_flip":
+                _cancel_stop(ib, pos.get("stop_order_id"))
+                pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], decision["new_stop_price"], side)
+                pos["stop_price"] = decision["new_stop_price"]
+                pos["state"] = decision["new_state"]
+                notify(f"[{mode.upper()}] BE {pos['symbol']}", f"stop -> ${entry:.2f}", "default")
+                log_decision(account_id, mode, {"event": "breakeven_flip", "symbol": pos["symbol"], "side": side, "new_stop": entry})
+
+        trailing_trigger_r = exit_cfg.get("trailing_trigger_R", 3.0)
+        if pos["state"].startswith("post_breakeven") and r_multiple >= trailing_trigger_r:
+            bars = _get_5min_bars(pos["symbol"])
+            candidate = None
+            if bars is not None and len(bars) >= 2:
+                candidate = orb.low_of_last_n_bars(bars, 2) if side == "long" else orb.high_of_last_n_bars(bars, 2)
+            decision = _trailing_stop_decision(pos, candidate)
+            if decision["action"] == "trail_stop":
+                _cancel_stop(ib, pos.get("stop_order_id"))
+                pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], decision["new_stop_price"], side)
+                old_stop = pos.get("stop_price", pos["initial_stop"])
+                pos["stop_price"] = decision["new_stop_price"]
+                notify(f"[{mode.upper()}] TRAIL {pos['symbol']}", f"stop ${old_stop:.2f} -> ${decision['new_stop_price']:.2f}", "default")
+                log_decision(account_id, mode, {"event": "trail_stop", "symbol": pos["symbol"], "side": side, "old": old_stop, "new": decision["new_stop_price"]})
+
+        if pos["qty"] > 0:
+            db.upsert_position(account_id, mode, pos)
+        return pos
+
     if pos["state"] == "pre_breakeven":
         decision = _breakeven_decision(pos, exit_cfg, r_multiple)
         if decision["action"] == "breakeven_flip":

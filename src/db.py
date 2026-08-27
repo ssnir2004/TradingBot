@@ -871,6 +871,174 @@ EXTRA_STRATEGY_PRESETS = [
         "להפסד - מחיר המניה יכול לעלות ללא הגבלה, וה-stop עלול 'לקפוץ מעל' (gap) במקרה של short "
         "squeeze. אל תפעיל LIVE לפני בדיקה מקיפה.",
     ),
+    (
+        # v2 of ORB Long - a genuinely different variant (new entry
+        # confluence filters + a whole different exit mechanism), so this
+        # is a NEW preset rather than an in-place edit of "ORB Long
+        # (Opening Range Breakout)" above: overwriting that one's
+        # rules_json would silently mix its already-pooled fixed-target
+        # backtest history together with this staged-trail variant's
+        # future runs under the same strategy_id, corrupting both
+        # perf.strategy_report's pooling and analyze_strategy.py's
+        # diagnostics (same reasoning every other "aggressive"/"fade"
+        # variant preset above already follows).
+        #
+        # Two changes from v1:
+        # 1. entry_confluence (see orb._trend_confluence_ok): on top of
+        #    the opening-range breakout/retest signal itself, also
+        #    requires RSI(14) rising for the last 3 bars AND (EMA(20) on
+        #    5m rising OR price above session VWAP) - two independent
+        #    momentum/trend confirmations layered onto the ORB entry.
+        # 2. exit.management_style: "staged_trail" instead of
+        #    "fixed_target_no_trail" - no fixed R:R target at all
+        #    (entry_models omit target_rr on purpose). Original stop
+        #    stays untouched up to breakeven_trigger_R (2R), then flips
+        #    to breakeven; trailing only starts once trailing_trigger_R
+        #    (3R) is also cleared, trailing below the low of the last 2
+        #    5-minute bars (see cycle.manage_position's staged_trail
+        #    branch / orb.low_of_last_n_bars).
+        "ORB Long v2 (RSI/Trend Confluence, Staged Trail)",
+        {
+            "strategy_name": "ORB Long v2 (RSI/Trend Confluence, Staged Trail)",
+            "direction": "long_only",
+            "opening_range": {
+                "or_timeframe": "15m",
+                "confirm_timeframe": "5m",
+                "entry_timeframe": "5m",
+                "session": "new_york",
+                "session_open_et": "09:30",
+            },
+            "universe_filters": {
+                "index": "S&P 500",
+                "min_price_usd": 3.0,
+                "custom_universe": "sp500_marketcap_1b",
+            },
+            "volatility_filters": {
+                "V1_rvol_min": 2.0,
+                "V1_rvol_lookback_days": 14,
+                "V2_atr_period": 14,
+                "V2_atr_pct_tiers": [
+                    {"price_min": 3.0, "price_max": 20.0, "atr_pct_min": 4.0},
+                    {"price_min": 20.0, "price_max": 50.0, "atr_pct_min": 3.0},
+                    {"price_min": 50.0, "price_max": 100.0, "atr_pct_min": 2.0},
+                    {"price_min": 100.0, "price_max": None, "atr_pct_min": 1.5},
+                ],
+            },
+            "entry_confluence": {
+                "rsi_period": 14,
+                "rsi_rising_bars": 3,
+                "ema_period": 20,
+            },
+            "entry_models": {
+                "breakout": {"enabled": True},
+                "retest": {"enabled": True},
+            },
+            "time_filter": {"earliest_entry_et": "09:50", "latest_entry_et": "11:30", "force_close_et": "15:51"},
+            "exit": {
+                "management_style": "staged_trail",
+                "breakeven_trigger_R": 2.0,
+                "trailing_trigger_R": 3.0,
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+            },
+        },
+        "aggressive",
+        "long",
+        "## מה זה עושה\n"
+        "גרסה שנייה (v2) של ORB Long - שומרת על אותו מנגנון Opening Range Breakout (OR 15 דקות, "
+        "אישור 5 דקות, breakout/retest) אבל עם שני שינויים משמעותיים: פילטרים נוספים לפני כניסה, "
+        "ומנגנון יציאה שונה לגמרי. **נשמרת כאסטרטגיה נפרדת מ-ORB Long המקורית** (לא דריסה במקום) "
+        "כדי לא לערבב את היסטוריית הבקטסטים של שתיהן תחת אותה זהות.\n\n"
+        "## פילטר כניסה נוסף: RSI + מגמה\n"
+        "בנוסף לכל תנאי ה-ORB המקוריים (OR, אישור, RVOL+ATR%), נדרש גם: RSI(14) עולה על פני 3 נרות "
+        "רצופים אחרונים, **וגם** (EMA(20) על 5 דקות עולה **או** המחיר מעל ה-VWAP של היום). כל התנאים "
+        "האלה חייבים להתקיים באותו נר שבו נכנסים.\n\n"
+        "## יציאה: Staged Trail (במקום יעד קבוע)\n"
+        "אין יותר יעד R:R קבוע - הסטופ ההתחלתי נשאר קבוע עד 2R, ואז עובר ל-Breakeven. "
+        "כשמגיעים ל-3R, מתחיל טריילינג סטופ מתחת לשפל של שני הנרות האחרונים (5 דקות), ומתעדכן "
+        "כל עוד הוא משתפר. הפוזיציה יכולה לרוץ הרבה מעבר ל-2R אם המניה ממשיכה.\n\n"
+        "## יקום, פילטרי תנודתיות, חלון כניסות\n"
+        "זהה ל-ORB Long המקורית: S&P 500 עם Market Cap מעל $1B, מחיר מינימלי $3, RVOL מעל 2.0, "
+        "ATR% מדורג לפי מחיר, חלון כניסות 09:50-11:30 ET.\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive - אסטרטגיה חדשה לגמרי שלא נבדקה כלל (v1 המקורית לפחות עברה בקטסט "
+        "ראשוני - זו עוד לא). סיכון לעסקה: 1% | גודל פוזיציה מקס': 10% | פוזיציות בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "אין לזה שום היסטוריית בקטסט עדיין - כל אזהרות ORB Long המקורית תקפות כאן במלואן, "
+        "ובנוסף: הפילטרים הנוספים (RSI+EMA/VWAP) מצמצמים עוד יותר את מספר העסקאות הפוטנציאליות, "
+        "וה-Staged Trail טרם נבדק כלל מול הנתונים ההיסטוריים. הרץ בקטסט מקיף (שבועות-חודשים) לפני "
+        "כל שיקול נוסף.",
+    ),
+    (
+        # Exact mirror of ORB Long v2 - see its own comment above for the
+        # full explanation, not repeated here.
+        "ORB Short v2 (RSI/Trend Confluence, Staged Trail)",
+        {
+            "strategy_name": "ORB Short v2 (RSI/Trend Confluence, Staged Trail)",
+            "direction": "short_only",
+            "opening_range": {
+                "or_timeframe": "15m",
+                "confirm_timeframe": "5m",
+                "entry_timeframe": "5m",
+                "session": "new_york",
+                "session_open_et": "09:30",
+            },
+            "universe_filters": {
+                "index": "S&P 500",
+                "min_price_usd": 3.0,
+                "custom_universe": "sp500_marketcap_1b",
+            },
+            "volatility_filters": {
+                "V1_rvol_min": 2.0,
+                "V1_rvol_lookback_days": 14,
+                "V2_atr_period": 14,
+                "V2_atr_pct_tiers": [
+                    {"price_min": 3.0, "price_max": 20.0, "atr_pct_min": 4.0},
+                    {"price_min": 20.0, "price_max": 50.0, "atr_pct_min": 3.0},
+                    {"price_min": 50.0, "price_max": 100.0, "atr_pct_min": 2.0},
+                    {"price_min": 100.0, "price_max": None, "atr_pct_min": 1.5},
+                ],
+            },
+            "entry_confluence": {
+                "rsi_period": 14,
+                "rsi_rising_bars": 3,
+                "ema_period": 20,
+            },
+            "entry_models": {
+                "breakout": {"enabled": True},
+                "retest": {"enabled": True},
+            },
+            "time_filter": {"earliest_entry_et": "09:50", "latest_entry_et": "11:30", "force_close_et": "15:51"},
+            "exit": {
+                "management_style": "staged_trail",
+                "breakeven_trigger_R": 2.0,
+                "trailing_trigger_R": 3.0,
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+            },
+        },
+        "aggressive",
+        "short",
+        "## מה זה עושה\n"
+        "מראה הפוכה מדויקת של ORB Long v2 - ראו את התיאור המלא שם. כאן: RSI(14) יורד על פני 3 "
+        "נרות רצופים, וגם (EMA(20) יורד או המחיר מתחת ל-VWAP). סטופ קבוע עד 2R, Breakeven ב-2R, "
+        "טריילינג מ-3R מעל השיא של שני הנרות האחרונים.\n\n"
+        "## יקום, פילטרים, חלון כניסות\n"
+        "זהה לחלוטין ל-ORB Short המקורית ול-ORB Long v2.\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive - אסטרטגיה חדשה לגמרי שלא נבדקה כלל. סיכון לעסקה: 1% | גודל פוזיציה "
+        "מקס': 10% | פוזיציות בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "כל אזהרות ORB Long v2 תקפות כאן, ובנוסף: בפוזיציית Short אין תקרה תיאורטית להפסד - מחיר "
+        "המניה יכול לעלות ללא הגבלה, וה-stop עלול 'לקפוץ מעל' (gap) במקרה של short squeeze. "
+        "אל תפעיל LIVE לפני בדיקה מקיפה.",
+    ),
 ]
 
 
