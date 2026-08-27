@@ -1395,6 +1395,31 @@ async def api_unarchive_backtests(request: Request, account_id: int = Depends(re
     return {"restored": count}
 
 
+# Registered ahead of /api/backtests/{backtest_id}/cancel for the same
+# registration-order reason as archive/unarchive above (a fixed path must
+# come before a path-parameter one it could otherwise collide with).
+@app.post("/api/backtests/cancel")
+async def api_cancel_backtests(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    body = await request.json()
+    backtest_ids = body.get("backtest_ids") or []
+    if not backtest_ids:
+        raise HTTPException(status_code=400, detail="backtest_ids is required")
+    count = db.cancel_backtests(account_id, backtest_ids)
+    _log_account_action(account_id, user, action="cancel_backtests", backtest_ids=backtest_ids)
+    return {"cancelled": count}
+
+
+@app.post("/api/backtests/delete")
+async def api_delete_backtests(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    body = await request.json()
+    backtest_ids = body.get("backtest_ids") or []
+    if not backtest_ids:
+        raise HTTPException(status_code=400, detail="backtest_ids is required")
+    count = db.delete_backtests(account_id, backtest_ids)
+    _log_account_action(account_id, user, action="delete_backtests", backtest_ids=backtest_ids)
+    return {"deleted": count}
+
+
 # ----------------------------------------------------- backtest data fetch ---
 # "Update backtest data" button on the Backtest page - refreshes the local
 # intraday-bars cache from IBKR (see fetch_backtest_data.py). Spawned the

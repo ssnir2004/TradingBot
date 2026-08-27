@@ -282,7 +282,9 @@
       {% if not is_viewer %}
       <div id="bt-history-bulk-bar" class="d-none">
         <span id="bt-history-selected-count" class="small text-muted me-2"></span>
+        <button class="btn btn-sm btn-outline-warning" onclick="cancelSelectedHistory()">Cancel selected</button>
         <button class="btn btn-sm btn-outline-secondary" onclick="archiveSelectedHistory()">Archive selected</button>
+        <button class="btn btn-sm btn-outline-danger" onclick="deleteSelectedHistory()">Delete selected</button>
       </div>
       {% endif %}
     </div>
@@ -1201,6 +1203,49 @@ async function archiveSelectedHistory() {
   refreshCalendar();
   refreshStrategyReport();
   if (archiveLoaded) refreshArchive();
+}
+
+// Only touches rows actually still pending/running (see db.cancel_backtests) -
+// an already-finished run in the same selection is silently left alone.
+async function cancelSelectedHistory() {
+  const ids = Array.from(selectedHistoryIds);
+  if (!ids.length) return;
+  if (!confirm(`Cancel ${ids.length} backtest(s)? Any still running lose their progress immediately - already-finished ones in the selection are left alone.`)) return;
+  try {
+    await api("/api/backtests/cancel", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ backtest_ids: ids }),
+    });
+  } catch (e) {
+    alert("Could not cancel: " + e.message);
+    return;
+  }
+  selectedHistoryIds.clear();
+  refreshHistory();
+}
+
+// Skips any row still pending/running (see db.delete_backtests) rather than
+// abandoning its subprocess - cancel it first (cancelSelectedHistory above)
+// if it needs to go away right now.
+async function deleteSelectedHistory() {
+  const ids = Array.from(selectedHistoryIds);
+  if (!ids.length) return;
+  if (!confirm(`Delete ${ids.length} backtest(s)? This can't be undone. Any still running in the selection are skipped - cancel them first.`)) return;
+  try {
+    await api("/api/backtests/delete", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ backtest_ids: ids }),
+    });
+  } catch (e) {
+    alert("Could not delete: " + e.message);
+    return;
+  }
+  ids.forEach(id => { expandedBacktestIds.delete(id); delete expandedDetailCache[id]; });
+  if (ids.includes(currentBacktestId)) hideResults();
+  selectedHistoryIds.clear();
+  refreshHistory();
+  refreshCalendar();
+  refreshStrategyReport();
 }
 
 // Self-perpetuating poll while any row is pending/running - without this,
