@@ -1292,16 +1292,28 @@ async function refreshHistory() {
   }
 }
 
+// expandedBacktestIds/expandedDetailCache are shared by History AND
+// Archive (an id means the same row's detail is expanded regardless of
+// which table it's showing in) - re-rendering both here, not just
+// History, is what lets an Archive row expand in place too instead of
+// only ever affecting a table it isn't even displayed in. renderArchive
+// is skipped when the Archive card has never been opened (archiveLoaded
+// false), same guard archiveSelectedHistory already uses.
+function renderExpandableTables() {
+  renderHistoryTable();
+  if (archiveLoaded) renderArchive();
+}
+
 async function toggleBacktestExpand(id) {
   if (expandedBacktestIds.has(id)) {
     expandedBacktestIds.delete(id);
-    renderHistoryTable();
+    renderExpandableTables();
     return;
   }
   expandedBacktestIds.add(id);
-  renderHistoryTable();  // immediate feedback ("Loading…") while the detail fetch is in flight
+  renderExpandableTables();  // immediate feedback ("Loading…") while the detail fetch is in flight
   if (!expandedDetailCache[id]) await refreshExpandedDetail(id);
-  else renderHistoryTable();
+  else renderExpandableTables();
 }
 
 // Re-fetches one expanded row's detail (a no-op render if that row isn't
@@ -1316,7 +1328,7 @@ async function refreshExpandedDetail(id) {
   } catch (e) {
     expandedDetailCache[id] = { status: "failed", error: "Could not load: " + e.message };
   }
-  renderHistoryTable();
+  renderExpandableTables();
 }
 
 async function deleteBacktest(id) {
@@ -1553,6 +1565,11 @@ async function refreshArchive() {
   renderArchive();
 }
 
+// Same columns/row shape as renderHistoryTable (Days, Portfolio value,
+// Result, Created, Duration, click-to-expand full results via the shared
+// expandedBacktestIds/expandedDetailCache) plus the two things that only
+// make sense here: the Archived timestamp and a Restore button instead
+// of History's Cancel/Retry/Delete actions.
 function renderArchive() {
   const body = document.getElementById("archive-body");
   if (!archivedRows.length) { body.innerHTML = '<p class="small text-muted mb-0 p-3">Nothing archived.</p>'; renderArchiveBulkBar(); return; }
@@ -1562,7 +1579,7 @@ function renderArchive() {
     if (!byFolder.has(folder)) byFolder.set(folder, []);
     byFolder.get(folder).push(r);
   }
-  const colspan = IS_VIEWER ? 7 : 8;
+  const colspan = IS_VIEWER ? 10 : 12;
   const groupsHtml = Array.from(byFolder.entries()).map(([folder, rows]) => {
     const ids = rows.map(r => r.id);
     const allSelected = !IS_VIEWER && ids.every(id => selectedArchiveIds.has(id));
@@ -1572,23 +1589,41 @@ function renderArchive() {
         if (!s) return `#${sid}`;
         return s.key ? `${s.key} (${s.name})` : s.name;
       }).join(", ");
-      const checkboxCell = IS_VIEWER ? "" : `<td><input type="checkbox" ${selectedArchiveIds.has(r.id) ? "checked" : ""} onchange="toggleArchiveSelect(${r.id}, this.checked)"></td>`;
-      const restoreBtn = IS_VIEWER ? "" : `<button class="btn btn-sm btn-outline-secondary" onclick="restoreOneArchived(${r.id})">Restore</button>`;
-      return `<tr>
+      const badgeClass = r.status === "done" ? "bg-success" : r.status === "failed" ? "bg-danger" : "bg-secondary";
+      const duration = fmtDuration(r.claimed_at || r.created_at, r.finished_at);
+      const resultCell = r.total_pnl_usd == null
+        ? '<span class="text-muted small">-</span>'
+        : `<span class="badge ${r.total_pnl_usd > 0 ? "bg-success" : r.total_pnl_usd < 0 ? "bg-danger" : "bg-secondary"}">${fmtMoney(r.total_pnl_usd)}</span>`;
+      const days = daysTested(r.params.start_date, r.params.end_date);
+      const portfolioValue = r.params.portfolio_value;
+      const expanded = expandedBacktestIds.has(r.id);
+      const checkboxCell = IS_VIEWER ? "" : `<td onclick="event.stopPropagation()"><input type="checkbox" ${selectedArchiveIds.has(r.id) ? "checked" : ""} onchange="toggleArchiveSelect(${r.id}, this.checked)"></td>`;
+      const restoreBtn = IS_VIEWER ? "" : `<button class="btn btn-sm btn-outline-secondary" onclick="event.stopPropagation(); restoreOneArchived(${r.id})">Restore</button>`;
+      let rowHtml = `<tr style="cursor:pointer" onclick="toggleBacktestExpand(${r.id})">
         ${checkboxCell}
-        <td>${r.id}</td>
+        <td>${expanded ? "▾" : "▸"} ${r.id}</td>
         <td class="small">${names}</td>
         <td class="small mono">${r.params.start_date} → ${r.params.end_date}</td>
-        <td><span class="badge ${r.status === "done" ? "bg-success" : r.status === "failed" ? "bg-danger" : "bg-secondary"}">${r.status}</span></td>
+        <td class="small mono">${days == null ? "-" : days}</td>
+        <td class="small mono">${portfolioValue == null ? "-" : `$${Number(portfolioValue).toLocaleString()}`}</td>
+        <td><span class="badge ${badgeClass}">${r.status}</span></td>
+        <td>${resultCell}</td>
+        <td class="small">${fmtDateTimeET(r.created_at)}</td>
+        <td class="small">${duration || "-"}</td>
         <td class="small">${fmtDateTimeET(r.archived_at)}</td>
-        <td>${restoreBtn}</td>
+        <td onclick="event.stopPropagation()">${restoreBtn}</td>
       </tr>`;
+      if (expanded) {
+        const detail = expandedDetailCache[r.id];
+        rowHtml += `<tr><td colspan="${colspan}" class="bg-body-tertiary">${detail ? renderResultsBody(detail) : '<p class="text-muted small mb-0">Loading…</p>'}</td></tr>`;
+      }
+      return rowHtml;
     }).join("");
     const selectAllCell = IS_VIEWER ? "" : `<th><input type="checkbox" ${allSelected ? "checked" : ""} onchange="toggleSelectAllArchiveFolder('${folder.replace(/'/g, "\\'")}', this.checked)"></th>`;
     return `<div class="mb-3">
       <div class="small fw-bold px-3 pt-2">${folder} <span class="text-muted fw-normal">(${rows.length})</span></div>
       <table class="table table-sm mb-0">
-        <thead><tr>${selectAllCell}<th>#</th><th>Strategies</th><th>Range</th><th>Status</th><th>Archived</th><th></th></tr></thead>
+        <thead><tr>${selectAllCell}<th>#</th><th>Strategies</th><th>Range</th><th>Days</th><th>Portfolio value ($)</th><th>Status</th><th>Result</th><th>Created</th><th>Duration</th><th>Archived</th><th></th></tr></thead>
         <tbody>${rowsHtml}</tbody>
       </table>
     </div>`;
