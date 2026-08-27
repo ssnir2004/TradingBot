@@ -31,9 +31,20 @@ import traceback
 from pathlib import Path
 
 import requests
+import truststore
 from dotenv import load_dotenv
 
 from src import backtest_runner
+
+# Windows security/AV software often does HTTPS inspection: it re-signs
+# outbound TLS with a locally-installed root CA that Windows (and Chrome)
+# trusts, but Python's bundled certifi CA list does not - so every request
+# here fails with "self-signed certificate in certificate chain" even
+# though the same URL loads fine in a browser on this exact machine.
+# Routing verification through the OS trust store instead (which already
+# trusts that CA, same as Chrome does) fixes it without ever disabling
+# verification.
+truststore.inject_into_ssl()
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_POLL_INTERVAL_SECONDS = 10
