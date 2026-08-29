@@ -41,6 +41,7 @@ breakout model (retest has no such single-bar timing requirement).
 """
 from datetime import time as dt_time
 
+import numpy as np
 import pandas as pd
 
 SESSION_OPEN_TIME = dt_time(9, 30)
@@ -94,26 +95,64 @@ def _compute_atr(daily: pd.DataFrame, period: int) -> float | None:
     return float(value) if pd.notna(value) else None
 
 
+def _time_to_seconds(t: dt_time) -> int:
+    return t.hour * 3600 + t.minute * 60 + t.second
+
+
+def _build_rvol_cumvol(prior_dates: list, source: dict) -> dict:
+    """Once per (symbol, day): for each of the `lookback` prior trading
+    days, a (sorted times-in-seconds array, cumulative volume array) pair
+    - lets every later call THIS SAME day look up "volume accumulated by
+    this time" via a cheap searchsorted instead of re-filtering and
+    re-summing that day's raw bars from scratch on every single tick (see
+    _compute_rvol's own rvol_cache docstring)."""
+    cumvol = {}
+    for d in prior_dates:
+        day_bars = source[d].sort_index()
+        times = np.array([_time_to_seconds(t) for t in day_bars.index.time])
+        cum = day_bars["Volume"].to_numpy(dtype=float).cumsum()
+        cumvol[d] = (times, cum)
+    return cumvol
+
+
 def _compute_rvol(
     today_bars: pd.DataFrame, intraday: pd.DataFrame, as_of_date, as_of_time, lookback: int,
-    prior_day_bars: dict | None = None,
+    prior_day_bars: dict | None = None, rvol_cache: dict | None = None,
 ) -> float:
     """Today's volume-so-far against the average volume accumulated by
     this same time-of-day over the past `lookback` trading days -
     intentional near-duplicate of cycle._evaluate_filters_from_bars' I3
-    logic (same reasoning as _compute_atr above)."""
-    if prior_day_bars is not None:
-        prior_dates = sorted(prior_day_bars.keys())[-lookback:]
-        prior_volume_by_this_time = [
-            float(prior_day_bars[d][prior_day_bars[d].index.time <= as_of_time]["Volume"].sum())
-            for d in prior_dates
-        ]
-    else:
-        prior_dates = sorted({d for d in intraday.index.date if d < as_of_date})[-lookback:]
-        prior_volume_by_this_time = [
-            float(intraday[(intraday.index.date == d) & (intraday.index.time <= as_of_time)]["Volume"].sum())
-            for d in prior_dates
-        ]
+    logic (same reasoning as _compute_atr above).
+
+    rvol_cache is the same purely-optional performance hook as
+    evaluate_orb_entry's own daily_derived_cache (in fact the caller
+    passes that exact same dict, under key "rvol_cumvol") - unlike ATR,
+    RVOL genuinely changes every tick (today_volume_so_far grows through
+    the day), so the RESULT can't just be cached; what's constant across
+    a whole (symbol, day) is the SET of `lookback` prior trading days and
+    their own bars, which used to get re-filtered and re-summed from
+    scratch on every single tick for no reason. This precomputes each
+    prior day's cumulative-volume-by-time-of-day ONCE and looks it up via
+    searchsorted afterwards - same "sum of volume at or before as_of_time"
+    result, computed once instead of once per tick (investigated in this
+    same conversation, the same class of waste as the ATR fix just
+    above, found while looking for further backtest speedups)."""
+    cache = rvol_cache if rvol_cache is not None else {}
+    if "rvol_cumvol" not in cache:
+        if prior_day_bars is not None:
+            prior_dates = sorted(prior_day_bars.keys())[-lookback:]
+            source = prior_day_bars
+        else:
+            prior_dates = sorted({d for d in intraday.index.date if d < as_of_date})[-lookback:]
+            source = {d: intraday[intraday.index.date == d] for d in prior_dates}
+        cache["rvol_cumvol"] = _build_rvol_cumvol(prior_dates, source)
+
+    as_of_secs = _time_to_seconds(as_of_time)
+    prior_volume_by_this_time = []
+    for times, cum in cache["rvol_cumvol"].values():
+        idx = np.searchsorted(times, as_of_secs, side="right") - 1
+        prior_volume_by_this_time.append(float(cum[idx]) if idx >= 0 else 0.0)
+
     avg_volume = (sum(prior_volume_by_this_time) / len(prior_volume_by_this_time)) if prior_volume_by_this_time else 0.0
     today_volume_so_far = float(today_bars["Volume"].sum())
     return today_volume_so_far / avg_volume if avg_volume else 0.0
@@ -309,15 +348,19 @@ def evaluate_orb_entry(
 
     daily_derived_cache is the same purely-optional performance hook as
     cycle._evaluate_filters_from_bars' own param of the same name: a dict
-    this function memoizes ATR into, keyed "atr" - safe because ATR
-    depends only on `daily`, never on `intraday`/the tick being evaluated.
-    The live path (one call per real tick, nothing passed) computes it
-    fresh every time same as always; backtest_engine.py passes the SAME
-    dict back in across every simulated tick of one (symbol, day), so the
-    identical `daily` slice only gets EWM'd once instead of once per bar
-    (investigated in this same conversation - a full-universe ORB v2
-    backtest was recomputing an unchanging ATR value up to ~80 times a
-    day per symbol for nothing)."""
+    this function memoizes into, keyed "atr" (see _compute_atr - the
+    value itself, since it depends only on `daily`, never the tick) and
+    "rvol_cumvol" (see _compute_rvol's own rvol_cache docstring - the
+    lookback window's per-day cumulative-volume-by-time, not the RVOL
+    result itself, which genuinely changes every tick). The live path
+    (one call per real tick, nothing passed) computes both fresh every
+    time same as always; backtest_engine.py passes the SAME dict back in
+    across every simulated tick of one (symbol, day), so the identical
+    `daily` slice only gets EWM'd once instead of once per bar, and each
+    prior day's bars only get summed once instead of re-filtered on every
+    tick (investigated in this same conversation - a full-universe ORB v2
+    backtest was redoing both up to ~80 times a day per symbol for
+    nothing)."""
     signal_side = signal_side or side
     vol_filters = rules["volatility_filters"]
     entry_models = rules["entry_models"]
@@ -349,7 +392,8 @@ def evaluate_orb_entry(
     atr_ok = atr_tier_min is not None and atr_pct >= atr_tier_min
 
     as_of_time = current_ts.time()
-    rvol = _compute_rvol(today_bars, intraday, as_of_date, as_of_time, vol_filters["V1_rvol_lookback_days"], prior_day_bars)
+    rvol = _compute_rvol(today_bars, intraday, as_of_date, as_of_time, vol_filters["V1_rvol_lookback_days"],
+                          prior_day_bars, rvol_cache=cache)
     rvol_ok = rvol >= vol_filters["V1_rvol_min"]
     volatility_ok = bool(atr_ok and rvol_ok)
 
