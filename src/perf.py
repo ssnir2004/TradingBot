@@ -110,6 +110,19 @@ def pair_trades(rows: list[dict]) -> list[dict]:
                 # actually finished its life, not at entry time.
                 "mfe_price": row.get("mfe_price"),
                 "mae_price": row.get("mae_price"),
+                # None for every trade that predates this (any non-ORB
+                # pair, or an ORB pair whose exit_reason isn't one of
+                # "initial_stop_loss"/"profit_lock_stop"/"staged_trailing_
+                # stop") - only ever set by simulate_orb_strategy's
+                # staged_trail branch, off the CLOSE leg (same reasoning
+                # as mfe_price/mae_price above - the lifecycle snapshot at
+                # actual exit time, not entry). See src/trade_diagnostics.
+                # py's own exit_reason_breakdown for how these feed the
+                # "Exit Reason Breakdown" report.
+                "profit_lock_activated": row.get("profit_lock_activated"),
+                "profit_lock_activated_at_r": row.get("profit_lock_activated_at_r"),
+                "trail_activated": row.get("trail_activated"),
+                "trail_activated_at_r": row.get("trail_activated_at_r"),
             })
             open_row["_remaining"] -= matched
             remaining -= matched

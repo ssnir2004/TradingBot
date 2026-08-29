@@ -66,7 +66,8 @@ def run_one_strategy(
     # missing mfe_price/mae_price (predates backtest_engine.py tracking
     # excursion at all) gets None for all of them rather than a fabricated
     # number - see trade_diagnostics.enrich's own docstring.
-    report = trade_diagnostics.full_report(pairs)
+    has_profit_lock = "profit_lock_offset_R" in rules.get("exit", {})
+    report = trade_diagnostics.full_report(pairs, has_profit_lock=has_profit_lock)
     return {
         "strategy_name": strategy_name,
         "direction": direction,
@@ -79,6 +80,7 @@ def run_one_strategy(
             "summary": report["summary"],
             "exit_quality": report["exit_quality"],
             "entry_vs_exit": report["entry_vs_exit"],
+            "exit_reason_breakdown": report["exit_reason_breakdown"],
         },
         # None unless this strategy's rules actually carried
         # "es_vwap_filter" AND ES's own cached bars were available for

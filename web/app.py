@@ -1114,6 +1114,15 @@ def _log_account_action(account_id: int, user: str, **fields):
         db.log_decision(account_id, m, "dashboard_control", user=user, **fields)
 
 
+def _strategy_has_profit_lock(strategy: dict | None) -> bool:
+    """The has_profit_lock fact trade_diagnostics.full_report needs (see
+    its own docstring / classify_exit_reason's) - False for a deleted/
+    missing strategy row, same as any other strategy without the key."""
+    if not strategy:
+        return False
+    return "profit_lock_offset_R" in json.loads(strategy["rules_json"]).get("exit", {})
+
+
 @app.get("/api/strategies")
 def api_list_strategies(account_id: int = Depends(require_account), user: str = Depends(require_user)):
     return db.list_strategies(account_id)
@@ -1143,12 +1152,12 @@ def api_strategy_trades_pdf_all(account_id: int = Depends(require_account), user
             if not pooled:
                 continue
             strategy = db.get_strategy(int(entry["strategy_id"]))
-            diag_report = trade_diagnostics.full_report(pooled["pairs"])
+            diag_report = trade_diagnostics.full_report(pooled["pairs"], has_profit_lock=_strategy_has_profit_lock(strategy))
             pdf_bytes = trades_pdf.build_trades_pdf(
                 pooled["strategy_name"], pooled["direction"], pooled["backtests_included"],
                 pooled["aggregate"], diag_report["pairs"],
                 diagnostics={"summary": diag_report["summary"], "entry_vs_exit": diag_report["entry_vs_exit"],
-                             "es_filter": diag_report["es_filter"]},
+                             "es_filter": diag_report["es_filter"], "exit_reason_breakdown": diag_report["exit_reason_breakdown"]},
                 description=strategy["description"] if strategy else None,
             )
             safe_name = re.sub(r"[^A-Za-z0-9]+", "_", pooled["strategy_name"]).strip("_")
@@ -1279,13 +1288,13 @@ def api_strategy_trade_diagnostics(strategy_id: int, account_id: int = Depends(r
     pooled = perf.pooled_trades_for_strategy(db.list_done_backtest_results(account_id), strategy_id)
     if not pooled:
         raise HTTPException(status_code=404, detail="No completed backtests for this strategy yet")
-    report = trade_diagnostics.full_report(pooled["pairs"])
+    report = trade_diagnostics.full_report(pooled["pairs"], has_profit_lock=_strategy_has_profit_lock(strategy))
     return {
         "strategy_name": pooled["strategy_name"], "direction": pooled["direction"],
         "backtests_included": pooled["backtests_included"],
         "summary": report["summary"], "r_distribution": report["r_distribution"],
         "exit_quality": report["exit_quality"], "entry_vs_exit": report["entry_vs_exit"],
-        "es_filter": report["es_filter"],
+        "es_filter": report["es_filter"], "exit_reason_breakdown": report["exit_reason_breakdown"],
     }
 
 
@@ -1308,11 +1317,12 @@ def api_strategy_trades_pdf(strategy_id: int, account_id: int = Depends(require_
     # docstring) - so the PDF's MFE/MAE/Capture% columns and its Entry vs
     # Exit section work uniformly regardless of whether every pooled
     # backtest ran before or after this feature shipped.
-    report = trade_diagnostics.full_report(pooled["pairs"])
+    report = trade_diagnostics.full_report(pooled["pairs"], has_profit_lock=_strategy_has_profit_lock(strategy))
     pdf_bytes = trades_pdf.build_trades_pdf(
         pooled["strategy_name"], pooled["direction"], pooled["backtests_included"],
         pooled["aggregate"], report["pairs"],
-        diagnostics={"summary": report["summary"], "entry_vs_exit": report["entry_vs_exit"], "es_filter": report["es_filter"]},
+        diagnostics={"summary": report["summary"], "entry_vs_exit": report["entry_vs_exit"], "es_filter": report["es_filter"],
+                     "exit_reason_breakdown": report["exit_reason_breakdown"]},
         description=strategy["description"],
     )
     safe_name = re.sub(r"[^A-Za-z0-9]+", "_", pooled["strategy_name"]).strip("_")

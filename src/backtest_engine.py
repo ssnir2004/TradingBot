@@ -590,6 +590,35 @@ def _find_target_out(bars: pd.DataFrame, target_price: float, side: str) -> pd.T
     return hit.index[0] if not hit.empty else None
 
 
+def _staged_trail_exit_reason(pos: dict, exit_cfg: dict) -> str:
+    """Maps a staged_trail position's own tracked active_stop_type (see
+    the "Detailed Exit Reason Classification" investigation this same
+    conversation ran) into the specific label a stop-out should carry,
+    instead of the old blanket "the position wasn't pre_breakeven, so
+    call it trailing_stop" rule - which conflated a stop-out at the flat
+    protective level (never actually trailed) with one at a genuinely
+    moved dynamic trail level.
+
+    Deliberately gated on exit_cfg carrying "profit_lock_offset_R" (ORB
+    Long v2 / ORB Short v2 today, not their Fade siblings or anything
+    else sharing this same staged_trail management_style) - every OTHER
+    staged_trail strategy keeps the exact old "stop_loss"/"trailing_stop"
+    labels, unconditionally, so this function can never change output
+    for a strategy the investigation wasn't asked to touch. pos["state"]/
+    ["active_stop_type"] are tracked unconditionally for every staged_
+    trail position regardless of this gate (harmless bookkeeping, and the
+    new lifecycle fields carried on every trade dict stay meaningful even
+    for the Fade variants' PDF/dashboard columns), only the exit_reason
+    STRING this returns is conditional."""
+    if "profit_lock_offset_R" not in exit_cfg:
+        return "stop_loss" if pos["state"] == "pre_breakeven" else "trailing_stop"
+    if pos["active_stop_type"] == "initial_stop":
+        return "initial_stop_loss"
+    if pos["active_stop_type"] == "trailing_stop":
+        return "staged_trailing_stop"
+    return "profit_lock_stop"
+
+
 def simulate_orb_strategy(
     strategy_rules: dict,
     side: str,
@@ -745,6 +774,10 @@ def simulate_orb_strategy(
                         "size": pos["qty"], "timestamp_iso": bar_ts.isoformat(),
                         "exit_reason": "eod_close", "commission": commission_per_trade,
                         "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
+                        "profit_lock_activated": pos.get("profit_lock_activated", False),
+                        "profit_lock_activated_at_r": pos.get("profit_lock_activated_at_r"),
+                        "trail_activated": pos.get("trail_activated", False),
+                        "trail_activated_at_r": pos.get("trail_activated_at_r"),
                     })
                 open_positions.clear()
                 break
@@ -795,9 +828,13 @@ def simulate_orb_strategy(
                         "id": trade_id, "symbol": symbol, "side": close_action,
                         "fill_price": pos["stop_price"], "size": pos["qty"],
                         "timestamp_iso": bar_ts.isoformat(),
-                        "exit_reason": "stop_loss" if pos["state"] == "pre_breakeven" else "trailing_stop",
+                        "exit_reason": _staged_trail_exit_reason(pos, exit_cfg),
                         "commission": commission_per_trade,
                         "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
+                        "profit_lock_activated": pos["profit_lock_activated"],
+                        "profit_lock_activated_at_r": pos["profit_lock_activated_at_r"],
+                        "trail_activated": pos["trail_activated"],
+                        "trail_activated_at_r": pos["trail_activated_at_r"],
                     })
                     del open_positions[symbol]
                     continue
@@ -824,6 +861,9 @@ def simulate_orb_strategy(
                     if decision["action"] == "breakeven_flip":
                         pos["stop_price"] = decision["new_stop_price"]
                         pos["state"] = decision["new_state"]
+                        pos["active_stop_type"] = "protective_stop"
+                        pos["profit_lock_activated"] = True
+                        pos["profit_lock_activated_at_r"] = exit_cfg["breakeven_trigger_R"]
 
                 if pos["state"].startswith("post_breakeven") and r_multiple >= trailing_trigger_r:
                     recent_bars = intraday[intraday.index <= bar_ts].tail(2)
@@ -833,6 +873,16 @@ def simulate_orb_strategy(
                     trail_decision = cycle._trailing_stop_decision(pos, candidate)
                     if trail_decision["action"] == "trail_stop":
                         pos["stop_price"] = trail_decision["new_stop_price"]
+                        # First real trail update - the active stop is now a
+                        # genuinely dynamic level, not the flat protective
+                        # one anymore (see _staged_trail_exit_reason). Only
+                        # set trail_activated_at_r once, the first time -
+                        # re-triggering "hold" on later ticks where the
+                        # candidate doesn't improve shouldn't re-stamp it.
+                        pos["active_stop_type"] = "trailing_stop"
+                        if not pos["trail_activated"]:
+                            pos["trail_activated"] = True
+                            pos["trail_activated_at_r"] = trailing_trigger_r
 
             # --- Step 2: scan for new entries across the whole universe ---
             if cycle._within_entry_window(strategy_rules, bar_ts.to_pydatetime()):
@@ -927,6 +977,18 @@ def simulate_orb_strategy(
                         "stop_price": initial_stop, "target_price": target_price, "qty": size,
                         "state": "pre_breakeven",
                         "mfe_price": price, "mae_price": price,
+                        # Lifecycle state for _staged_trail_exit_reason - set
+                        # unconditionally for every position (fixed_target_
+                        # no_trail positions never read/update these, so
+                        # they just stay at their initial values), not only
+                        # profit_lock_offset_R strategies, so the trade
+                        # dict's own lifecycle fields (below) stay
+                        # meaningful for every staged_trail strategy's own
+                        # report columns even where the exit_reason label
+                        # itself isn't remapped.
+                        "active_stop_type": "initial_stop",
+                        "profit_lock_activated": False, "profit_lock_activated_at_r": None,
+                        "trail_activated": False, "trail_activated_at_r": None,
                     }
                     entries_today += 1
 
@@ -943,6 +1005,10 @@ def simulate_orb_strategy(
                 "timestamp_iso": day_bars.index[-1].isoformat(),
                 "exit_reason": "eod_close", "commission": commission_per_trade,
                 "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
+                "profit_lock_activated": pos.get("profit_lock_activated", False),
+                "profit_lock_activated_at_r": pos.get("profit_lock_activated_at_r"),
+                "trail_activated": pos.get("trail_activated", False),
+                "trail_activated_at_r": pos.get("trail_activated_at_r"),
             })
 
     return {"trades": trades, "skipped_symbols": skipped, "filter_stats": filter_stats}

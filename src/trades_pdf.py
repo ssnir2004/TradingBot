@@ -40,12 +40,20 @@ pdfmetrics.registerFont(TTFont("Heb-Bold", str(_FONTS_DIR / "LiberationSans-Bold
 
 # Mirrors backtest.html's own EXIT_REASON_LABELS - "partial_profit" omitted,
 # since the exit stage it named no longer exists (see cycle._breakeven_
-# decision's docstring) and no current code path can produce it.
+# decision's docstring) and no current code path can produce it. The four
+# newest keys are trade_diagnostics.classify_exit_reason's own output for a
+# profit_lock_offset_R strategy (ORB Long/Short v2 today) - see its
+# docstring and src/backtest_engine.py's _staged_trail_exit_reason for
+# where they're produced/why "legacy_trailing_stop" exists at all.
 EXIT_REASON_LABELS = {
     "stop_loss": "Stop loss",
     "trailing_stop": "Trailing stop",
     "eod_close": "End of day",
     "target": "Fixed target (ORB)",
+    "initial_stop_loss": "Initial stop loss",
+    "profit_lock_stop": "Profit-lock stop",
+    "staged_trailing_stop": "Staged trailing stop",
+    "legacy_trailing_stop": "Legacy trailing stop - subtype unknown",
 }
 
 
@@ -71,6 +79,24 @@ def _fmt_r(value) -> str:
 
 def _fmt_pct(value) -> str:
     return f"{value:.1f}%" if value is not None else "-"
+
+
+def _fmt_protection(pair: dict) -> str:
+    """Compact per-trade lifecycle summary - see the classification spec's
+    own "Exit Lifecycle" examples (e.g. "Profit lock activated at 2R ->
+    Trail activated at 3R") condensed to fit one column instead of the
+    5 separate Profit Protection Activated/Profit Lock Triggered At/
+    Profit Lock Stop/Trail Activated/Trail Triggered At fields the spec
+    lists - those are all derivable from profit_lock_activated(_at_r)/
+    trail_activated(_at_r) on the pair (see perf.pair_trades), just not
+    given their own columns in an already-18-column table. "-" for a
+    pair that predates lifecycle tracking or never activated either
+    stage (a plain initial-stop or fixed-target/eod exit)."""
+    if pair.get("trail_activated"):
+        return f"{_fmt_r(pair.get('profit_lock_activated_at_r'))}R→{_fmt_r(pair.get('trail_activated_at_r'))}R"
+    if pair.get("profit_lock_activated"):
+        return f"{_fmt_r(pair.get('profit_lock_activated_at_r'))}R"
+    return "-"
 
 
 def _wrap_bidi(text: str, font_name: str, font_size: float, max_width: float) -> str:
@@ -236,12 +262,37 @@ def build_trades_pdf(strategy_name: str, direction: str, backtests_included: int
         story.append(es_table)
         story.append(Spacer(1, 6 * mm))
 
+    breakdown = diagnostics.get("exit_reason_breakdown") if diagnostics else None
+    if breakdown:
+        story.append(Paragraph("Exit Reason Breakdown", styles["Heading3"]))
+        rb_header = ["Category", "Trades", "% of Total", "Win Rate", "Net P&L",
+                     "Avg Final R", "Median Final R", "Avg MFE R", "Avg Capture %"]
+        rb_rows = [rb_header]
+        for row in breakdown:
+            rb_rows.append([
+                EXIT_REASON_LABELS.get(row["category"], row["category"]),
+                str(row["trade_count"]), _fmt_pct(row["pct_of_total"]), _fmt_pct(row["win_rate_pct"]),
+                _fmt_money(row["net_pnl_usd"]), _fmt_r(row["avg_final_r"]), _fmt_r(row["median_final_r"]),
+                _fmt_r(row["avg_mfe_r"]), _fmt_pct(row["avg_capture_pct"]),
+            ])
+        rb_table = Table(rb_rows, repeatRows=1)
+        rb_table.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.lightgrey),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef1f5")),
+        ]))
+        story.append(rb_table)
+        story.append(Spacer(1, 6 * mm))
+
     # PNL_COL/FINAL_R_COL index into `header` below - used after the loop to
     # color those two columns green/red per row without hardcoding the
     # index twice and risking the two silently drifting apart.
     header = ["#", "Symbol", "Side", "Entry $", "Stop", "Risk $", "Exit $", "Size",
               "MFE $", "MFE R", "MAE $", "MAE R", "P&L $", "Final R", "Capture %",
-              "Comm $", "Exit Reason", "Entry → Exit (ET)"]
+              "Comm $", "Exit Reason", "Protection", "Entry → Exit (ET)"]
     PNL_COL = header.index("P&L $")
     FINAL_R_COL = header.index("Final R")
     rows = [header]
@@ -257,6 +308,7 @@ def build_trades_pdf(strategy_name: str, direction: str, backtests_included: int
             _fmt_money(p.get("mae_usd")), _fmt_r(p.get("mae_r")), _fmt_money(p["pnl_usd"]),
             _fmt_r(p.get("final_r")), _fmt_pct(p.get("capture_pct")), _fmt_money(p.get("commission_usd")),
             EXIT_REASON_LABELS.get(p.get("exit_reason"), p.get("exit_reason") or "-"),
+            _fmt_protection(p),
             f"{_fmt_dt(entry_time)} → {_fmt_dt(exit_time)}",
         ])
 

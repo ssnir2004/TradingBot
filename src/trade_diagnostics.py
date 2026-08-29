@@ -197,6 +197,86 @@ def entry_vs_exit_analysis(enriched: list[dict]) -> dict:
     }
 
 
+def classify_exit_reason(pair: dict, has_profit_lock: bool) -> str:
+    """Maps a pair's raw exit_reason (as stored by backtest_engine.py)
+    into its final display category - see src/backtest_engine.py's own
+    _staged_trail_exit_reason for where "initial_stop_loss"/"profit_
+    lock_stop"/"staged_trailing_stop" get produced going forward, only
+    for a strategy configured with profit_lock_offset_R (has_profit_lock
+    here - a pair alone can't tell, it has to be threaded in from the
+    strategy's own rules by the caller, see full_report below).
+
+    Historical pairs from a backtest run BEFORE that fix shipped only
+    ever carry the old "stop_loss"/"trailing_stop" labels:
+      - old "stop_loss" always meant the ORIGINAL stop was still active
+        (pos["state"] == "pre_breakeven" was a guaranteed, unambiguous
+        condition) - safe to just rename to "initial_stop_loss", no
+        information was actually lost.
+      - old "trailing_stop" is genuinely ambiguous for a profit_lock_
+        offset_R strategy - it could have been a flat protective-stop
+        hit OR a real dynamic trail hit, and nothing in a pre-fix stored
+        record can tell them apart - reported as "legacy_trailing_stop"
+        instead of guessing, per the classification spec's own
+        "Historical Compatibility" requirement (do not guess; label
+        explicitly as legacy).
+    A non-profit_lock strategy (every other strategy sharing this same
+    staged_trail/breakeven+trailing machinery - the ORB v2 Fade variants,
+    every classic D1-D3 strategy) is untouched either way: its raw
+    exit_reason passes through unchanged, since _staged_trail_exit_reason
+    never remaps it for them in the first place."""
+    reason = pair.get("exit_reason")
+    if not has_profit_lock:
+        return reason or "unknown"
+    if reason == "stop_loss":
+        return "initial_stop_loss"
+    if reason == "trailing_stop":
+        return "legacy_trailing_stop"
+    return reason or "unknown"
+
+
+def exit_reason_breakdown(enriched: list[dict], has_profit_lock: bool) -> list[dict]:
+    """The "Exit Reason Breakdown" section (see the classification spec):
+    one row per final exit category (classify_exit_reason above), each
+    with its own trade count/pct-of-total/win-rate/P&L/R stats computed
+    ONLY over pairs in that category. classify_exit_reason assigns every
+    pair to exactly one category and never drops one, so trade_count
+    across every returned row always sums to len(enriched) exactly - the
+    classification spec's own required reconciliation guarantee.
+    avg_final_r/avg_mfe_r/avg_capture_pct are computed only over each
+    category's diagnosable trades (same convention as summarize/
+    r_distribution above) - None (not 0) when a category has no
+    diagnosable trades in it, same "N/A vs. genuinely zero" reasoning as
+    everywhere else in this module. Sorted busiest-category-first."""
+    from collections import defaultdict
+
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for pair in enriched:
+        groups[classify_exit_reason(pair, has_profit_lock)].append(pair)
+
+    total = len(enriched)
+    rows = []
+    for category, group_pairs in groups.items():
+        agg = perf.aggregate(group_pairs)
+        d = _diagnosable(group_pairs)
+        final_rs = [p["final_r"] for p in d]
+        mfe_rs = [p["mfe_r"] for p in d]
+        captures = [p["capture_pct"] for p in d]
+        rows.append({
+            "category": category,
+            "trade_count": len(group_pairs),
+            "pct_of_total": round(len(group_pairs) / total * 100, 1) if total else 0.0,
+            "win_rate_pct": agg["win_rate_pct"],
+            "gross_pnl_usd": agg["gross_pnl_usd"],
+            "net_pnl_usd": agg["net_pnl_usd"],
+            "avg_final_r": round(mean(final_rs), 3) if final_rs else None,
+            "median_final_r": round(median(final_rs), 3) if final_rs else None,
+            "avg_mfe_r": round(mean(mfe_rs), 3) if mfe_rs else None,
+            "avg_capture_pct": round(mean(captures), 1) if captures else None,
+        })
+    rows.sort(key=lambda r: -r["trade_count"])
+    return rows
+
+
 def es_filter_report(pairs: list[dict]) -> dict | None:
     """Before/after stats for src/es_filter.py's ES-VWAP gate (see
     backtest_engine.py's _es_filter_pass) - None if this strategy never
@@ -232,11 +312,29 @@ def es_filter_report(pairs: list[dict]) -> dict | None:
     }
 
 
-def full_report(pairs: list[dict]) -> dict:
+def full_report(pairs: list[dict], has_profit_lock: bool = False) -> dict:
     """Everything above, run once over one pooled/single-backtest pair
-    list - the one call site (backtest_runner.py / web/app.py's Strategy
-    Report) needs."""
+    list - the call sites (backtest_runner.py / web/app.py's Strategy
+    Report/PDF endpoints) need. has_profit_lock is the strategy's own
+    rules["exit"].get("profit_lock_offset_R") is not None fact, threaded
+    in by the caller (see classify_exit_reason's own docstring for why a
+    pair alone can't determine it) - defaults to False so an existing
+    caller that hasn't been updated yet still gets a report, just with
+    exit_reason_breakdown's categories left unmapped (old "stop_loss"/
+    "trailing_stop" labels passed through as-is, same as a non-profit-
+    lock strategy).
+
+    Each enriched pair's own exit_reason is overwritten in place with
+    classify_exit_reason's result - classify_exit_reason is idempotent
+    (an already-classified value like "profit_lock_stop" matches neither
+    of its "stop_loss"/"trailing_stop" checks, so it passes through
+    unchanged), so this is safe to do unconditionally and means every
+    consumer of "pairs" (the per-trade table, the PDF, any CSV export)
+    shows the SAME final category a trade's row was counted under in
+    exit_reason_breakdown, not the raw pre-classification label."""
     enriched = enrich_all(pairs)
+    for p in enriched:
+        p["exit_reason"] = classify_exit_reason(p, has_profit_lock)
     return {
         "pairs": enriched,
         "summary": summarize(enriched),
@@ -244,4 +342,5 @@ def full_report(pairs: list[dict]) -> dict:
         "exit_quality": exit_quality(enriched),
         "entry_vs_exit": entry_vs_exit_analysis(enriched),
         "es_filter": es_filter_report(enriched),
+        "exit_reason_breakdown": exit_reason_breakdown(enriched, has_profit_lock),
     }

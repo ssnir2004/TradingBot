@@ -785,13 +785,59 @@ function renderFilterStats(fs) {
   </div>`;
 }
 
+// The four newest keys are trade_diagnostics.classify_exit_reason's own
+// output for a profit_lock_offset_R strategy (ORB Long/Short v2 today) -
+// see its docstring and src/backtest_engine.py's _staged_trail_exit_
+// reason for where they're produced/why "legacy_trailing_stop" exists.
 const EXIT_REASON_LABELS = {
   stop_loss: "Stop loss",
   trailing_stop: "Trailing stop",
   partial_profit: "Partial profit",
   eod_close: "End of day",
   target: "Fixed target (ORB)",
+  initial_stop_loss: "Initial stop loss",
+  profit_lock_stop: "Profit-lock stop",
+  staged_trailing_stop: "Staged trailing stop",
+  legacy_trailing_stop: "Legacy trailing stop - subtype unknown",
 };
+
+// Compact per-trade lifecycle summary - see the classification spec's own
+// "Exit Lifecycle" examples condensed to one column instead of 5 separate
+// ones. "-" for a pair that predates lifecycle tracking or never
+// activated either protection stage.
+function fmtProtection(p) {
+  if (p.trail_activated) return `${fmtR(p.profit_lock_activated_at_r)}R→${fmtR(p.trail_activated_at_r)}R`;
+  if (p.profit_lock_activated) return `${fmtR(p.profit_lock_activated_at_r)}R`;
+  return "-";
+}
+
+function renderExitReasonBreakdown(breakdown) {
+  if (!breakdown || !breakdown.length) return "";
+  const rows = breakdown.map(r => `<tr>
+    <td>${EXIT_REASON_LABELS[r.category] || r.category}</td>
+    <td class="mono">${r.trade_count}</td>
+    <td class="mono">${fmtPct1(r.pct_of_total)}</td>
+    <td class="mono">${fmtPct1(r.win_rate_pct)}</td>
+    <td class="mono">${fmtMoney(r.net_pnl_usd)}</td>
+    <td class="mono">${fmtR(r.avg_final_r)}</td>
+    <td class="mono">${fmtR(r.median_final_r)}</td>
+    <td class="mono">${fmtR(r.avg_mfe_r)}</td>
+    <td class="mono">${fmtPct1(r.avg_capture_pct)}</td>
+  </tr>`).join("");
+  const total = breakdown.reduce((sum, r) => sum + r.trade_count, 0);
+  return `<div class="mt-3">
+    <div class="fw-semibold small mb-1">Exit Reason Breakdown</div>
+    <div class="small text-muted mb-1">${total} closed trade(s) total - counts sum exactly to this.</div>
+    <div style="overflow-x:auto;">
+      <table class="table table-sm mb-0">
+        <thead><tr><th>Category</th><th>Trades</th><th>% of Total</th><th>Win Rate</th><th>Net P&amp;L</th>
+          <th title="Average final R-multiple">Avg Final R</th><th>Median Final R</th>
+          <th title="Average Maximum Favorable Excursion (R)">Avg MFE R</th><th>Avg Capture %</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
 
 function renderTrades(pairs) {
   if (!pairs || !pairs.length) return "";
@@ -824,6 +870,7 @@ function renderTrades(pairs) {
       <td class="mono">${fmtPct1(p.capture_pct)}</td>
       <td class="mono text-muted">${fmtMoney(p.commission_usd)}</td>
       <td>${reason}</td>
+      <td class="mono small" title="Profit-lock/trail activation R-levels, if any">${fmtProtection(p)}</td>
       <td class="small text-muted text-nowrap">${fmtTimeET(entryTime)} → ${fmtTimeET(exitTime)}</td>
     </tr>`;
   }).join("");
@@ -835,7 +882,7 @@ function renderTrades(pairs) {
           <th title="Maximum Favorable Excursion">MFE $</th><th title="Maximum Favorable Excursion (R)">MFE R</th>
           <th title="Maximum Adverse Excursion">MAE $</th><th title="Maximum Adverse Excursion (R)">MAE R</th>
           <th>P&amp;L</th><th title="Final R-multiple">Final R</th><th title="% of the MFE actually captured by the exit">Capture %</th>
-          <th>Commission</th><th>Closed by</th><th>When</th></tr></thead>
+          <th>Commission</th><th>Closed by</th><th>Protection</th><th>When</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
@@ -865,6 +912,7 @@ function renderStrategyResult(strategyId, result) {
       <p>Avg winner: ${fmtMoney(a.avg_winner)} | Avg loser: ${fmtMoney(a.avg_loser)}</p>
       ${renderHistogram(result.histogram)}
       ${renderEntryVsExit(result.diagnostics)}
+      ${renderExitReasonBreakdown(result.diagnostics && result.diagnostics.exit_reason_breakdown)}
       ${renderEsFilterReport(result.es_filter)}
       ${renderFilterStats(result.filter_stats)}
       ${renderTrades(result.pairs)}
@@ -1109,7 +1157,7 @@ async function toggleStrategyDiagnostics(strategyId, btn) {
   el.innerHTML = '<div class="small text-muted mt-2">Loading…</div>';
   try {
     const diag = await api(`/api/strategies/${strategyId}/trade_diagnostics`);
-    el.innerHTML = `<hr class="my-2">${renderHistogram(diag.r_distribution)}${renderEntryVsExit(diag)}${renderEsFilterReport(diag.es_filter)}`;
+    el.innerHTML = `<hr class="my-2">${renderHistogram(diag.r_distribution)}${renderEntryVsExit(diag)}${renderExitReasonBreakdown(diag.exit_reason_breakdown)}${renderEsFilterReport(diag.es_filter)}`;
     el.dataset.loaded = "1";
   } catch (e) {
     el.innerHTML = `<div class="small text-danger mt-2">${e.message || "Failed to load diagnostics"}</div>`;
