@@ -8,8 +8,9 @@ Requires=ibgateway-paper@%i.service
 Type=simple
 User=tradingbot
 WorkingDirectory=/opt/tradingbot
+# always, not on-failure - see trading-bot-live.service's own comment.
 ExecStart=/opt/tradingbot/.venv/bin/python /opt/tradingbot/run_service.py --mode paper --account-id %i
-Restart=on-failure
+Restart=always
 RestartSec=15
 
 [Install]

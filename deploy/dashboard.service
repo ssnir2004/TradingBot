@@ -9,8 +9,11 @@ User=tradingbot
 WorkingDirectory=/opt/tradingbot
 Environment=DASHBOARD_HOST=127.0.0.1
 Environment=DASHBOARD_PORT=8000
+# always, not on-failure - see deploy/ibgateway-live.service's own
+# comment for the general reasoning (a deliberate `systemctl stop` never
+# triggers Restart= regardless of policy, so there's no real downside).
 ExecStart=/opt/tradingbot/.venv/bin/python /opt/tradingbot/run_dashboard.py
-Restart=on-failure
+Restart=always
 RestartSec=10
 # Default KillMode=control-group kills every process in this service's
 # cgroup on stop/restart - including a backtest subprocess this process

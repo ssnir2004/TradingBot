@@ -7,8 +7,12 @@ Wants=network-online.target
 Type=simple
 User=tradingbot
 WorkingDirectory=/opt/tradingbot
+# always, not on-failure - see ibgateway-live.service's own comment for
+# the full reasoning (a missed 2FA push exits IBC cleanly, which
+# on-failure never restarts, leaving the unit stuck dead until someone
+# notices and restarts it by hand).
 ExecStart=/opt/tradingbot/deploy/ibc/start-gateway.sh paper
-Restart=on-failure
+Restart=always
 RestartSec=30
 
 [Install]

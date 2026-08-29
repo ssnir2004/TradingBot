@@ -8,8 +8,12 @@ Requires=ibgateway-live.service
 Type=simple
 User=tradingbot
 WorkingDirectory=/opt/tradingbot
+# always, not on-failure - matches ibgateway-live.service's own reasoning:
+# a deliberate `systemctl stop` never triggers Restart= regardless of
+# policy, so there's no real downside, and it closes the same "exited
+# cleanly but that wasn't actually success" gap here too.
 ExecStart=/opt/tradingbot/.venv/bin/python /opt/tradingbot/run_service.py --mode live
-Restart=on-failure
+Restart=always
 RestartSec=15
 
 [Install]

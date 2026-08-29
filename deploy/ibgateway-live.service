@@ -7,8 +7,17 @@ Wants=network-online.target
 Type=simple
 User=tradingbot
 WorkingDirectory=/opt/tradingbot
+# always, not on-failure: IBC's own SecondFactorAuthenticationTimeout
+# (config-live.ini.example) exits the Gateway process when a 2FA push
+# goes unanswered in time - and that's a CLEAN exit (code 0), which
+# on-failure never restarts. Confirmed live: a missed 2FA push left this
+# unit sitting "dead" for a full day with no auto-recovery until someone
+# noticed and restarted it by hand. always retries regardless of why the
+# process stopped, sending a fresh 2FA push each attempt - the one case
+# this must NOT fire (a deliberate `systemctl stop`) already skips
+# Restart= entirely, by systemd's own design, whatever the policy is.
 ExecStart=/opt/tradingbot/deploy/ibc/start-gateway.sh live
-Restart=on-failure
+Restart=always
 RestartSec=30
 
 [Install]
