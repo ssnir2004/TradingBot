@@ -9,16 +9,34 @@ strings in America/New_York (see fetch_backtest_data.py's tz_convert(ET)
 on every bar it fetches) - formatted here by just slicing the wall-clock
 part off the ISO string, no further tz conversion needed.
 """
+import re
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
+from xml.sax.saxutils import escape
 
+from bidi.algorithm import get_display
 from reportlab.lib import colors
+from reportlab.lib.enums import TA_RIGHT
 from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from src import perf
+
+# Standard PDF fonts (Helvetica etc.) only cover Latin-1 - no Hebrew, and
+# no arrow (→, used a few lines down in the trades table's own "Entry →
+# Exit" column). Description text (see build_trades_pdf's `description`
+# param) is Hebrew, so a Unicode font is registered here and bundled in
+# the repo (assets/fonts/) rather than relying on whatever fonts happen to
+# be installed on the production server - SIL OFL licensed, see assets/
+# fonts/OFL.txt for the required attribution/license text.
+_FONTS_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
+pdfmetrics.registerFont(TTFont("Heb", str(_FONTS_DIR / "LiberationSans-Regular.ttf")))
+pdfmetrics.registerFont(TTFont("Heb-Bold", str(_FONTS_DIR / "LiberationSans-Bold.ttf")))
 
 # Mirrors backtest.html's own EXIT_REASON_LABELS - "partial_profit" omitted,
 # since the exit stage it named no longer exists (see cycle._breakeven_
@@ -55,21 +73,81 @@ def _fmt_pct(value) -> str:
     return f"{value:.1f}%" if value is not None else "-"
 
 
+def _wrap_bidi(text: str, font_name: str, font_size: float, max_width: float) -> str:
+    """Word-wraps `text` (in logical/typed order) to `max_width` using real
+    glyph widths, then bidi-reorders each finished line on its own via
+    python-bidi's get_display() - reordering the *whole* paragraph before
+    wrapping scrambles line order top-to-bottom (the Unicode bidi algorithm
+    only defines visual order within one line; reportlab has no bidi
+    support of its own to do this for us - see rtlSupport in reportlab.
+    pdfgen.textobject, which needs the unpublished `rlbidi` package).
+    Returns markup ready to hand to a reportlab Paragraph (lines joined by
+    <br/>), already XML-escaped."""
+    words = text.split(" ")
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}" if current else word
+        if current and pdfmetrics.stringWidth(candidate, font_name, font_size) > max_width:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return "<br/>".join(escape(get_display(line)) for line in lines)
+
+
+def _render_description(story: list, description: str | None, max_width: float):
+    """Mirrors bot.html's own renderStrategyDescription: the same light
+    "## Heading" convention (sections separated by a blank line) is parsed
+    into heading/body pairs here instead of <h6>/<p> - so the PDF opens
+    with the exact same explanation the Bot page's Strategies info modal
+    shows for this strategy, not a re-authored summary that could drift
+    from it over time."""
+    if not description:
+        return
+    heading_style = ParagraphStyle(
+        "HebHeading", fontName="Heb-Bold", fontSize=11, alignment=TA_RIGHT,
+        spaceBefore=6, spaceAfter=2, leading=14,
+    )
+    body_style = ParagraphStyle(
+        "HebBody", fontName="Heb", fontSize=9, alignment=TA_RIGHT,
+        leading=13, spaceAfter=4,
+    )
+    for section in re.split(r"\n(?=## )", description):
+        m = re.match(r"^## (.+)\n?([\s\S]*)$", section)
+        if not m:
+            story.append(Paragraph(_wrap_bidi(section.strip(), "Heb", 9, max_width), body_style))
+            continue
+        heading, body = m.groups()
+        story.append(Paragraph(_wrap_bidi(heading.strip(), "Heb-Bold", 11, max_width), heading_style))
+        body = body.strip()
+        if body:
+            story.append(Paragraph(_wrap_bidi(body, "Heb", 9, max_width), body_style))
+    story.append(Spacer(1, 6 * mm))
+
+
 def build_trades_pdf(strategy_name: str, direction: str, backtests_included: int,
-                      aggregate_stats: dict, pairs: list[dict], diagnostics: dict | None = None) -> bytes:
+                      aggregate_stats: dict, pairs: list[dict], diagnostics: dict | None = None,
+                      description: str | None = None) -> bytes:
     """`pairs` must already be enriched (see trade_diagnostics.enrich_all)
     - mfe_usd/mfe_r/mae_usd/mae_r/final_r/capture_pct read straight off
     each pair here, "-" wherever a pair predates that field (see
     trade_diagnostics' own docstring on why some backtest pairs won't
     have it). `diagnostics` is trade_diagnostics.full_report(pairs)'s own
     {"summary", "entry_vs_exit"} - optional (None renders the PDF without
-    that section, e.g. if every pair turned out non-diagnosable)."""
+    that section, e.g. if every pair turned out non-diagnosable).
+    `description` is the strategy's own row.description (see db.py) -
+    optional (a strategy created without one just skips this section)."""
     buf = BytesIO()
+    left_margin = right_margin = 12 * mm
     doc = SimpleDocTemplate(
         buf, pagesize=landscape(A4),
         title=f"{strategy_name} - Backtest Trade Log",
-        leftMargin=12 * mm, rightMargin=12 * mm, topMargin=12 * mm, bottomMargin=12 * mm,
+        leftMargin=left_margin, rightMargin=right_margin, topMargin=12 * mm, bottomMargin=12 * mm,
     )
+    content_width = landscape(A4)[0] - left_margin - right_margin
     styles = getSampleStyleSheet()
     story = [
         Paragraph(f"{strategy_name} — Backtest Trade Log", styles["Title"]),
@@ -80,6 +158,7 @@ def build_trades_pdf(strategy_name: str, direction: str, backtests_included: int
         ),
         Spacer(1, 6 * mm),
     ]
+    _render_description(story, description, content_width)
 
     a = aggregate_stats
     summary_rows = [

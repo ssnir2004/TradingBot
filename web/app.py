@@ -1259,6 +1259,7 @@ def api_strategy_trades_pdf(strategy_id: int, account_id: int = Depends(require_
         pooled["strategy_name"], pooled["direction"], pooled["backtests_included"],
         pooled["aggregate"], report["pairs"],
         diagnostics={"summary": report["summary"], "entry_vs_exit": report["entry_vs_exit"], "es_filter": report["es_filter"]},
+        description=strategy["description"],
     )
     safe_name = re.sub(r"[^A-Za-z0-9]+", "_", pooled["strategy_name"]).strip("_")
     return Response(

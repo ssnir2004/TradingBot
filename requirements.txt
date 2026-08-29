@@ -14,3 +14,4 @@ itsdangerous
 python-multipart
 cryptography
 reportlab
+python-bidi
