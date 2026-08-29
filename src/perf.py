@@ -148,13 +148,29 @@ def aggregate(pairs: list[dict]) -> dict:
 
 
 def compute_r_multiples(pairs: list[dict]) -> list[float]:
-    # closed positions won't be in the open table anymore, so this is
-    # always the 1% fallback proxy, mirrored for a short's stop (above
-    # entry) vs a long's (below entry).
+    """Prefers each pair's own real initial_stop when it has one - every
+    backtest pair does (pair_trades carries it straight through from the
+    open leg's trade row, see backtest_engine.py), so a backtest's R
+    histogram reflects the stop distance actually used, not a guess. Only
+    a LIVE/paper pair falls back to the 1% synthetic proxy below, because
+    a closed live position's real stop isn't retained anywhere once
+    db.remove_position deletes it - this proxy is the best information
+    left by the time pair_trades ever sees that trade.
+    Before this used the 1% proxy unconditionally, even for backtests
+    that had the real stop sitting right there in the same pair dict -
+    off by however far the real stop actually was from 1%, which for a
+    wide swing-based stop (backtest_engine's own default) is often several
+    multiples wide, silently sorting trades into the wrong R bucket
+    entirely (see the dashboard's own "Initial Stop" trade column, which
+    was already showing the real number the histogram wasn't using)."""
     r_values = []
     for p in pairs:
         open_price = p["open_price"]
-        if p["side"] == "short":
+        initial_stop = p.get("initial_stop")
+        if initial_stop is not None:
+            risk_per_share = abs(open_price - initial_stop)
+            move = (open_price - p["close_price"]) if p["side"] == "short" else (p["close_price"] - open_price)
+        elif p["side"] == "short":
             stop = open_price * 1.01
             risk_per_share = stop - open_price
             move = open_price - p["close_price"]
@@ -186,6 +202,51 @@ def today_summary(account_id: int, mode: str) -> dict:
 STRATEGY_REPORT_LOW_SAMPLE_TRADES = 30
 
 
+def _latest_results_by_strategy(backtests: list[dict]) -> dict:
+    """Shared dedup step behind strategy_report and pooled_trades_for_
+    strategy - keeps only the newest-created 'done' result per (strategy_id,
+    start_date, end_date), see strategy_report's own docstring for the full
+    rationale. Returns {strategy_id: [result, ...]}, each result carrying
+    its own "pairs"/"aggregate"/"filter_stats"/"strategy_name"/"direction"."""
+    latest_by_key = {}  # (strategy_id, start_date, end_date) -> {"created_at", "result"}
+    for bt in backtests:
+        date_key = (bt["params"].get("start_date"), bt["params"].get("end_date"))
+        for strategy_id, result in bt["results"].items():
+            if not isinstance(result, dict) or "aggregate" not in result:
+                continue  # {"error": "..."} entries - strategy deleted/not found at run time
+            key = (strategy_id, date_key)
+            existing = latest_by_key.get(key)
+            if existing is None or bt["created_at"] > existing["created_at"]:
+                latest_by_key[key] = {"created_at": bt["created_at"], "result": result}
+
+    by_strategy = defaultdict(list)
+    for (strategy_id, _date_key), entry in latest_by_key.items():
+        by_strategy[strategy_id].append(entry["result"])
+    return by_strategy
+
+
+def pooled_trades_for_strategy(backtests: list[dict], strategy_id) -> dict | None:
+    """Same pooling/dedup as strategy_report, narrowed to a single strategy
+    and returning the actual trade pairs (not just the aggregated stats) -
+    for a full trade-by-trade export (see web/app.py's trades-PDF endpoint
+    and src/trades_pdf.py). `strategy_id` is matched as a string, since a
+    parsed results_json's top-level keys always are. Returns None if this
+    strategy has no 'done' backtest result in `backtests` at all."""
+    by_strategy = _latest_results_by_strategy(backtests)
+    results = by_strategy.get(str(strategy_id))
+    if not results:
+        return None
+    pooled_pairs = [pair for r in results for pair in r["pairs"]]
+    pooled_pairs.sort(key=lambda p: p["buy_time"] if p["side"] == "long" else p["sell_time"])
+    return {
+        "strategy_name": results[0].get("strategy_name") or f"Strategy {strategy_id}",
+        "direction": results[0].get("direction"),
+        "backtests_included": len(results),
+        "pairs": pooled_pairs,
+        "aggregate": aggregate(pooled_pairs),
+    }
+
+
 def strategy_report(backtests: list[dict]) -> list[dict]:
     """Pools every strategy's trade pairs across every 'done' backtest that
     included it, then re-aggregates over the pooled set with the same
@@ -210,20 +271,7 @@ def strategy_report(backtests: list[dict]) -> list[dict]:
 
     Returns one entry per strategy_id that appears in at least one 'done'
     result, busiest (most pooled trades) first."""
-    latest_by_key = {}  # (strategy_id, start_date, end_date) -> {"created_at", "result"}
-    for bt in backtests:
-        date_key = (bt["params"].get("start_date"), bt["params"].get("end_date"))
-        for strategy_id, result in bt["results"].items():
-            if not isinstance(result, dict) or "aggregate" not in result:
-                continue  # {"error": "..."} entries - strategy deleted/not found at run time
-            key = (strategy_id, date_key)
-            existing = latest_by_key.get(key)
-            if existing is None or bt["created_at"] > existing["created_at"]:
-                latest_by_key[key] = {"created_at": bt["created_at"], "result": result}
-
-    by_strategy = defaultdict(list)
-    for (strategy_id, _date_key), entry in latest_by_key.items():
-        by_strategy[strategy_id].append(entry["result"])
+    by_strategy = _latest_results_by_strategy(backtests)
 
     report = []
     for strategy_id, results in by_strategy.items():
