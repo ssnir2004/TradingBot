@@ -18,6 +18,8 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from src import perf
+
 # Mirrors backtest.html's own EXIT_REASON_LABELS - "partial_profit" omitted,
 # since the exit stage it named no longer exists (see cycle._breakeven_
 # decision's docstring) and no current code path can produce it.
@@ -45,27 +47,23 @@ def _fmt_dt(iso: str | None) -> str:
     return dt.strftime("%Y-%m-%d %H:%M ET")
 
 
-def _r_multiple(pair: dict) -> float | None:
-    """Real R-multiple off this trade's own initial_stop - unlike perf.
-    compute_r_multiples' 1%-of-entry synthetic fallback (needed there only
-    because a closed LIVE position doesn't retain its stop), every backtest
-    pair already carries the actual initial_stop it was opened with."""
-    initial_stop = pair.get("initial_stop")
-    if initial_stop is None:
-        return None
-    risk_per_share = abs(pair["open_price"] - initial_stop)
-    if risk_per_share <= 0:
-        return None
-    move = (
-        (pair["open_price"] - pair["close_price"])
-        if pair["side"] == "short"
-        else (pair["close_price"] - pair["open_price"])
-    )
-    return move / risk_per_share
+def _fmt_r(value) -> str:
+    return f"{value:.2f}" if value is not None else "-"
+
+
+def _fmt_pct(value) -> str:
+    return f"{value:.1f}%" if value is not None else "-"
 
 
 def build_trades_pdf(strategy_name: str, direction: str, backtests_included: int,
-                      aggregate_stats: dict, pairs: list[dict]) -> bytes:
+                      aggregate_stats: dict, pairs: list[dict], diagnostics: dict | None = None) -> bytes:
+    """`pairs` must already be enriched (see trade_diagnostics.enrich_all)
+    - mfe_usd/mfe_r/mae_usd/mae_r/final_r/capture_pct read straight off
+    each pair here, "-" wherever a pair predates that field (see
+    trade_diagnostics' own docstring on why some backtest pairs won't
+    have it). `diagnostics` is trade_diagnostics.full_report(pairs)'s own
+    {"summary", "entry_vs_exit"} - optional (None renders the PDF without
+    that section, e.g. if every pair turned out non-diagnosable)."""
     buf = BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=landscape(A4),
@@ -101,27 +99,62 @@ def build_trades_pdf(strategy_name: str, direction: str, backtests_included: int
         ("GRID", (0, 0), (-1, -1), 0.5, colors.lightgrey),
     ]))
     story.append(summary_table)
-    story.append(Spacer(1, 8 * mm))
+    story.append(Spacer(1, 6 * mm))
 
-    header = ["#", "Symbol", "Side", "Entry Time", "Entry $", "Initial Stop", "Exit Time", "Exit $",
-              "Size", "Exit Reason", "R", "P&L $", "P&L %", "Commission"]
+    if diagnostics and diagnostics["summary"]["diagnosable_trades"]:
+        s = diagnostics["summary"]
+        ev = diagnostics["entry_vs_exit"]
+        story.append(Paragraph("Entry vs Exit Analysis", styles["Heading3"]))
+        diag_rows = [
+            ["Avg MFE ($ / R)", f"{_fmt_money(s['avg_mfe_usd'])} / {_fmt_r(s['avg_mfe_r'])}",
+             "Avg MAE ($ / R)", f"{_fmt_money(s['avg_mae_usd'])} / {_fmt_r(s['avg_mae_r'])}"],
+            ["Avg / Median Final R", f"{_fmt_r(s['avg_final_r'])} / {_fmt_r(s['median_final_r'])}",
+             "Best / Worst Final R", f"{_fmt_r(s['best_final_r'])} / {_fmt_r(s['worst_final_r'])}"],
+            ["Avg / Median Capture %", f"{_fmt_pct(s['avg_capture_pct'])} / {_fmt_pct(s['median_capture_pct'])}",
+             "Reached +1R / +2R / +3R", f"{_fmt_pct(ev['pct_reaching_1r'])} / {_fmt_pct(ev['pct_reaching_2r'])} / {_fmt_pct(ev['pct_reaching_3r'])}"],
+        ]
+        diag_table = Table(diag_rows, colWidths=[40 * mm, 45 * mm, 40 * mm, 55 * mm])
+        diag_table.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("FONTNAME", (2, 0), (2, -1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.lightgrey),
+        ]))
+        story.append(diag_table)
+        for note in ev["notes"]:
+            story.append(Paragraph(f"• {note}", styles["Normal"]))
+        story.append(Spacer(1, 6 * mm))
+
+    # PNL_COL/FINAL_R_COL index into `header` below - used after the loop to
+    # color those two columns green/red per row without hardcoding the
+    # index twice and risking the two silently drifting apart.
+    header = ["#", "Symbol", "Side", "Entry $", "Stop", "Risk $", "Exit $", "Size",
+              "MFE $", "MFE R", "MAE $", "MAE R", "P&L $", "Final R", "Capture %",
+              "Comm $", "Exit Reason", "Entry → Exit (ET)"]
+    PNL_COL = header.index("P&L $")
+    FINAL_R_COL = header.index("Final R")
     rows = [header]
     for i, p in enumerate(pairs, start=1):
         entry_time = p["sell_time"] if p["side"] == "short" else p["buy_time"]
         exit_time = p["buy_time"] if p["side"] == "short" else p["sell_time"]
-        r = _r_multiple(p)
+        risk = perf.initial_risk_per_share(p)
+        risk_usd = risk * p["size"] if risk is not None else None
         rows.append([
-            str(i), p["symbol"], p["side"], _fmt_dt(entry_time), _fmt_money(p["open_price"]),
-            _fmt_money(p.get("initial_stop")), _fmt_dt(exit_time), _fmt_money(p["close_price"]),
-            str(p["size"]), EXIT_REASON_LABELS.get(p.get("exit_reason"), p.get("exit_reason") or "-"),
-            f"{r:.2f}" if r is not None else "-", _fmt_money(p["pnl_usd"]),
-            f"{p['pnl_pct']:.2f}%", _fmt_money(p.get("commission_usd")),
+            str(i), p["symbol"], p["side"], _fmt_money(p["open_price"]),
+            _fmt_money(p.get("initial_stop")), _fmt_money(risk_usd), _fmt_money(p["close_price"]),
+            str(p["size"]), _fmt_money(p.get("mfe_usd")), _fmt_r(p.get("mfe_r")),
+            _fmt_money(p.get("mae_usd")), _fmt_r(p.get("mae_r")), _fmt_money(p["pnl_usd"]),
+            _fmt_r(p.get("final_r")), _fmt_pct(p.get("capture_pct")), _fmt_money(p.get("commission_usd")),
+            EXIT_REASON_LABELS.get(p.get("exit_reason"), p.get("exit_reason") or "-"),
+            f"{_fmt_dt(entry_time)} → {_fmt_dt(exit_time)}",
         ])
 
     trades_table = Table(rows, repeatRows=1)
     style = [
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 7),
+        ("FONTSIZE", (0, 0), (-1, -1), 6.5),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
         ("TOPPADDING", (0, 0), (-1, -1), 3),
         ("GRID", (0, 0), (-1, -1), 0.4, colors.lightgrey),
@@ -131,7 +164,8 @@ def build_trades_pdf(strategy_name: str, direction: str, backtests_included: int
     for i, p in enumerate(pairs, start=1):
         color = colors.HexColor("#1a7f37") if p["pnl_usd"] > 0 else (
             colors.HexColor("#c0392b") if p["pnl_usd"] < 0 else colors.black)
-        style.append(("TEXTCOLOR", (11, i), (11, i), color))
+        style.append(("TEXTCOLOR", (PNL_COL, i), (PNL_COL, i), color))
+        style.append(("TEXTCOLOR", (FINAL_R_COL, i), (FINAL_R_COL, i), color))
     trades_table.setStyle(TableStyle(style))
     story.append(trades_table)
 

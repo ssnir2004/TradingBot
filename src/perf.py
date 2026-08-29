@@ -93,6 +93,16 @@ def pair_trades(rows: list[dict]) -> list[dict]:
                 # just above - the model that triggered ENTRY, not exit.
                 "model": open_row.get("model"),
                 "commission_usd": open_commission + float(row.get("commission") or 0),
+                # Both None for a live/paper pair (predates these fields,
+                # and there's no intrabar price-path history to derive them
+                # from after the fact) - only ever set by backtest_engine.py,
+                # which tracks the actual best/worst price seen while the
+                # position was open (see its own _update_excursion). Off the
+                # CLOSE leg (`row`), not the open leg - unlike initial_stop/
+                # model, this can only be known once the position has
+                # actually finished its life, not at entry time.
+                "mfe_price": row.get("mfe_price"),
+                "mae_price": row.get("mae_price"),
             })
             open_row["_remaining"] -= matched
             remaining -= matched
@@ -147,41 +157,45 @@ def aggregate(pairs: list[dict]) -> dict:
     }
 
 
-def compute_r_multiples(pairs: list[dict]) -> list[float]:
-    """Prefers each pair's own real initial_stop when it has one - every
-    backtest pair does (pair_trades carries it straight through from the
-    open leg's trade row, see backtest_engine.py), so a backtest's R
-    histogram reflects the stop distance actually used, not a guess. Only
-    a LIVE/paper pair falls back to the 1% synthetic proxy below, because
+def initial_risk_per_share(pair: dict) -> float | None:
+    """abs(entry - real stop) for a pair that carries one - every backtest
+    pair does (pair_trades passes initial_stop straight through from the
+    open leg's trade row, see backtest_engine.py). A LIVE/paper pair falls
+    back to a synthetic "assume the stop was 1% away" proxy instead, since
     a closed live position's real stop isn't retained anywhere once
-    db.remove_position deletes it - this proxy is the best information
-    left by the time pair_trades ever sees that trade.
-    Before this used the 1% proxy unconditionally, even for backtests
-    that had the real stop sitting right there in the same pair dict -
-    off by however far the real stop actually was from 1%, which for a
-    wide swing-based stop (backtest_engine's own default) is often several
-    multiples wide, silently sorting trades into the wrong R bucket
-    entirely (see the dashboard's own "Initial Stop" trade column, which
-    was already showing the real number the histogram wasn't using)."""
-    r_values = []
-    for p in pairs:
-        open_price = p["open_price"]
-        initial_stop = p.get("initial_stop")
-        if initial_stop is not None:
-            risk_per_share = abs(open_price - initial_stop)
-            move = (open_price - p["close_price"]) if p["side"] == "short" else (p["close_price"] - open_price)
-        elif p["side"] == "short":
-            stop = open_price * 1.01
-            risk_per_share = stop - open_price
-            move = open_price - p["close_price"]
-        else:
-            stop = open_price * 0.99
-            risk_per_share = open_price - stop
-            move = p["close_price"] - open_price
-        if risk_per_share <= 0:
-            continue
-        r_values.append(move / risk_per_share)
-    return r_values
+    db.remove_position deletes it - this is the best information left by
+    the time pair_trades ever sees that trade. None only if even the
+    proxy can't be computed (a zero/negative open_price)."""
+    open_price = pair["open_price"]
+    initial_stop = pair.get("initial_stop")
+    risk = abs(open_price - initial_stop) if initial_stop is not None else open_price * 0.01
+    return risk if risk > 0 else None
+
+
+def r_multiple(pair: dict) -> float | None:
+    """Signed R-multiple for one pair's actual close - shared by
+    compute_r_multiples (batch, over live+backtest pairs alike) and
+    src/trade_diagnostics.py's per-trade MFE_R/MAE_R/FinalR (backtest
+    only, since those depend on fields only backtest_engine.py sets).
+    None if initial_risk_per_share can't be computed."""
+    risk = initial_risk_per_share(pair)
+    if risk is None:
+        return None
+    move = (pair["open_price"] - pair["close_price"]) if pair["side"] == "short" else (pair["close_price"] - pair["open_price"])
+    return move / risk
+
+
+def compute_r_multiples(pairs: list[dict]) -> list[float]:
+    """Before this used the 1%-proxy stop unconditionally, even for a
+    backtest pair that had its own real stop sitting right there in the
+    same dict - off by however far the real stop actually was from 1%,
+    which for a wide swing-based stop (backtest_engine's own default) is
+    often several multiples wide, silently sorting trades into the wrong R
+    bucket entirely (see the dashboard's own "Initial Stop" trade column,
+    which was already showing the real number the histogram wasn't
+    using). r_multiple() above now prefers that real stop whenever a pair
+    has one."""
+    return [r for r in (r_multiple(p) for p in pairs) if r is not None]
 
 
 def histogram(r_values: list[float]) -> list[tuple]:

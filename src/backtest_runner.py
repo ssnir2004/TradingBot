@@ -8,7 +8,7 @@ having its own copy.
 """
 from datetime import date
 
-from src import backtest_engine, perf
+from src import backtest_engine, perf, trade_diagnostics
 
 
 def run_one_strategy(
@@ -37,14 +37,27 @@ def run_one_strategy(
     )
     pairs = perf.pair_trades(sim["trades"])
     aggregate = perf.aggregate(pairs)
-    r_values = perf.compute_r_multiples(pairs)
-    histogram = [{"label": l, "count": c, "is_loss": loss} for l, c, loss in perf.histogram(r_values)]
+    # full_report enriches each pair with mfe_usd/mfe_r/mae_usd/mae_r/
+    # final_r/capture_pct (see src/trade_diagnostics.py) - stored as THIS
+    # backtest's own "pairs" going forward, so the per-trade table and PDF
+    # export get those columns for free with no separate lookup. A pair
+    # missing mfe_price/mae_price (predates backtest_engine.py tracking
+    # excursion at all) gets None for all of them rather than a fabricated
+    # number - see trade_diagnostics.enrich's own docstring.
+    report = trade_diagnostics.full_report(pairs)
     return {
         "strategy_name": strategy_name,
         "direction": direction,
-        "pairs": pairs,
+        "pairs": report["pairs"],
         "aggregate": aggregate,
-        "histogram": histogram,
+        # Same {"label", "count", "is_loss"} shape every existing reader
+        # already expects, now with a "pct" alongside each bucket's count.
+        "histogram": report["r_distribution"],
+        "diagnostics": {
+            "summary": report["summary"],
+            "exit_quality": report["exit_quality"],
+            "entry_vs_exit": report["entry_vs_exit"],
+        },
         "skipped_symbols": sim["skipped_symbols"],
         "filter_stats": sim["filter_stats"],
     }

@@ -164,6 +164,27 @@ def _find_stop_out(bars: pd.DataFrame, stop_price: float, side: str) -> pd.Times
     return hit.index[0] if not hit.empty else None
 
 
+def _update_excursion(pos: dict, bar) -> None:
+    """Tracks the best (MFE) and worst (MAE) price seen while a position
+    has been open, off this bar's High/Low rather than just its Close -
+    same intrabar-realism principle _find_stop_out already applies to
+    stops, since the real max/min move within a bar can go well past
+    where it closed. `pos["mfe_price"]`/`pos["mae_price"]` start at
+    entry_price when a position opens, so MFE/MAE are both exactly 0
+    until the first tick this runs against - see each simulate_*
+    function's own Step 1 (called every tick a position is open,
+    including the one it's about to close on, so a stop-out that gapped
+    through still shows the real touch in MAE, not just the stop level)."""
+    high = float(bar["High"])
+    low = float(bar["Low"])
+    if pos["side"] == "short":
+        pos["mfe_price"] = min(pos["mfe_price"], low)
+        pos["mae_price"] = max(pos["mae_price"], high)
+    else:
+        pos["mfe_price"] = max(pos["mfe_price"], high)
+        pos["mae_price"] = min(pos["mae_price"], low)
+
+
 def simulate_strategy(
     strategy_rules: dict,
     side: str,
@@ -346,12 +367,15 @@ def simulate_strategy(
                 # management or new entries for the rest of the day.
                 for symbol, pos in list(open_positions.items()):
                     trade_id += 1
+                    if bar_ts in intraday_by_symbol[symbol].index:
+                        _update_excursion(pos, intraday_by_symbol[symbol].loc[bar_ts])
                     trades.append({
                         "id": trade_id, "symbol": symbol, "side": close_action,
                         "fill_price": float(intraday_by_symbol[symbol].loc[bar_ts, "Close"])
                         if bar_ts in intraday_by_symbol[symbol].index else pos["entry_price"],
                         "size": pos["qty"], "timestamp_iso": bar_ts.isoformat(),
                         "exit_reason": "eod_close", "commission": commission_per_trade,
+                        "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
                     })
                 open_positions.clear()
                 break
@@ -363,6 +387,7 @@ def simulate_strategy(
                     continue  # no new bar for this symbol at this exact tick
                 pos = open_positions[symbol]
                 bar = intraday.loc[bar_ts]
+                _update_excursion(pos, bar)
 
                 stop_hit = _find_stop_out(intraday.loc[[bar_ts]], pos["stop_price"], side)
                 if stop_hit is not None:
@@ -373,6 +398,7 @@ def simulate_strategy(
                         "timestamp_iso": bar_ts.isoformat(),
                         "exit_reason": "stop_loss" if pos["state"] == "pre_breakeven" else "trailing_stop",
                         "commission": commission_per_trade,
+                        "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
                     })
                     del open_positions[symbol]
                     continue
@@ -478,13 +504,17 @@ def simulate_strategy(
                     open_positions[symbol] = {
                         "side": side, "entry_price": price, "initial_stop": initial_stop,
                         "stop_price": initial_stop, "qty": size, "state": "pre_breakeven",
+                        "mfe_price": price, "mae_price": price,
                     }
                     entries_today += 1
 
         # Fallback for the rare case the force_close_time tick was never
         # reached this day (e.g. a holiday-shortened session that ends
         # before force_close_et) — the loop above already handles the
-        # normal case.
+        # normal case. Step 1 already ran (and updated mfe_price/mae_price)
+        # for every bar_ts this day's own loop reached, including its very
+        # last one, since only the force_close_time branch above skips
+        # Step 1 for its own tick - this fallback never fires alongside it.
         for symbol, pos in open_positions.items():
             intraday = intraday_by_symbol[symbol]
             day_bars = intraday[intraday.index.date == day]
@@ -497,6 +527,7 @@ def simulate_strategy(
                 "fill_price": float(last_bar["Close"]), "size": pos["qty"],
                 "timestamp_iso": day_bars.index[-1].isoformat(),
                 "exit_reason": "eod_close", "commission": commission_per_trade,
+                "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
             })
 
     return {"trades": trades, "skipped_symbols": skipped, "filter_stats": filter_stats}
@@ -649,12 +680,15 @@ def simulate_orb_strategy(
             if bar_ts.time() >= force_close_time:
                 for symbol, pos in list(open_positions.items()):
                     trade_id += 1
+                    if bar_ts in intraday_by_symbol[symbol].index:
+                        _update_excursion(pos, intraday_by_symbol[symbol].loc[bar_ts])
                     trades.append({
                         "id": trade_id, "symbol": symbol, "side": close_action,
                         "fill_price": float(intraday_by_symbol[symbol].loc[bar_ts, "Close"])
                         if bar_ts in intraday_by_symbol[symbol].index else pos["entry_price"],
                         "size": pos["qty"], "timestamp_iso": bar_ts.isoformat(),
                         "exit_reason": "eod_close", "commission": commission_per_trade,
+                        "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
                     })
                 open_positions.clear()
                 break
@@ -666,6 +700,7 @@ def simulate_orb_strategy(
                     continue
                 pos = open_positions[symbol]
                 this_bar = intraday.loc[[bar_ts]]
+                _update_excursion(pos, intraday.loc[bar_ts])
 
                 if management_style == "fixed_target_no_trail":
                     # Stop or fixed target, whichever hits first this bar.
@@ -687,6 +722,7 @@ def simulate_orb_strategy(
                             "size": pos["qty"], "timestamp_iso": bar_ts.isoformat(),
                             "exit_reason": "target" if hit_target else "stop_loss",
                             "commission": commission_per_trade,
+                            "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
                         })
                         del open_positions[symbol]
                     continue
@@ -705,6 +741,7 @@ def simulate_orb_strategy(
                         "timestamp_iso": bar_ts.isoformat(),
                         "exit_reason": "stop_loss" if pos["state"] == "pre_breakeven" else "trailing_stop",
                         "commission": commission_per_trade,
+                        "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
                     })
                     del open_positions[symbol]
                     continue
@@ -811,6 +848,7 @@ def simulate_orb_strategy(
                         "entry_price": price, "initial_stop": initial_stop,
                         "stop_price": initial_stop, "target_price": target_price, "qty": size,
                         "state": "pre_breakeven",
+                        "mfe_price": price, "mae_price": price,
                     }
                     entries_today += 1
 
@@ -826,6 +864,7 @@ def simulate_orb_strategy(
                 "fill_price": float(last_bar["Close"]), "size": pos["qty"],
                 "timestamp_iso": day_bars.index[-1].isoformat(),
                 "exit_reason": "eod_close", "commission": commission_per_trade,
+                "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
             })
 
     return {"trades": trades, "skipped_symbols": skipped, "filter_stats": filter_stats}
@@ -947,12 +986,15 @@ def simulate_touch_turn_strategy(
             if bar_ts.time() >= force_close_time:
                 for symbol, pos in list(open_positions.items()):
                     trade_id += 1
+                    if bar_ts in intraday_by_symbol[symbol].index:
+                        _update_excursion(pos, intraday_by_symbol[symbol].loc[bar_ts])
                     trades.append({
                         "id": trade_id, "symbol": symbol, "side": close_action,
                         "fill_price": float(intraday_by_symbol[symbol].loc[bar_ts, "Close"])
                         if bar_ts in intraday_by_symbol[symbol].index else pos["entry_price"],
                         "size": pos["qty"], "timestamp_iso": bar_ts.isoformat(),
                         "exit_reason": "eod_close", "commission": commission_per_trade,
+                        "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
                     })
                 open_positions.clear()
                 pending_orders.clear()  # nothing left resting once the trading day's over
@@ -965,6 +1007,7 @@ def simulate_touch_turn_strategy(
                     continue
                 pos = open_positions[symbol]
                 this_bar = intraday.loc[[bar_ts]]
+                _update_excursion(pos, intraday.loc[bar_ts])
                 stop_hit = _find_stop_out(this_bar, pos["stop_price"], side)
                 target_hit = _find_target_out(this_bar, pos["target_price"], side)
                 if stop_hit is not None or target_hit is not None:
@@ -979,6 +1022,7 @@ def simulate_touch_turn_strategy(
                         "size": pos["qty"], "timestamp_iso": bar_ts.isoformat(),
                         "exit_reason": "target" if hit_target else "stop_loss",
                         "commission": commission_per_trade,
+                        "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
                     })
                     del open_positions[symbol]
 
@@ -1005,6 +1049,7 @@ def simulate_touch_turn_strategy(
                     "side": side, "entry_price": po["limit_price"], "initial_stop": po["initial_stop"],
                     "stop_price": po["initial_stop"], "target_price": po["target_price"], "qty": po["qty"],
                     "state": "pre_breakeven",
+                    "mfe_price": po["limit_price"], "mae_price": po["limit_price"],
                 }
                 entries_today += 1
                 del pending_orders[symbol]
@@ -1066,6 +1111,7 @@ def simulate_touch_turn_strategy(
                 "fill_price": float(last_bar["Close"]), "size": pos["qty"],
                 "timestamp_iso": day_bars.index[-1].isoformat(),
                 "exit_reason": "eod_close", "commission": commission_per_trade,
+                "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
             })
 
     return {"trades": trades, "skipped_symbols": skipped, "filter_stats": filter_stats}

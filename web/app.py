@@ -21,7 +21,7 @@ from fastapi.templating import Jinja2Templates
 
 import cycle
 import morning_prefilter
-from src import backtest_data, backtest_engine, db, gateway_provisioning, mode_config, perf, secrets_store, trades_pdf
+from src import backtest_data, backtest_engine, db, gateway_provisioning, mode_config, perf, secrets_store, trade_diagnostics, trades_pdf
 from src.sp500_tickers import SP500_TICKERS
 from web import gateway_control
 from web.auth import COOKIE_NAME, make_session_cookie, read_session, require_user
@@ -1190,6 +1190,31 @@ async def api_deactivate_strategy(strategy_id: int, account_id: int = Depends(re
     return {"ok": True}
 
 
+@app.get("/api/strategies/{strategy_id}/trade_diagnostics")
+def api_strategy_trade_diagnostics(strategy_id: int, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    """Pooled MFE/MAE/R-multiple diagnostics for one strategy (see
+    src/trade_diagnostics.py) - the Strategy Report card's own "Diagnostics"
+    toggle fetches this on demand rather than the main strategy_report
+    endpoint eagerly computing it for every strategy on every page load.
+    Same pooling/scoping as the trades-PDF endpoint just below - deliberately
+    omits the full enriched pairs list (that's what the PDF and the
+    single-backtest result view are for) to keep this a light summary-only
+    payload."""
+    strategy = db.get_strategy(strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    pooled = perf.pooled_trades_for_strategy(db.list_done_backtest_results(account_id), strategy_id)
+    if not pooled:
+        raise HTTPException(status_code=404, detail="No completed backtests for this strategy yet")
+    report = trade_diagnostics.full_report(pooled["pairs"])
+    return {
+        "strategy_name": pooled["strategy_name"], "direction": pooled["direction"],
+        "backtests_included": pooled["backtests_included"],
+        "summary": report["summary"], "r_distribution": report["r_distribution"],
+        "exit_quality": report["exit_quality"], "entry_vs_exit": report["entry_vs_exit"],
+    }
+
+
 @app.get("/api/strategies/{strategy_id}/trades.pdf")
 def api_strategy_trades_pdf(strategy_id: int, account_id: int = Depends(require_account), user: str = Depends(require_user)):
     """Full trade-by-trade PDF for one strategy, pooled across every 'done'
@@ -1204,9 +1229,16 @@ def api_strategy_trades_pdf(strategy_id: int, account_id: int = Depends(require_
     pooled = perf.pooled_trades_for_strategy(db.list_done_backtest_results(account_id), strategy_id)
     if not pooled:
         raise HTTPException(status_code=404, detail="No completed backtests for this strategy yet")
+    # Re-enriches even for a pool of already-enriched (post-feature) pairs -
+    # enrich() is idempotent either way (see trade_diagnostics' own
+    # docstring) - so the PDF's MFE/MAE/Capture% columns and its Entry vs
+    # Exit section work uniformly regardless of whether every pooled
+    # backtest ran before or after this feature shipped.
+    report = trade_diagnostics.full_report(pooled["pairs"])
     pdf_bytes = trades_pdf.build_trades_pdf(
         pooled["strategy_name"], pooled["direction"], pooled["backtests_included"],
-        pooled["aggregate"], pooled["pairs"],
+        pooled["aggregate"], report["pairs"],
+        diagnostics={"summary": report["summary"], "entry_vs_exit": report["entry_vs_exit"]},
     )
     safe_name = re.sub(r"[^A-Za-z0-9]+", "_", pooled["strategy_name"]).strip("_")
     return Response(
