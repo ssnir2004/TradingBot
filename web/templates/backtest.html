@@ -273,7 +273,11 @@
   <div class="card mb-4">
     <div class="card-header d-flex justify-content-between align-items-center" style="cursor:pointer" onclick="toggleStrategyReportCollapse()">
       <span><span id="strategy-report-chevron">▾</span> Strategy Report <span class="text-muted small">— every completed backtest, pooled per strategy</span></span>
-      <button class="btn btn-sm btn-outline-secondary" onclick="event.stopPropagation(); refreshStrategyReport()">Refresh</button>
+      <span>
+        <a id="strategy-report-download-all" class="btn btn-sm btn-outline-secondary d-none" href="/api/strategies/trades_pdf_all.zip"
+           onclick="event.stopPropagation()" title="Download every strategy's trade log as one ZIP of PDFs">All PDFs ⬇</a>
+        <button class="btn btn-sm btn-outline-secondary" onclick="event.stopPropagation(); refreshStrategyReport()">Refresh</button>
+      </span>
     </div>
     <div class="card-body" id="strategy-report-body">Loading…</div>
   </div>
@@ -1108,6 +1112,7 @@ let lastStrategyReportRows = [];
 // than needing a second, separate filter control that could disagree.
 function renderStrategyReport() {
   const body = document.getElementById("strategy-report-body");
+  document.getElementById("strategy-report-download-all").classList.toggle("d-none", !lastStrategyReportRows.length);
   const rows = lastStrategyReportRows.filter(r => !calHiddenStrategyIds.has(String(r.strategy_id)));
   if (!lastStrategyReportRows.length) { body.innerHTML = '<p class="small text-muted mb-0">No completed backtests yet.</p>'; return; }
   if (!rows.length) { body.innerHTML = '<p class="small text-muted mb-0">Every strategy is hidden — check at least one in the Calendar above.</p>'; return; }

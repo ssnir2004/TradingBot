@@ -10,7 +10,9 @@ import json
 import re
 import subprocess
 import sys
+import zipfile
 from datetime import date
+from io import BytesIO
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -1115,6 +1117,58 @@ def _log_account_action(account_id: int, user: str, **fields):
 @app.get("/api/strategies")
 def api_list_strategies(account_id: int = Depends(require_account), user: str = Depends(require_user)):
     return db.list_strategies(account_id)
+
+
+# Registered ahead of /api/strategies/{strategy_id} below for the same
+# registration-order reason as strategy_report/calendar elsewhere in this
+# file - a literal path segment has to be tried before a route that would
+# otherwise attempt (and fail) to convert it to strategy_id's int type.
+@app.get("/api/strategies/trades_pdf_all.zip")
+def api_strategy_trades_pdf_all(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    """Every strategy's trades.pdf (see the single-strategy endpoint below)
+    bundled into one ZIP, so reviewing every strategy's backtest trade log
+    doesn't mean clicking "PDF" once per Strategy Report card. Same
+    pooling/scoping/enrichment as that endpoint, just looped over every
+    strategy_id perf.strategy_report already found completed backtests
+    for, instead of the one this account asked for by id."""
+    backtests = db.list_done_backtest_results(account_id)
+    report_entries = perf.strategy_report(backtests)
+    if not report_entries:
+        raise HTTPException(status_code=404, detail="No completed backtests yet")
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        used_names = set()
+        for entry in report_entries:
+            pooled = perf.pooled_trades_for_strategy(backtests, entry["strategy_id"])
+            if not pooled:
+                continue
+            strategy = db.get_strategy(int(entry["strategy_id"]))
+            diag_report = trade_diagnostics.full_report(pooled["pairs"])
+            pdf_bytes = trades_pdf.build_trades_pdf(
+                pooled["strategy_name"], pooled["direction"], pooled["backtests_included"],
+                pooled["aggregate"], diag_report["pairs"],
+                diagnostics={"summary": diag_report["summary"], "entry_vs_exit": diag_report["entry_vs_exit"],
+                             "es_filter": diag_report["es_filter"]},
+                description=strategy["description"] if strategy else None,
+            )
+            safe_name = re.sub(r"[^A-Za-z0-9]+", "_", pooled["strategy_name"]).strip("_")
+            # De-duped in case two strategies' names collapse to the same
+            # safe_name once non-alphanumerics are stripped (e.g. differing
+            # only by punctuation) - a plain zf.writestr with a repeated
+            # arcname would silently overwrite the first entry in most zip
+            # readers rather than erroring, quietly dropping a strategy's
+            # PDF from the archive.
+            arcname = f"{safe_name}_trades.pdf"
+            n = 2
+            while arcname in used_names:
+                arcname = f"{safe_name}_trades_{n}.pdf"
+                n += 1
+            used_names.add(arcname)
+            zf.writestr(arcname, pdf_bytes)
+    return Response(
+        content=buf.getvalue(), media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="all_strategies_trades.zip"'},
+    )
 
 
 @app.get("/api/strategies/{strategy_id}")
