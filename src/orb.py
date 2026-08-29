@@ -314,6 +314,26 @@ def _apply_min_stop_distance(entry_price: float, technical_stop: float, side: st
     return max(technical_stop, entry_price + min_distance)
 
 
+def _apply_stop_r_multiplier(entry_price: float, stop: float, side: str, rules: dict) -> float:
+    """Widens an already-floored stop's distance from entry by
+    rules["risk"].get("initial_stop_r_multiplier", 1.0) - opt-in, off by
+    default (1.0 is a no-op) so every existing ORB strategy is completely
+    unaffected unless it explicitly carries this key (currently ORB Long/
+    Short v4 only, at 1.40 - see EXTRA_STRATEGY_PRESETS' own v4 comment in
+    src/db.py). Applied AFTER _apply_min_stop_distance, so the floor still
+    protects against a near-zero technical wick before the multiplier
+    scales it - everything downstream (R-multiple, position sizing,
+    MFE/partial-profit/trail R-triggers) is anchored to THIS final stop
+    distance, same as always. Called right after _apply_min_stop_distance
+    at both entry-model call sites below."""
+    mult = rules.get("risk", {}).get("initial_stop_r_multiplier", 1.0)
+    if mult == 1.0:
+        return stop
+    distance = (entry_price - stop) if side == "long" else (stop - entry_price)
+    widened = distance * mult
+    return (entry_price - widened) if side == "long" else (entry_price + widened)
+
+
 def evaluate_orb_entry(
     daily: pd.DataFrame, intraday: pd.DataFrame, rules: dict, side: str,
     prior_day_bars: dict | None = None, signal_side: str | None = None,
@@ -472,6 +492,7 @@ def evaluate_orb_entry(
                 entry_price = float(confirm_bar["Close"])
                 stop = float(confirm_bar["Low"]) if side == "long" else float(confirm_bar["High"])
                 stop = _apply_min_stop_distance(entry_price, stop, side, rules)
+                stop = _apply_stop_r_multiplier(entry_price, stop, side, rules)
                 risk = (entry_price - stop) if side == "long" else (stop - entry_price)
                 if risk > 0:
                     target_rr = entry_models["breakout"].get("target_rr")
@@ -491,6 +512,7 @@ def evaluate_orb_entry(
             entry_price = float(bar["Close"])
             stop = float(bar["Low"]) if side == "long" else float(bar["High"])
             stop = _apply_min_stop_distance(entry_price, stop, side, rules)
+            stop = _apply_stop_r_multiplier(entry_price, stop, side, rules)
             risk = (entry_price - stop) if side == "long" else (stop - entry_price)
             if risk > 0:
                 target_rr = entry_models["retest"].get("target_rr")

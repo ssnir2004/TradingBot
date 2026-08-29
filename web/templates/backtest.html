@@ -820,6 +820,11 @@ const EXIT_REASON_LABELS = {
   profit_lock_stop: "Profit-lock stop",
   staged_trailing_stop: "Staged trailing stop",
   legacy_trailing_stop: "Legacy trailing stop - subtype unknown",
+  // ORB Long/Short v4's scaled-exit half-close leg (see backtest_engine.
+  // py's scaled_exit_immediate_trail branch) - distinct from the stale
+  // "partial_profit" key above, which the old (removed) partial-profit
+  // stage used and no current code path produces anymore.
+  partial_profit_take: "Partial profit take",
 };
 
 // Compact per-trade lifecycle summary - see the classification spec's own

@@ -54,6 +54,10 @@ EXIT_REASON_LABELS = {
     "profit_lock_stop": "Profit-lock stop",
     "staged_trailing_stop": "Staged trailing stop",
     "legacy_trailing_stop": "Legacy trailing stop - subtype unknown",
+    # ORB Long/Short v4's scaled-exit half-close leg (see backtest_engine.
+    # py's scaled_exit_immediate_trail branch) - a separate trade record
+    # from whichever exit_reason above closes the OTHER half.
+    "partial_profit_take": "Partial profit take",
 }
 
 

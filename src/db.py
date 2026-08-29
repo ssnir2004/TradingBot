@@ -1310,6 +1310,225 @@ EXTRA_STRATEGY_PRESETS = [
         "במקרה של short squeeze. אל תפעיל LIVE לפני בדיקה מקיפה.",
     ),
     (
+        # v4 of ORB Long v3 - EXACT same entry logic/filters as v3 (see its
+        # own comment above, not repeated here: opening_range/universe_
+        # filters/volatility_filters/entry_confluence/entry_models/
+        # time_filter/es_vwap_filter are byte-for-byte copies). Trade
+        # management is a completely different, brand-new model: a scaled
+        # exit instead of staged_trail's single-position profit-lock/
+        # trail state machine - see backtest_engine.py's own
+        # scaled_exit_immediate_trail branch (simulate_orb_strategy) and
+        # src/orb.py's _apply_stop_r_multiplier, both new for this
+        # strategy. There is NO profit lock and NO breakeven stage at all
+        # (deliberately - see the request's own "Core Philosophy": take
+        # partial profits early, reduce commission impact, let part of
+        # the position run):
+        #   risk.initial_stop_r_multiplier: 1.40 - the technical stop
+        #     (same confirmation-candle/retest low|high as v3, same
+        #     min_stop_distance_pct floor) is placed 1.40x further from
+        #     entry than it otherwise would be - a deliberately WIDER
+        #     stop, giving the trade more room before being stopped out
+        #     early. R (for the partial-trigger/position-sizing below) is
+        #     then anchored to THIS widened distance, same as always -
+        #     r_multiple.py/trade_diagnostics never needed to change.
+        #   risk.position_size_multiplier: 2.0 - doubles size_by_risk
+        #     ONLY (backtest_engine.py's own sizing block) - size_by_cap
+        #     (max_position_size_pct_of_portfolio, the account-level
+        #     guardrail) is untouched and still wins via min() if the
+        #     doubled size would exceed it, so the portfolio-pct cap is
+        #     never bypassed.
+        #   exit.partial_trigger_R: 1.15, exit.partial_pct: 0.50 - the
+        #     first time MFE (a real touch, not just Close) reaches
+        #     entry + 1.15R, HALF the position is closed at that exact
+        #     price (a real fillable level, like fixed_target_no_trail's
+        #     own target_price - not a theoretical MFE-only number), and
+        #     a genuine trailing stop activates IMMEDIATELY on the other
+        #     half - the exact same trailing algorithm/candidate source
+        #     v2/v3 already use (orb.low_of_last_n_bars/high_of_last_n_
+        #     bars + cycle._trailing_stop_decision), completely
+        #     unmodified, just triggered by this event instead of a
+        #     separate trailing_trigger_R gate.
+        # perf.pair_trades already supports a single entry closed across
+        # several opposite-side fills (its own long-standing "_remaining"
+        # tracking, built for the historical partial-profit stage before
+        # it was removed) - reused here as-is, no changes needed there.
+        # Exit reasons reuse 3 of the 4 existing categories (no profit_
+        # lock_stop - v4 never produces it) plus one new one:
+        # "initial_stop_loss" (stopped before the partial fires),
+        # "staged_trailing_stop" (the trailing remainder stopped out),
+        # "eod_close" (unchanged), and "partial_profit_take" (the
+        # scheduled half-close itself, a new label). has_profit_lock is
+        # correctly False for v4 (no profit_lock_offset_R key), so
+        # classify_exit_reason passes these straight through unchanged -
+        # no remapping/legacy handling needed, this is a brand new
+        # strategy with no historical baggage.
+        "ORB Long v4 (Scaled Exit, Immediate Trail)",
+        {
+            "strategy_name": "ORB Long v4 (Scaled Exit, Immediate Trail)",
+            "direction": "long_only",
+            "es_vwap_filter": True,
+            "opening_range": {
+                "or_timeframe": "15m",
+                "confirm_timeframe": "5m",
+                "entry_timeframe": "5m",
+                "session": "new_york",
+                "session_open_et": "09:30",
+            },
+            "universe_filters": {
+                "index": "S&P 500",
+                "min_price_usd": 3.0,
+                "custom_universe": "sp500_marketcap_1b",
+            },
+            "volatility_filters": {
+                "V1_rvol_min": 2.0,
+                "V1_rvol_lookback_days": 14,
+                "V2_atr_period": 14,
+                "V2_atr_pct_tiers": [
+                    {"price_min": 3.0, "price_max": 20.0, "atr_pct_min": 4.0},
+                    {"price_min": 20.0, "price_max": 50.0, "atr_pct_min": 3.0},
+                    {"price_min": 50.0, "price_max": 100.0, "atr_pct_min": 2.0},
+                    {"price_min": 100.0, "price_max": None, "atr_pct_min": 1.5},
+                ],
+            },
+            "entry_confluence": {
+                "rsi_period": 14,
+                "rsi_rising_bars": 3,
+                "ema_period": 20,
+            },
+            "entry_models": {
+                "breakout": {"enabled": True},
+                "retest": {"enabled": True},
+            },
+            "time_filter": {"earliest_entry_et": "09:50", "latest_entry_et": "11:30", "force_close_et": "15:51"},
+            "exit": {
+                "management_style": "scaled_exit_immediate_trail",
+                "partial_trigger_R": 1.15,
+                "partial_pct": 0.50,
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+                "min_stop_distance_pct": 0.25,
+                "initial_stop_r_multiplier": 1.40,
+                "position_size_multiplier": 2.0,
+            },
+        },
+        "aggressive",
+        "long",
+        "## מה זה עושה\n"
+        "גרסה רביעית (v4) של ORB Long - תנאי כניסה זהים לחלוטין ל-ORB Long v3 (וממילא ל-v2: "
+        "OR breakout/retest, RSI+EMA/VWAP, RVOL+ATR%, ES VWAP, אותו יקום וחלון כניסות). ניהול "
+        "הפוזיציה שונה **לגמרי** - מודל יציאה מדורגת (scaled exit) במקום ה-staged trail של "
+        "v2/v3. **נשמרת כאסטרטגיה נפרדת** (לא דריסה) כדי לא לערבב היסטוריות בקטסט.\n\n"
+        "## פילוסופיית הליבה\n"
+        "לקיחת רווח חלקי מוקדם, צמצום השפעת העמלה (יחסית לגודל הפוזיציה), והשארת חלק מהפוזיציה "
+        "לרכוב על המשך המגמה.\n\n"
+        "## סיכון: סטופ רחב יותר (1.40x)\n"
+        "הסטופ הטכני (זהה ל-v3: שפל נר האישור/רה-טסט, עם אותה רצפת 0.25%) ממוקם רחוק יותר מהכניסה "
+        "פי 1.40 ממה שהיה בדרך כלל - סטופ מכוון רחב יותר, נותן לעסקה יותר מקום לנשום לפני עצירה "
+        "מוקדמת. כל חישובי ה-R (טריגר לרווח חלקי, גודל פוזיציה) מבוססים על המרחק הרחב הזה.\n\n"
+        "## גודל פוזיציה: פי 2\n"
+        "הגודל המבוסס-סיכון (size_by_risk) מוכפל פי 2 יחסית ל-v3 - **אך** תקרת האחוז מהתיק "
+        "(max_position_size_pct_of_portfolio) נשארת ללא שינוי ועדיין מגבילה את הגודל בפועל אם "
+        "ההכפלה תעבור אותה. כל שאר הגנות הסיכון ברמת החשבון נשארות שלמות.\n\n"
+        "## יציאה: רווח חלקי מוקדם + טריילינג מיידי\n"
+        "כש-MFE (נגיעה בפועל, לא רק סגירה) מגיע לראשונה ל-**+1.15R**, נסגרים **50%** מהפוזיציה "
+        "במחיר המדויק הזה. על ה-50% הנותרים מופעל **מיידית** טריילינג סטופ - **אותו אלגוריתם "
+        "בדיוק** כמו ב-v2/v3 (מתחת לשפל של שני נרות 5 הדקות האחרונים), רק שהוא מופעל מיד עם "
+        "הרווח החלקי במקום סף R נפרד. **אין Profit Lock ואין Breakeven** בכלל במודל הזה - שני "
+        "השלבים היחידים הם הסטופ הרחב המקורי (עד לרווח החלקי) והטריילינג האמיתי (אחריו).\n\n"
+        "## סיווג סיבת יציאה\n"
+        "Initial stop loss (נעצר לפני הרווח החלקי) / Partial profit take (הרגל הראשונה) / "
+        "Staged trailing stop (ה-50% הנותרים נעצרו בטריילינג) / End of day. אין Profit-lock "
+        "stop במודל הזה כלל.\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive - אסטרטגיה חדשה לגמרי שלא נבדקה כלל, עם סטופ רחב יותר וגודל פוזיציה "
+        "כפול - סיכון דולרי גבוה משמעותית לעסקה בודדת יחסית ל-v2/v3, גם עם התקרות שנשארו. סיכון "
+        "לעסקה (base): 1% | גודל פוזיציה מקס': 10% | פוזיציות בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "אין לזה שום היסטוריית בקטסט עדיין. כל אזהרות ORB Long v3 תקפות כאן, ובנוסף: הסטופ הרחב "
+        "פי 1.40 וגודל הפוזיציה הכפול פי 2 יחד עלולים להגדיל את ההפסד הדולרי בעסקת stop-loss "
+        "בודדת משמעותית יחסית ל-v3 - הרץ בקטסט מקיף (שבועות-חודשים, מאות עסקאות) לפני כל שיקול "
+        "נוסף.",
+    ),
+    (
+        # v4 of ORB Short v3 - exact mirror of ORB Long v4 above, see its
+        # own comment for the full explanation, not repeated here.
+        "ORB Short v4 (Scaled Exit, Immediate Trail)",
+        {
+            "strategy_name": "ORB Short v4 (Scaled Exit, Immediate Trail)",
+            "direction": "short_only",
+            "es_vwap_filter": True,
+            "opening_range": {
+                "or_timeframe": "15m",
+                "confirm_timeframe": "5m",
+                "entry_timeframe": "5m",
+                "session": "new_york",
+                "session_open_et": "09:30",
+            },
+            "universe_filters": {
+                "index": "S&P 500",
+                "min_price_usd": 3.0,
+                "custom_universe": "sp500_marketcap_1b",
+            },
+            "volatility_filters": {
+                "V1_rvol_min": 2.0,
+                "V1_rvol_lookback_days": 14,
+                "V2_atr_period": 14,
+                "V2_atr_pct_tiers": [
+                    {"price_min": 3.0, "price_max": 20.0, "atr_pct_min": 4.0},
+                    {"price_min": 20.0, "price_max": 50.0, "atr_pct_min": 3.0},
+                    {"price_min": 50.0, "price_max": 100.0, "atr_pct_min": 2.0},
+                    {"price_min": 100.0, "price_max": None, "atr_pct_min": 1.5},
+                ],
+            },
+            "entry_confluence": {
+                "rsi_period": 14,
+                "rsi_rising_bars": 3,
+                "ema_period": 20,
+            },
+            "entry_models": {
+                "breakout": {"enabled": True},
+                "retest": {"enabled": True},
+            },
+            "time_filter": {"earliest_entry_et": "09:50", "latest_entry_et": "11:30", "force_close_et": "15:51"},
+            "exit": {
+                "management_style": "scaled_exit_immediate_trail",
+                "partial_trigger_R": 1.15,
+                "partial_pct": 0.50,
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+                "min_stop_distance_pct": 0.25,
+                "initial_stop_r_multiplier": 1.40,
+                "position_size_multiplier": 2.0,
+            },
+        },
+        "aggressive",
+        "short",
+        "## מה זה עושה\n"
+        "מראה הפוכה מדויקת של ORB Long v4 - ראו את התיאור המלא שם. כאן: תנאי כניסה זהים "
+        "לחלוטין ל-ORB Short v3 (RSI יורד, EMA יורד/מחיר מתחת ל-VWAP, אותם פילטרים ויקום). אותו "
+        "מודל ניהול פוזיציה בדיוק: סטופ רחב פי 1.40, גודל פוזיציה כפול, רווח חלקי (50%) ב-MFE "
+        "-1.15R עם טריילינג מיידי על היתרה - אין Profit Lock ואין Breakeven.\n\n"
+        "## סיווג סיבת יציאה\n"
+        "Initial stop loss / Partial profit take / Staged trailing stop / End of day. אין "
+        "Profit-lock stop.\n\n"
+        "## יקום, פילטרים, חלון כניסות\n"
+        "זהה לחלוטין ל-ORB Short v3 ול-ORB Long v4.\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive - אסטרטגיה חדשה לגמרי שלא נבדקה כלל, עם סטופ רחב יותר וגודל פוזיציה "
+        "כפול. סיכון לעסקה (base): 1% | גודל פוזיציה מקס': 10% | פוזיציות בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "כל אזהרות ORB Long v4 ו-ORB Short v3 תקפות כאן, ובנוסף: בפוזיציית Short אין תקרה "
+        "תיאורטית להפסד - מחיר המניה יכול לעלות ללא הגבלה, וה-stop עלול 'לקפוץ מעל' (gap) "
+        "במקרה של short squeeze, וזה מוחמר עוד יותר עם גודל הפוזיציה הכפול. אל תפעיל LIVE לפני "
+        "בדיקה מקיפה.",
+    ),
+    (
         # Experimental "fade" pair for ORB v2, same signal_side mechanism
         # (and same research motivation) as "Long Breakout Fade (Short)"/
         # "Short Breakdown Fade (Long)" above, extended to

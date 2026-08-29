@@ -816,6 +816,95 @@ def simulate_orb_strategy(
                         del open_positions[symbol]
                     continue
 
+                if management_style == "scaled_exit_immediate_trail":
+                    # ORB v4: no profit-lock/breakeven stage at all - a v4
+                    # position only ever holds one of two stop levels: (1)
+                    # the initial (deliberately widened via risk.initial_
+                    # stop_r_multiplier) stop, until the partial-profit
+                    # target is touched, or (2) a genuinely trailing stop
+                    # (same orb.low_of_last_n_bars/high_of_last_n_bars
+                    # candidate source as v2/v3's own trailing), activated
+                    # on the SAME bar the partial fires - immediately, not
+                    # gated behind a separate R threshold, per the spec's
+                    # "Immediately activate Trailing Stop on the remaining
+                    # half". Stop-out checked first each bar (same
+                    # convention as every other management_style here),
+                    # against whichever of the two levels is currently in
+                    # effect and whatever qty currently remains (already
+                    # correctly shrunk below once the partial fires).
+                    stop_hit = _find_stop_out(this_bar, pos["stop_price"], side)
+                    if stop_hit is not None:
+                        trade_id += 1
+                        trades.append({
+                            "id": trade_id, "symbol": symbol, "side": close_action,
+                            "fill_price": pos["stop_price"], "size": pos["qty"],
+                            "timestamp_iso": bar_ts.isoformat(),
+                            "exit_reason": "staged_trailing_stop" if pos["partial_taken"] else "initial_stop_loss",
+                            "commission": commission_per_trade,
+                            "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
+                            "trail_activated": pos["trail_activated"], "trail_activated_at_r": pos["trail_activated_at_r"],
+                        })
+                        del open_positions[symbol]
+                        continue
+
+                    if not pos["partial_taken"]:
+                        partial_hit = _find_target_out(this_bar, pos["partial_target_price"], side)
+                        if partial_hit is not None:
+                            partial_qty = pos["partial_qty"]
+                            if partial_qty > 0:
+                                trade_id += 1
+                                trades.append({
+                                    "id": trade_id, "symbol": symbol, "side": close_action,
+                                    "fill_price": pos["partial_target_price"], "size": partial_qty,
+                                    "timestamp_iso": bar_ts.isoformat(),
+                                    "exit_reason": "partial_profit_take", "commission": commission_per_trade,
+                                    "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
+                                })
+                                pos["qty"] -= partial_qty
+                            pos["partial_taken"] = True
+                            # "Immediately activate Trailing Stop" is a
+                            # state, not just this bar's own trail_decision
+                            # outcome - stamped True/at_r the instant the
+                            # partial fires (flows into the "Protection"
+                            # column/exit_reason_breakdown via trail_
+                            # activated(_at_r) exactly like v2/v3's own),
+                            # even on a bar whose candidate doesn't yet
+                            # improve on the wide stop (still degenerate
+                            # for one more bar, see below - trailing is
+                            # active, just hasn't moved the stop yet).
+                            pos["trail_activated"] = True
+                            pos["trail_activated_at_r"] = exit_cfg.get("partial_trigger_R", 1.15)
+                            # Trail candidate off the same 2-bar source
+                            # v2/v3 already use - price has already run
+                            # partial_trigger_R in our favor by now, so the
+                            # candidate is almost always valid (better than
+                            # the wide initial stop) and an improvement
+                            # (better than the current stop), but cycle.
+                            # _trailing_stop_decision's own validity/
+                            # improvement checks still gate it exactly like
+                            # v2/v3 - a degenerate candidate (e.g. too few
+                            # bars yet) just leaves the wide stop in place
+                            # for one more bar rather than forcing a bad
+                            # level.
+                            recent_bars = intraday[intraday.index <= bar_ts].tail(2)
+                            candidate = (
+                                orb.low_of_last_n_bars(recent_bars, 2) if side == "long"
+                                else orb.high_of_last_n_bars(recent_bars, 2)
+                            )
+                            trail_decision = cycle._trailing_stop_decision(pos, candidate)
+                            if trail_decision["action"] == "trail_stop":
+                                pos["stop_price"] = trail_decision["new_stop_price"]
+                    else:
+                        recent_bars = intraday[intraday.index <= bar_ts].tail(2)
+                        candidate = (
+                            orb.low_of_last_n_bars(recent_bars, 2) if side == "long"
+                            else orb.high_of_last_n_bars(recent_bars, 2)
+                        )
+                        trail_decision = cycle._trailing_stop_decision(pos, candidate)
+                        if trail_decision["action"] == "trail_stop":
+                            pos["stop_price"] = trail_decision["new_stop_price"]
+                    continue
+
                 # staged_trail: stop-out check first (against whatever
                 # stop_price currently is - initial, breakeven, or
                 # trailing), then breakeven-flip and gated-trailing, same
@@ -946,8 +1035,17 @@ def simulate_orb_strategy(
                     if r <= 0:
                         continue
 
+                    # position_size_multiplier (currently ORB Long/Short v4
+                    # only, at 2.0 - see EXTRA_STRATEGY_PRESETS' own v4
+                    # comment in src/db.py) scales UP size_by_risk only -
+                    # size_by_cap (max_position_size_pct_of_portfolio, the
+                    # account-level guardrail) is computed unchanged and
+                    # still wins via min() below if the doubled risk-based
+                    # size would exceed it, so the portfolio-pct cap is
+                    # never bypassed by this multiplier.
                     risk_dollars = portfolio_value * (max_risk_pct / 100)
-                    size_by_risk = math.floor(risk_dollars / r)
+                    size_multiplier = strategy_rules["risk"].get("position_size_multiplier", 1.0)
+                    size_by_risk = math.floor(risk_dollars * size_multiplier / r)
                     size_by_cap = math.floor(portfolio_value * max_position_pct / price)
                     size = min(size_by_risk, size_by_cap)
                     if size < 1:
@@ -990,6 +1088,28 @@ def simulate_orb_strategy(
                         "profit_lock_activated": False, "profit_lock_activated_at_r": None,
                         "trail_activated": False, "trail_activated_at_r": None,
                     }
+                    if management_style == "scaled_exit_immediate_trail":
+                        # ORB v4: scaled exit, no profit-lock/breakeven stage
+                        # at all (see the Step-1 loop's own branch below) -
+                        # partial_target_price is a real fill level (like
+                        # fixed_target_no_trail's own target_price above),
+                        # touched via _find_target_out, not an MFE-only
+                        # theoretical level - a partial CLOSE needs an
+                        # actual, fillable price. partial_qty is computed
+                        # once here off the ORIGINAL size (not recomputed
+                        # off pos["qty"] later, which shrinks after the
+                        # partial fires) - 0 (skip the split, just activate
+                        # trailing on the full remaining qty when touched)
+                        # for a position too small to meaningfully halve.
+                        partial_trigger_r = exit_cfg.get("partial_trigger_R", 1.15)
+                        partial_pct = exit_cfg.get("partial_pct", 0.5)
+                        partial_target = (
+                            price + partial_trigger_r * r if side == "long" else price - partial_trigger_r * r
+                        )
+                        partial_qty = math.floor(size * partial_pct)
+                        open_positions[symbol]["partial_target_price"] = partial_target
+                        open_positions[symbol]["partial_qty"] = partial_qty if 1 <= partial_qty < size else 0
+                        open_positions[symbol]["partial_taken"] = False
                     entries_today += 1
 
         for symbol, pos in open_positions.items():
