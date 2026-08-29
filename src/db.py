@@ -422,6 +422,7 @@ EXTRA_STRATEGY_PRESETS = [
             "strategy_name": "Short Breakdown Conservative",
             "direction": "short_only",
             "trade_timeframe": "5m",
+            "es_vwap_filter": True,
             "universe_filters": {"index": "S&P 500", "min_price_usd": 3.0},
             "daily_filters": {
                 "D1_below_prior_day_low": True,
@@ -767,6 +768,7 @@ EXTRA_STRATEGY_PRESETS = [
         {
             "strategy_name": "ORB Long (Opening Range Breakout)",
             "direction": "long_only",
+            "es_vwap_filter": True,
             "opening_range": {
                 "or_timeframe": "15m",
                 "confirm_timeframe": "5m",
@@ -848,6 +850,7 @@ EXTRA_STRATEGY_PRESETS = [
         {
             "strategy_name": "ORB Short (Opening Range Breakdown)",
             "direction": "short_only",
+            "es_vwap_filter": True,
             "opening_range": {
                 "or_timeframe": "15m",
                 "confirm_timeframe": "5m",
@@ -930,6 +933,7 @@ EXTRA_STRATEGY_PRESETS = [
         {
             "strategy_name": "ORB Long v2 (RSI/Trend Confluence, Staged Trail)",
             "direction": "long_only",
+            "es_vwap_filter": True,
             "opening_range": {
                 "or_timeframe": "15m",
                 "confirm_timeframe": "5m",
@@ -1008,6 +1012,7 @@ EXTRA_STRATEGY_PRESETS = [
         {
             "strategy_name": "ORB Short v2 (RSI/Trend Confluence, Staged Trail)",
             "direction": "short_only",
+            "es_vwap_filter": True,
             "opening_range": {
                 "or_timeframe": "15m",
                 "confirm_timeframe": "5m",
@@ -1259,6 +1264,7 @@ EXTRA_STRATEGY_PRESETS = [
         {
             "strategy_name": "Touch & Turn Scalper - Long",
             "direction": "long_only",
+            "es_vwap_filter": True,
             "opening_candle": {"timeframe_minutes": 15, "session_open_et": "09:30"},
             "universe_filters": {"index": "S&P 500", "min_price_usd": 3.0},
             "liquidity_filter": {"atr_period": 14, "atr_multiplier": 0.25},
@@ -1315,6 +1321,7 @@ EXTRA_STRATEGY_PRESETS = [
         {
             "strategy_name": "Touch & Turn Scalper - Short",
             "direction": "short_only",
+            "es_vwap_filter": True,
             "opening_candle": {"timeframe_minutes": 15, "session_open_et": "09:30"},
             "universe_filters": {"index": "S&P 500", "min_price_usd": 3.0},
             "liquidity_filter": {"atr_period": 14, "atr_multiplier": 0.25},
@@ -1785,6 +1792,33 @@ def init_db(seed_rules_path: Path | None = None):
                 (_new_text, _name, _old_text),
             )
 
+        # One-time migration adding "es_vwap_filter": true to the 8 named
+        # strategies the ES VWAP directional filter applies to (see
+        # src/es_filter.py) - a fresh install already gets this from
+        # EXTRA_STRATEGY_PRESETS/rules.json above, but an existing DB's
+        # row was seeded before that key existed and INSERT OR IGNORE
+        # never touches it again. Uses SQLite's own JSON1 functions
+        # (json_set/json_extract) rather than an exact-text match (the
+        # _STALE_PARTIAL_PROFIT_DESCRIPTIONS convention above) since
+        # rules_json's exact whitespace/key-order isn't something this
+        # migration should have to match byte-for-byte - only touches a
+        # row that doesn't already have the key set, so it's a no-op on
+        # every later restart once applied, and never overwrites a
+        # deliberate manual "es_vwap_filter": false a user might set to
+        # opt a specific strategy back out.
+        _ES_VWAP_FILTER_STRATEGY_NAMES = (
+            "Long Breakout Conservative", "Short Breakdown Conservative",
+            "ORB Long (Opening Range Breakout)", "ORB Short (Opening Range Breakdown)",
+            "ORB Long v2 (RSI/Trend Confluence, Staged Trail)", "ORB Short v2 (RSI/Trend Confluence, Staged Trail)",
+            "Touch & Turn Scalper - Long", "Touch & Turn Scalper - Short",
+        )
+        for _name in _ES_VWAP_FILTER_STRATEGY_NAMES:
+            conn.execute(
+                "UPDATE strategies SET rules_json = json_set(rules_json, '$.es_vwap_filter', json('true')) "
+                "WHERE name = ? AND json_extract(rules_json, '$.es_vwap_filter') IS NULL",
+                (_name,),
+            )
+
 
 # -------------------------------------------------------------- settings ---
 def get_setting(key: str, default: str = "") -> str:
@@ -1829,6 +1863,20 @@ def is_bot_enabled(account_id: int, mode: str) -> bool:
 
 def set_bot_enabled(account_id: int, mode: str, enabled: bool):
     set_setting(_scope_key(account_id, mode, "bot_enabled"), "true" if enabled else "false")
+
+
+# Off by default (unlike bot_enabled) - src/es_filter.py needs real CME
+# futures market-data entitlement on this account's IBKR connection to do
+# anything useful; enabling it before that's confirmed just means every
+# gated strategy fails open on every scan (harmless, per es_filter.check's
+# own fail-open design, but pointless). See cycle.entry_scan/touch_turn_
+# entry_scan for where this actually gates a trade.
+def is_es_vwap_filter_enabled(account_id: int, mode: str) -> bool:
+    return get_setting(_scope_key(account_id, mode, "es_vwap_filter_enabled"), "false") == "true"
+
+
+def set_es_vwap_filter_enabled(account_id: int, mode: str, enabled: bool):
+    set_setting(_scope_key(account_id, mode, "es_vwap_filter_enabled"), "true" if enabled else "false")
 
 
 def request_flatten_now(account_id: int, mode: str):

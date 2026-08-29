@@ -127,6 +127,36 @@ def build_trades_pdf(strategy_name: str, direction: str, backtests_included: int
             story.append(Paragraph(f"• {note}", styles["Normal"]))
         story.append(Spacer(1, 6 * mm))
 
+    es_filter = diagnostics.get("es_filter") if diagnostics else None
+    if es_filter:
+        b, a = es_filter["before"], es_filter["after"]
+        story.append(Paragraph("ES VWAP Filter — Before vs After", styles["Heading3"]))
+        story.append(Paragraph(
+            f"{es_filter['rejected_count']} of {es_filter['total_trades']} trades "
+            f"({es_filter['rejected_pct']}%) would have been rejected.",
+            styles["Normal"],
+        ))
+        es_rows = [
+            ["", "Before filter", "After filter"],
+            ["Total trades", str(b["total_trades"]), str(a["total_trades"])],
+            ["Win rate", _fmt_pct(b["win_rate_pct"]), _fmt_pct(a["win_rate_pct"])],
+            ["Profit factor", str(b["profit_factor"]), str(a["profit_factor"])],
+            ["Net profit", _fmt_money(b["net_profit_usd"]), _fmt_money(a["net_profit_usd"])],
+            ["Avg R", _fmt_r(b["avg_r"]), _fmt_r(a["avg_r"])],
+            ["Max drawdown", _fmt_money(b["max_drawdown_usd"]), _fmt_money(a["max_drawdown_usd"])],
+        ]
+        es_table = Table(es_rows, colWidths=[35 * mm, 35 * mm, 35 * mm])
+        es_table.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.lightgrey),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef1f5")),
+        ]))
+        story.append(es_table)
+        story.append(Spacer(1, 6 * mm))
+
     # PNL_COL/FINAL_R_COL index into `header` below - used after the loop to
     # color those two columns green/red per row without hardcoding the
     # index twice and risking the two silently drifting apart.

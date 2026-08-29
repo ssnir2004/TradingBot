@@ -61,6 +61,33 @@ async function refreshStatus() {
     s.last_cycle_timestamp ? `${s.last_cycle_timestamp} (${s.last_cycle_status})` : "no cycle data yet";
   nextCycleAtMs = s.next_cycle_at ? new Date(s.next_cycle_at).getTime() : null;
   updateCountdown();
+  refreshEsFilterStatus();
+}
+
+// ------------------------------------------------------- ES VWAP filter ---
+async function refreshEsFilterStatus() {
+  const toggle = document.getElementById("es-filter-toggle");
+  if (!toggle) return;  // viewer role - _header.html's control cards aren't rendered
+  const s = await modeApi("/api/es_filter_status");
+  toggle.checked = s.enabled;
+  document.getElementById("es-filter-toggle-label").textContent = s.enabled ? "Enabled" : "Disabled";
+}
+if (document.getElementById("es-filter-toggle")) {
+  document.getElementById("es-filter-toggle").addEventListener("change", async (e) => {
+    const enabled = e.target.checked;
+    const errEl = document.getElementById("es-filter-error");
+    errEl.textContent = "";
+    try {
+      const s = await modeApi("/api/es_filter_status", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      document.getElementById("es-filter-toggle-label").textContent = s.enabled ? "Enabled" : "Disabled";
+    } catch (err) {
+      e.target.checked = !enabled;  // revert the switch - the request failed
+      errEl.textContent = err.message || "Failed to update";
+    }
+  });
 }
 
 function updateCountdown() {

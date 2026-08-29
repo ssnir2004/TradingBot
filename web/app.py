@@ -317,6 +317,25 @@ def api_flatten(mode: str = Depends(require_mode), account_id: int = Depends(req
     return {"flatten_pending": True}
 
 
+# Off by default (see db.is_es_vwap_filter_enabled's own docstring) - this
+# toggle is the explicit sign-off gate before cycle.py's entry_scan/
+# touch_turn_entry_scan ever actually enforce src/es_filter.py's gate,
+# since it needs real CME futures market-data entitlement this account
+# may not have confirmed yet.
+@app.get("/api/es_filter_status")
+def api_get_es_filter_status(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    return {"enabled": db.is_es_vwap_filter_enabled(account_id, mode)}
+
+
+@app.post("/api/es_filter_status")
+async def api_set_es_filter_status(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    body = await request.json()
+    enabled = bool(body.get("enabled"))
+    db.set_es_vwap_filter_enabled(account_id, mode, enabled)
+    db.log_decision(account_id, mode, "dashboard_control", action="es_vwap_filter_toggle", enabled=enabled, user=user)
+    return {"enabled": enabled}
+
+
 @app.get("/api/account")
 def api_account(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     return db.get_account_info(account_id, mode)
@@ -1212,6 +1231,7 @@ def api_strategy_trade_diagnostics(strategy_id: int, account_id: int = Depends(r
         "backtests_included": pooled["backtests_included"],
         "summary": report["summary"], "r_distribution": report["r_distribution"],
         "exit_quality": report["exit_quality"], "entry_vs_exit": report["entry_vs_exit"],
+        "es_filter": report["es_filter"],
     }
 
 
@@ -1238,7 +1258,7 @@ def api_strategy_trades_pdf(strategy_id: int, account_id: int = Depends(require_
     pdf_bytes = trades_pdf.build_trades_pdf(
         pooled["strategy_name"], pooled["direction"], pooled["backtests_included"],
         pooled["aggregate"], report["pairs"],
-        diagnostics={"summary": report["summary"], "entry_vs_exit": report["entry_vs_exit"]},
+        diagnostics={"summary": report["summary"], "entry_vs_exit": report["entry_vs_exit"], "es_filter": report["es_filter"]},
     )
     safe_name = re.sub(r"[^A-Za-z0-9]+", "_", pooled["strategy_name"]).strip("_")
     return Response(

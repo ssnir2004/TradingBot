@@ -45,7 +45,7 @@ import pandas as pd
 import yfinance as yf
 
 import cycle
-from src import backtest_data, orb, touch_turn
+from src import backtest_data, es_filter, orb, touch_turn
 
 BAR_SIZE = "5 mins"
 DAILY_BAR_SIZE = "1 day"
@@ -185,6 +185,38 @@ def _update_excursion(pos: dict, bar) -> None:
         pos["mae_price"] = min(pos["mae_price"], low)
 
 
+def _es_day_groups(es_intraday: pd.DataFrame | None) -> dict:
+    """Same per-day split as day_groups_by_symbol, but for the one shared
+    ES series every symbol's own tagging reads from (see _es_filter_pass)
+    - computed once per simulate_* call, not per symbol. {} (not None)
+    when no ES data was supplied, so every caller can just call .get(day)
+    without a separate None-check."""
+    if es_intraday is None or es_intraday.empty:
+        return {}
+    return dict(tuple(es_intraday.groupby(es_intraday.index.date)))
+
+
+def _es_filter_pass(strategy_rules: dict, es_day_groups: dict, day, bar_ts, side: str) -> bool | None:
+    """None (not applicable / not evaluable) unless the strategy actually
+    opts in via rules["es_vwap_filter"] (see the 8 named presets this was
+    added to) AND ES's own bars for `day` were supplied - a strategy
+    without the flag, or a backtest run with no es_intraday at all,
+    always tags every entry None so "before" and "after" filter stats
+    come out identical (see src/trade_diagnostics.py's own es_filter_
+    report, which treats None the same as "not rejected"). Otherwise the
+    real gate decision - see src/es_filter.py's own docstrings for the
+    VWAP/direction math and the fail-open behavior on an early-session
+    bar with no computable VWAP yet."""
+    if not strategy_rules.get("es_vwap_filter") or not es_day_groups:
+        return None
+    es_today = es_day_groups.get(day)
+    if es_today is None:
+        return None
+    es_bars_so_far = es_today[es_today.index <= bar_ts]
+    direction = es_filter.compute_market_direction(es_bars_so_far)
+    return es_filter.check(direction, side)["allowed"]
+
+
 def simulate_strategy(
     strategy_rules: dict,
     side: str,
@@ -195,6 +227,7 @@ def simulate_strategy(
     max_risk_pct: float,
     max_trades_per_day: int,
     commission_per_trade: float = 0.0,
+    es_intraday: pd.DataFrame | None = None,
 ) -> dict:
     """Runs one strategy over one date range against every symbol that has
     cached intraday data, returns {"trades": [...], "skipped_symbols": [...],
@@ -309,6 +342,7 @@ def simulate_strategy(
         symbol: dict(tuple(intraday.groupby(intraday.index.date)))
         for symbol, intraday in intraday_by_symbol.items()
     }
+    es_day_groups = _es_day_groups(es_intraday)
 
     trades = []
     trade_id = 0
@@ -500,6 +534,7 @@ def simulate_strategy(
                         "id": trade_id, "symbol": symbol, "side": action,
                         "fill_price": price, "size": size, "timestamp_iso": bar_ts.isoformat(),
                         "initial_stop": initial_stop, "commission": commission_per_trade,
+                        "es_filter_pass": _es_filter_pass(strategy_rules, es_day_groups, day, bar_ts, side),
                     })
                     open_positions[symbol] = {
                         "side": side, "entry_price": price, "initial_stop": initial_stop,
@@ -565,6 +600,7 @@ def simulate_orb_strategy(
     max_risk_pct: float,
     max_trades_per_day: int,
     commission_per_trade: float = 0.0,
+    es_intraday: pd.DataFrame | None = None,
 ) -> dict:
     """ORB's own replay loop - dispatched from src/backtest_runner.py
     whenever a strategy's rules carry an "opening_range" key, instead of
@@ -654,6 +690,7 @@ def simulate_orb_strategy(
         symbol: dict(tuple(intraday.groupby(intraday.index.date)))
         for symbol, intraday in intraday_by_symbol.items()
     }
+    es_day_groups = _es_day_groups(es_intraday)
 
     trades = []
     trade_id = 0
@@ -837,6 +874,7 @@ def simulate_orb_strategy(
                         # strategy diagnostic (analyze_strategy.py) can break
                         # performance down by model, not just in aggregate.
                         "model": detail.get("model"),
+                        "es_filter_pass": _es_filter_pass(strategy_rules, es_day_groups, day, bar_ts, side),
                     })
                     open_positions[symbol] = {
                         # "side" is read internally by cycle._trailing_stop_
@@ -880,6 +918,7 @@ def simulate_touch_turn_strategy(
     max_risk_pct: float,
     max_trades_per_day: int,
     commission_per_trade: float = 0.0,
+    es_intraday: pd.DataFrame | None = None,
 ) -> dict:
     """Touch & Turn's own replay loop - dispatched from src/backtest_
     runner.py whenever a strategy's rules carry an "opening_candle" key,
@@ -962,6 +1001,7 @@ def simulate_touch_turn_strategy(
         symbol: dict(tuple(intraday.groupby(intraday.index.date)))
         for symbol, intraday in intraday_by_symbol.items()
     }
+    es_day_groups = _es_day_groups(es_intraday)
 
     trades = []
     trade_id = 0
@@ -1044,6 +1084,7 @@ def simulate_touch_turn_strategy(
                     "id": trade_id, "symbol": symbol, "side": action,
                     "fill_price": po["limit_price"], "size": po["qty"], "timestamp_iso": bar_ts.isoformat(),
                     "initial_stop": po["initial_stop"], "commission": commission_per_trade,
+                    "es_filter_pass": po["es_filter_pass"],
                 })
                 open_positions[symbol] = {
                     "side": side, "entry_price": po["limit_price"], "initial_stop": po["initial_stop"],
@@ -1097,6 +1138,11 @@ def simulate_touch_turn_strategy(
                 pending_orders[symbol] = {
                     "limit_price": limit_price, "target_price": target_price, "initial_stop": initial_stop,
                     "qty": size, "expiry_ts": session_open_ts + pd.Timedelta(minutes=entry_window_minutes),
+                    # Computed at PLACEMENT time (this tick), not at fill -
+                    # matches the live engine's own gate-before-placing
+                    # semantics (a real resting order that would have been
+                    # rejected here is never placed live either).
+                    "es_filter_pass": _es_filter_pass(strategy_rules, es_day_groups, day, bar_ts, side),
                 }
 
         for symbol, pos in open_positions.items():

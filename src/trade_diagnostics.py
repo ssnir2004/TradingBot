@@ -197,6 +197,41 @@ def entry_vs_exit_analysis(enriched: list[dict]) -> dict:
     }
 
 
+def es_filter_report(pairs: list[dict]) -> dict | None:
+    """Before/after stats for src/es_filter.py's ES-VWAP gate (see
+    backtest_engine.py's _es_filter_pass) - None if this strategy never
+    actually carried the gate in this run (no pair has an es_filter_pass
+    other than None), so a caller can tell "not applicable" apart from
+    "applied, rejected zero trades". "after" keeps every pair whose
+    es_filter_pass is True OR None (not evaluable for that specific
+    trade - e.g. ES data was missing that day even though the strategy
+    is gated) - only a pair explicitly tagged False was actually
+    rejected, matching backtest_engine._es_filter_pass's own fail-open
+    convention."""
+    if not any(p.get("es_filter_pass") is not None for p in pairs):
+        return None
+    after = [p for p in pairs if p.get("es_filter_pass") is not False]
+    rejected_count = sum(1 for p in pairs if p.get("es_filter_pass") is False)
+
+    def _stats(subset: list[dict]) -> dict:
+        agg = perf.aggregate(subset)
+        r_values = perf.compute_r_multiples(subset)
+        return {
+            "total_trades": agg["total_trades"], "win_rate_pct": agg["win_rate_pct"],
+            "profit_factor": agg["profit_factor"], "net_profit_usd": agg["net_pnl_usd"],
+            "avg_r": round(mean(r_values), 3) if r_values else None,
+            "max_drawdown_usd": perf.compute_max_drawdown(subset),
+        }
+
+    return {
+        "total_trades": len(pairs),
+        "rejected_count": rejected_count,
+        "rejected_pct": round(rejected_count / len(pairs) * 100, 1) if pairs else 0.0,
+        "before": _stats(pairs),
+        "after": _stats(after),
+    }
+
+
 def full_report(pairs: list[dict]) -> dict:
     """Everything above, run once over one pooled/single-backtest pair
     list - the one call site (backtest_runner.py / web/app.py's Strategy
@@ -208,4 +243,5 @@ def full_report(pairs: list[dict]) -> dict:
         "r_distribution": r_distribution(enriched),
         "exit_quality": exit_quality(enriched),
         "entry_vs_exit": entry_vs_exit_analysis(enriched),
+        "es_filter": es_filter_report(enriched),
     }

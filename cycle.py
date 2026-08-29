@@ -47,7 +47,7 @@ import yfinance as yf
 from dotenv import dotenv_values
 from ib_async import LimitOrder, Stock, StopOrder
 
-from src import db, mode_config, orb, touch_turn
+from src import db, es_filter, mode_config, orb, touch_turn
 from src.ibkr_client import IBKRClient, belongs_to_account, scoped_positions
 from src.notify import notify
 
@@ -1110,6 +1110,64 @@ def _strategy_universe(rules: dict) -> str:
     return rules.get("universe_filters", {}).get("custom_universe") or "default"
 
 
+ES_DATA_UNAVAILABLE_NOTIFY_COOLDOWN_MINUTES = 30  # don't re-warn every single scan tick while degraded
+
+
+def _es_direction_for_scan(account_id: int, mode: str, ib, rules: dict) -> dict | None:
+    """Fetched ONCE per entry_scan/touch_turn_entry_scan call (never per
+    candidate symbol - a live IBKR request per watchlist ticker would be
+    wasteful and pointless, since ES's own direction doesn't change
+    symbol to symbol). None (and every candidate this scan fails open,
+    per es_filter.check's own docstring) unless the strategy actually
+    opted in (rules["es_vwap_filter"]) AND the account has explicitly
+    enabled the gate (db.is_es_vwap_filter_enabled - off by default,
+    since it needs real CME futures market-data entitlement this account
+    may not have yet)."""
+    if not rules.get("es_vwap_filter") or not db.is_es_vwap_filter_enabled(account_id, mode):
+        return None
+    direction = es_filter.fetch_live_direction(ib)
+    if direction is None:
+        _maybe_notify_es_data_unavailable(account_id, mode)
+    return direction
+
+
+def _maybe_notify_es_data_unavailable(account_id: int, mode: str):
+    """Rate-limited so a genuinely missing CME entitlement (which fails
+    EVERY scan, indefinitely, once the gate is enabled) doesn't flood the
+    user's phone - one warning per ES_DATA_UNAVAILABLE_NOTIFY_COOLDOWN_
+    MINUTES per account+mode, not one per scan tick."""
+    key = f"{account_id}:{mode}:es_data_unavailable_last_notify"
+    last = db.get_setting(key, "")
+    now = datetime.now(ET)
+    if last:
+        try:
+            if (now - datetime.fromisoformat(last)).total_seconds() < ES_DATA_UNAVAILABLE_NOTIFY_COOLDOWN_MINUTES * 60:
+                return
+        except ValueError:
+            pass
+    db.set_setting(key, now.isoformat(timespec="seconds"))
+    notify(
+        f"[{mode.upper()}] ES VWAP filter degraded",
+        "Couldn't read ES futures price/VWAP (no market data, or a Gateway issue) - "
+        "gated strategies are failing OPEN (trading unfiltered) until this clears. "
+        "Confirm this account has CME futures market-data entitlements if this persists.",
+        "high",
+    )
+
+
+def _log_es_rejection(account_id: int, mode: str, strategy_name: str, side: str, ticker: str, gate: dict):
+    """Structured decision-log entry for a trade the ES VWAP filter
+    blocked - see db.log_decision (auto-stamps its own timestamp_iso, so
+    that's not repeated here) and the ES_VWAP_Direction_Filter spec's own
+    "TRADE REJECTED" log format, which this carries verbatim as
+    individual fields rather than one pre-formatted text blob."""
+    log_decision(account_id, mode, {
+        "event": "entry_rejected", "reason": "es_vwap_filter", "symbol": ticker,
+        "strategy": strategy_name, "direction": side.upper(),
+        "es_price": gate.get("es_price"), "es_vwap": gate.get("es_vwap"), "es_detail": gate.get("reason"),
+    })
+
+
 def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dict, env: dict, side: str) -> list[dict]:
     """Scans this side's ('long' or 'short') watchlist for new entries
     under its own active strategy. positions holds ALL open positions
@@ -1157,6 +1215,8 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
     if not watchlist:
         return positions
 
+    es_direction = _es_direction_for_scan(account_id, mode, ib, rules)
+
     # != 0 (not just > 0) so an existing short in the real account also
     # blocks a duplicate/conflicting entry, not just existing longs.
     held_symbols = {p.contract.symbol for p in scoped_positions(ib) if p.position != 0}
@@ -1197,6 +1257,12 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
         size = min(size_by_risk, size_by_cap)
         if size < 1:
             continue
+
+        if rules.get("es_vwap_filter") and db.is_es_vwap_filter_enabled(account_id, mode):
+            gate = es_filter.check(es_direction, side)
+            if not gate["allowed"]:
+                _log_es_rejection(account_id, mode, rules.get("strategy_name", "?"), side, ticker, gate)
+                continue
 
         proc = subprocess.run(
             [sys.executable, str(PROJECT_DIR / "trade.py"), "--mode", mode, "--account-id", str(account_id),
@@ -1282,6 +1348,8 @@ def touch_turn_entry_scan(account_id: int, mode: str, ib, rules: dict, env: dict
     if not watchlist:
         return
 
+    es_direction = _es_direction_for_scan(account_id, mode, ib, rules)
+
     held_symbols = {p.contract.symbol for p in scoped_positions(ib) if p.position != 0}
     held_symbols |= {p["symbol"] for p in db.get_open_positions(account_id, mode)}
     placed_date = now_et.date().isoformat()
@@ -1323,6 +1391,12 @@ def touch_turn_entry_scan(account_id: int, mode: str, ib, rules: dict, env: dict
         size = min(size_by_risk, size_by_cap)
         if size < 1:
             continue
+
+        if rules.get("es_vwap_filter") and db.is_es_vwap_filter_enabled(account_id, mode):
+            gate = es_filter.check(es_direction, side)
+            if not gate["allowed"]:
+                _log_es_rejection(account_id, mode, rules.get("strategy_name", "?"), side, ticker, gate)
+                continue
 
         inserted = db.create_pending_order(account_id, mode, {
             "symbol": ticker, "placed_date": placed_date, "side": side,

@@ -83,6 +83,26 @@
     <div class="col-12">
       <div class="card">
         <div class="card-header d-flex justify-content-between align-items-center">
+          <span>ES VWAP Directional Filter</span>
+          <div class="form-check form-switch mb-0">
+            <input class="form-check-input" type="checkbox" id="es-filter-toggle">
+            <label class="form-check-label small" for="es-filter-toggle" id="es-filter-toggle-label">Disabled</label>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="small text-muted">
+            When enabled, the 8 flagship strategies (Long/Short Breakout Conservative, ORB v1/v2, Touch &amp; Turn) only enter in the direction ES futures are trading relative to their own session VWAP — a long only while ES is above its VWAP, a short only while below. Requires this IBKR account to hold <strong>CME futures market-data entitlements</strong>; without them every check fails and the filter fails <em>open</em> (trades go through unfiltered, with a rate-limited warning) rather than blocking the bot entirely. Leave this off until you've confirmed that access — see the guide.
+          </div>
+          <div id="es-filter-error" class="text-danger small mt-2"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3 mb-3">
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
           <span>Gateway Connection</span>
           <span id="gw-status-badge" class="badge bg-secondary">...</span>
         </div>

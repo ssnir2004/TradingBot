@@ -8,7 +8,28 @@ having its own copy.
 """
 from datetime import date
 
-from src import backtest_engine, perf, trade_diagnostics
+import pandas as pd
+
+from src import backtest_data, backtest_engine, es_filter, perf, trade_diagnostics
+
+
+def _load_es_intraday(start_date: date, end_date: date) -> pd.DataFrame | None:
+    """Same cache-read-and-window pattern every simulate_* function
+    already applies to a regular symbol's own intraday bars (see
+    backtest_engine.simulate_strategy's own window_start/window_end) -
+    only called when a strategy's rules actually carry "es_vwap_filter"
+    (see run_one_strategy below), so a backtest with no ES-gated
+    strategies never even touches the ES cache. None if ES has no cached
+    bars at all yet (see fetch_es_backtest_data.py) or none fall in this
+    date range - _es_filter_pass already treats that as "not evaluable",
+    same as any other missing-data case, not an error."""
+    es_bars = backtest_data.load_cached_bars(es_filter.ES_SYMBOL, es_filter.ES_BAR_SIZE)
+    if es_bars is None or es_bars.empty:
+        return None
+    window_start = pd.Timestamp(start_date, tz=es_bars.index.tz) - pd.Timedelta(days=backtest_engine.INTRADAY_LOOKBACK_DAYS)
+    window_end = pd.Timestamp(end_date, tz=es_bars.index.tz) + pd.Timedelta(days=1)
+    windowed = es_bars[(es_bars.index >= window_start) & (es_bars.index < window_end)]
+    return windowed if not windowed.empty else None
 
 
 def run_one_strategy(
@@ -30,10 +51,11 @@ def run_one_strategy(
         simulate = backtest_engine.simulate_touch_turn_strategy
     else:
         simulate = backtest_engine.simulate_strategy
+    es_intraday = _load_es_intraday(start_date, end_date) if rules.get("es_vwap_filter") else None
     sim = simulate(
         rules, direction, symbols, start_date, end_date,
         portfolio_value, max_risk_pct, max_trades_per_day,
-        commission_per_trade=commission_per_trade,
+        commission_per_trade=commission_per_trade, es_intraday=es_intraday,
     )
     pairs = perf.pair_trades(sim["trades"])
     aggregate = perf.aggregate(pairs)
@@ -58,6 +80,10 @@ def run_one_strategy(
             "exit_quality": report["exit_quality"],
             "entry_vs_exit": report["entry_vs_exit"],
         },
+        # None unless this strategy's rules actually carried
+        # "es_vwap_filter" AND ES's own cached bars were available for
+        # this date range - see trade_diagnostics.es_filter_report.
+        "es_filter": report["es_filter"],
         "skipped_symbols": sim["skipped_symbols"],
         "filter_stats": sim["filter_stats"],
     }

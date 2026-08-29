@@ -92,6 +92,13 @@ def pair_trades(rows: list[dict]) -> list[dict]:
                 # entry). Off the OPEN leg, same reasoning as initial_stop
                 # just above - the model that triggered ENTRY, not exit.
                 "model": open_row.get("model"),
+                # None unless the strategy opted into src/es_filter.py's
+                # gate (rules["es_vwap_filter"]) AND ES's own bars were
+                # supplied to the backtest run - see backtest_engine.py's
+                # _es_filter_pass. Off the OPEN leg, same reasoning as
+                # initial_stop/model above - the gate is evaluated at
+                # entry, not exit.
+                "es_filter_pass": open_row.get("es_filter_pass"),
                 "commission_usd": open_commission + float(row.get("commission") or 0),
                 # Both None for a live/paper pair (predates these fields,
                 # and there's no intrabar price-path history to derive them
@@ -183,6 +190,32 @@ def r_multiple(pair: dict) -> float | None:
         return None
     move = (pair["open_price"] - pair["close_price"]) if pair["side"] == "short" else (pair["close_price"] - pair["open_price"])
     return move / risk
+
+
+def _exit_time(pair: dict) -> str:
+    # short's exit is its buy leg (SELL opens, BUY closes); long's is its
+    # sell leg - same convention already documented in pair_trades/
+    # backtest.html's renderTrades ("entryTime"/"exitTime" split).
+    return pair["buy_time"] if pair["side"] == "short" else pair["sell_time"]
+
+
+def compute_max_drawdown(pairs: list[dict]) -> float:
+    """Largest peak-to-trough decline in the cumulative net-of-commission
+    equity curve, walking closed pairs in chronological EXIT order (the
+    order equity actually changed, not entry order or trade_id order) -
+    0.0 for an empty set or one that only ever rose. Dollar terms, not a
+    percentage - matching aggregate()'s own net_pnl_usd, since pair_trades
+    never carries a portfolio_value to express a % drawdown against."""
+    if not pairs:
+        return 0.0
+    equity = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for p in sorted(pairs, key=_exit_time):
+        equity += p["pnl_usd"] - float(p.get("commission_usd") or 0)
+        peak = max(peak, equity)
+        max_dd = max(max_dd, peak - equity)
+    return round(max_dd, 2)
 
 
 def compute_r_multiples(pairs: list[dict]) -> list[float]:

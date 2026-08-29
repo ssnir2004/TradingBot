@@ -2,6 +2,7 @@
   "strategy_name": "Long Breakout Conservative",
   "direction": "long_only",
   "trade_timeframe": "5m",
+  "es_vwap_filter": true,
 
   "universe_filters": {
     "index": "S&P 500",
