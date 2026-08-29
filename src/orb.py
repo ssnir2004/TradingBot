@@ -221,6 +221,41 @@ def high_of_last_n_bars(bars: pd.DataFrame, n: int) -> float | None:
     return float(bars["High"].tail(n).max())
 
 
+# Investigation (this same conversation, before this change) found ORB
+# trades with a technical stop just a few cents from entry - the
+# confirmation/retest bar's own Low (long) or High (short) can be an
+# almost-flat wick. Since size_by_risk = risk_dollars / risk_per_share
+# (backtest_engine.py/cycle.py), a near-zero risk_per_share inflates the
+# theoretical share count enormously; max_position_size_pct_of_portfolio
+# then caps the ACTUAL size taken, so the position itself isn't
+# unrealistic - but the reported R-multiple (a pure price ratio,
+# independent of size - see perf.r_multiple) comes out wildly inflated
+# (30-50R+) relative to the tiny real dollar profit/loss that size
+# produced, distorting Avg R/Best Trade/profit factor. Worse, on a LIVE
+# fill this pattern means the bot ends up sized at ~10% of the account
+# (the position cap) against a stop that can be blown through by a single
+# tick of slippage - a materially different, larger risk than the
+# strategy's own "1% per trade" framing implies.
+DEFAULT_MIN_STOP_DISTANCE_PCT = 0.25
+
+
+def _apply_min_stop_distance(entry_price: float, technical_stop: float, side: str, rules: dict) -> float:
+    """Floors a technical stop's distance from entry at
+    rules["risk"].get("min_stop_distance_pct", DEFAULT_MIN_STOP_DISTANCE_PCT)
+    percent of entry_price - defaults ON for every ORB strategy (v1/v2/
+    both Fade variants all dispatch through this one evaluate_orb_entry),
+    not opt-in, since an unrealistically tight stop was never anyone's
+    intentional strategy design, just a gap in stop placement. Only ever
+    WIDENS a too-tight stop - a technical stop already past the floor is
+    returned unchanged, so the overwhelming majority of trades (confirm/
+    retest bars with a normal-sized wick) are completely unaffected."""
+    min_pct = rules.get("risk", {}).get("min_stop_distance_pct", DEFAULT_MIN_STOP_DISTANCE_PCT)
+    min_distance = entry_price * (min_pct / 100)
+    if side == "long":
+        return min(technical_stop, entry_price - min_distance)
+    return max(technical_stop, entry_price + min_distance)
+
+
 def evaluate_orb_entry(
     daily: pd.DataFrame, intraday: pd.DataFrame, rules: dict, side: str,
     prior_day_bars: dict | None = None, signal_side: str | None = None,
@@ -340,6 +375,7 @@ def evaluate_orb_entry(
             if gap:
                 entry_price = float(confirm_bar["Close"])
                 stop = float(confirm_bar["Low"]) if side == "long" else float(confirm_bar["High"])
+                stop = _apply_min_stop_distance(entry_price, stop, side, rules)
                 risk = (entry_price - stop) if side == "long" else (stop - entry_price)
                 if risk > 0:
                     target_rr = entry_models["breakout"].get("target_rr")
@@ -358,6 +394,7 @@ def evaluate_orb_entry(
         if retest_hit:
             entry_price = float(bar["Close"])
             stop = float(bar["Low"]) if side == "long" else float(bar["High"])
+            stop = _apply_min_stop_distance(entry_price, stop, side, rules)
             risk = (entry_price - stop) if side == "long" else (stop - entry_price)
             if risk > 0:
                 target_rr = entry_models["retest"].get("target_rr")
