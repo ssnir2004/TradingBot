@@ -828,7 +828,7 @@ function renderTrades(pairs) {
 
 function renderStrategyResult(strategyId, result) {
   if (result.error) {
-    return `<div class="col-12 col-lg-6 mb-3"><div class="card"><div class="card-header">${result.strategy_name || `Strategy ${strategyId}`}</div>
+    return `<div class="col-12 mb-3"><div class="card"><div class="card-header">${result.strategy_name || `Strategy ${strategyId}`}</div>
       <div class="card-body text-danger small">${result.error}</div></div></div>`;
   }
   const a = result.aggregate;
@@ -838,7 +838,7 @@ function renderStrategyResult(strategyId, result) {
   // before commission modeling existed - fmtMoney's own null/undefined
   // check already renders that as "-" rather than crashing.
   const netClass = a.net_pnl_usd > 0 ? "text-success" : a.net_pnl_usd < 0 ? "text-danger" : "";
-  return `<div class="col-12 col-lg-6 mb-3"><div class="card h-100">
+  return `<div class="col-12 mb-3"><div class="card h-100">
     <div class="card-header">${key ? `<span class="badge bg-light text-dark border me-1">${key}</span>` : ""}${result.strategy_name} ${sideBadge(result.direction)}</div>
     <div class="card-body">
       <p>Trades: <strong>${a.total_trades}</strong> (${a.wins}W / ${a.losses}L, ${a.win_rate_pct}%)</p>
