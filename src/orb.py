@@ -259,6 +259,7 @@ def _apply_min_stop_distance(entry_price: float, technical_stop: float, side: st
 def evaluate_orb_entry(
     daily: pd.DataFrame, intraday: pd.DataFrame, rules: dict, side: str,
     prior_day_bars: dict | None = None, signal_side: str | None = None,
+    daily_derived_cache: dict | None = None,
 ) -> dict:
     """The ORB decision logic - no data fetching, no wall-clock "now": the
     day being evaluated is whatever the last date in `intraday`'s index
@@ -304,11 +305,24 @@ def evaluate_orb_entry(
     up-breakout detected via signal_side="long". The confirm bar's own
     Low/High still makes a sensible fade-stop unchanged (e.g. a faded
     short's stop at the up-gap bar's own High: a close back above it
-    means the original breakout thesis held after all)."""
+    means the original breakout thesis held after all).
+
+    daily_derived_cache is the same purely-optional performance hook as
+    cycle._evaluate_filters_from_bars' own param of the same name: a dict
+    this function memoizes ATR into, keyed "atr" - safe because ATR
+    depends only on `daily`, never on `intraday`/the tick being evaluated.
+    The live path (one call per real tick, nothing passed) computes it
+    fresh every time same as always; backtest_engine.py passes the SAME
+    dict back in across every simulated tick of one (symbol, day), so the
+    identical `daily` slice only gets EWM'd once instead of once per bar
+    (investigated in this same conversation - a full-universe ORB v2
+    backtest was recomputing an unchanging ATR value up to ~80 times a
+    day per symbol for nothing)."""
     signal_side = signal_side or side
     vol_filters = rules["volatility_filters"]
     entry_models = rules["entry_models"]
     confluence_cfg = rules.get("entry_confluence")
+    cache = daily_derived_cache if daily_derived_cache is not None else {}
 
     if intraday.empty:
         return {"pass": False, "side": side, "error": "no intraday data"}
@@ -325,7 +339,9 @@ def evaluate_orb_entry(
         return {"pass": False, "side": side, "error": "opening range not yet formed"}
     or_high, or_low, or_end_ts = or_range["or_high"], or_range["or_low"], or_range["or_end_ts"]
 
-    atr_value = _compute_atr(daily, vol_filters.get("V2_atr_period", 14))
+    if "atr" not in cache:
+        cache["atr"] = _compute_atr(daily, vol_filters.get("V2_atr_period", 14))
+    atr_value = cache["atr"]
     if atr_value is None:
         return {"pass": False, "side": side, "error": "not enough daily history for ATR"}
     atr_pct = (atr_value / current_price * 100) if current_price else 0.0

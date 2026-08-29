@@ -705,6 +705,14 @@ def simulate_orb_strategy(
             symbol: {d: bars for d, bars in groups.items() if d < day}
             for symbol, groups in day_groups_by_symbol.items()
         }
+        # daily_derived_cache_by_symbol memoizes ATR per symbol for today
+        # (see orb.evaluate_orb_entry's own daily_derived_cache docstring,
+        # same convention as _evaluate_filters_from_bars' one below) - ATR
+        # depends only on daily_slice_by_symbol[symbol], never on the tick,
+        # so recomputing it fresh on every one of a symbol's ~78 evaluate
+        # calls today was pure waste. A fresh dict per (symbol, day), same
+        # lifetime as daily_slice_by_symbol.
+        daily_derived_cache_by_symbol: dict[str, dict] = {}
 
         day_bar_times = set()
         for intraday in intraday_by_symbol.values():
@@ -850,6 +858,7 @@ def simulate_orb_strategy(
                         daily_slice, intraday_slice, strategy_rules, side,
                         prior_day_bars=prior_day_bars_by_symbol[symbol],
                         signal_side=strategy_rules.get("signal_side"),
+                        daily_derived_cache=daily_derived_cache_by_symbol.setdefault(symbol, {}),
                     )
                     if "error" in detail:
                         filter_stats["insufficient_data"] += 1
