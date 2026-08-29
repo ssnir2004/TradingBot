@@ -678,7 +678,18 @@ def simulate_orb_strategy(
     has_confluence = "entry_confluence" in strategy_rules
     filter_stats = {"evaluations": 0, "insufficient_data": 0, "or_formed": 0, "confirmed": 0, "volatility_ok": 0}
     if has_confluence:
+        # confluence_ok is only actually evaluated once volatility_ok and
+        # confirmed have already both passed (see orb.evaluate_orb_entry's
+        # own comment - it can't change the pass outcome otherwise, so
+        # computing it on every miss was pure waste). That means its rate
+        # here is a true conditional/funnel one - "of the checks that
+        # reached it, how many passed" - not an independent rate over ALL
+        # evaluations like or_formed/confirmed/volatility_ok are;
+        # confluence_evaluated is that denominator (how many evaluations
+        # actually reached it at all), read by backtest.html's own
+        # renderFilterStats instead of the default `evaluations` count.
         filter_stats["confluence_ok"] = 0
+        filter_stats["confluence_evaluated"] = 0
 
     if not intraday_by_symbol:
         return {"trades": [], "skipped_symbols": skipped, "filter_stats": filter_stats}
@@ -868,6 +879,13 @@ def simulate_orb_strategy(
                     for cond in tracked_conditions:
                         if detail.get(cond):
                             filter_stats[cond] += 1
+                    # confluence_ok is None (not True/False) when it was
+                    # never evaluated (see orb.evaluate_orb_entry's own
+                    # comment) - confluence_evaluated counts the ones that
+                    # WERE, so confluence_ok's own rate can be read against
+                    # the right denominator instead of `evaluations`.
+                    if has_confluence and detail.get("confluence_ok") is not None:
+                        filter_stats["confluence_evaluated"] += 1
                     if not detail.get("pass"):
                         continue
 

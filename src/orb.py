@@ -207,6 +207,22 @@ def _rsi_trending(rsi_series: pd.Series, side: str, bars: int) -> bool:
     return bool((diffs > 0).all()) if side == "long" else bool((diffs < 0).all())
 
 
+# Wilder's smoothing has an alpha=1/period feedback: after
+# _CONFLUENCE_LOOKBACK_BARS samples of decay, anything before that point
+# contributes a negligible amount (empirically measured against the full,
+# untruncated series across 200 random-walk trials: max observed
+# difference in the final RSI(14)/EMA(20) value was ~4e-8/~2e-13
+# respectively - about 7-8 orders of magnitude below the smallest
+# realistic bar-to-bar RSI move (~0.05 at the 1st percentile) and far
+# below anything that could flip one of _rsi_trending's/ema_trending's
+# strict >/< comparisons - see the investigation this same conversation
+# ran before landing on this constant). Chosen specifically so
+# _trend_confluence_ok doesn't have to run its RSI/EMA EWM over
+# INTRADAY_LOOKBACK_DAYS' full ~2000-bar multi-day series on every single
+# tick just to end up needing only the last few converged values.
+_CONFLUENCE_LOOKBACK_BARS = 400
+
+
 def _trend_confluence_ok(intraday: pd.DataFrame, today_bars: pd.DataFrame, side: str, cfg: dict) -> bool:
     """Two extra entry conditions layered on top of the opening-range
     breakout/retest signal itself (see docs/orb_strategy_spec.md's
@@ -214,16 +230,19 @@ def _trend_confluence_ok(intraday: pd.DataFrame, today_bars: pd.DataFrame, side:
     direction over the last `rsi_rising_bars` bars, AND (EMA(ema_period)
     is trending the same direction OR price is on the "right side" of
     session VWAP - above it for a long, below it for a short). RSI/EMA
-    are computed on the full multi-day `intraday` closes (same
-    continues-across-session-boundaries convention as cycle._compute_ema/
-    _compute_rsi), VWAP on `today_bars` only (session-reset, see
+    are computed on the trailing _CONFLUENCE_LOOKBACK_BARS bars of the
+    multi-day `intraday` closes (same continues-across-session-boundaries
+    convention as cycle._compute_ema/_compute_rsi, just windowed - see
+    that constant's own docstring for why windowing doesn't change the
+    result), VWAP on `today_bars` only (session-reset, see
     _compute_vwap_series). Returns False (not "unknown") on insufficient
     history - same reasoning as _rsi_trending."""
-    rsi_series = _compute_rsi_series(intraday["Close"], cfg.get("rsi_period", 14))
+    recent_closes = intraday["Close"].iloc[-_CONFLUENCE_LOOKBACK_BARS:]
+    rsi_series = _compute_rsi_series(recent_closes, cfg.get("rsi_period", 14))
     if not _rsi_trending(rsi_series, side, cfg.get("rsi_rising_bars", 3)):
         return False
 
-    ema_series = _compute_ema_series(intraday["Close"], cfg.get("ema_period", 20))
+    ema_series = _compute_ema_series(recent_closes, cfg.get("ema_period", 20))
     if len(ema_series) < 2 or ema_series.iloc[-2:].isna().any():
         ema_trending = False
     else:
@@ -411,7 +430,24 @@ def evaluate_orb_entry(
     # (e.g. an "ORB Long v2") pays for/is gated by this extra check.
     # Validated against signal_side - confluence confirms the SETUP being
     # detected (or faded) is real, not the trade's own direction.
-    confluence_ok = _trend_confluence_ok(intraday, today_bars, signal_side, confluence_cfg) if confluence_cfg else True
+    #
+    # Only actually computed once the cheaper gates (volatility_ok,
+    # confirmed) have already passed - confluence's own value can't
+    # change the "pass" outcome otherwise (the `or` below already fails
+    # from volatility_ok/confirmed alone), so evaluating its RSI/EMA on
+    # every miss was pure waste (investigated in this same conversation -
+    # `confirmed` in particular is rare, so most evaluations were paying
+    # this cost for a value that couldn't matter). None (not False) marks
+    # "not evaluated" explicitly, distinct from "evaluated and failed" -
+    # see backtest_engine.py's filter_stats accounting, which uses that
+    # distinction to keep reporting confluence's true pass rate among the
+    # evaluations that actually reached it, instead of either paying for
+    # an always-computed independent rate or silently reporting a
+    # misleading one.
+    if confluence_cfg and volatility_ok and confirmed:
+        confluence_ok = _trend_confluence_ok(intraday, today_bars, signal_side, confluence_cfg)
+    else:
+        confluence_ok = True if not confluence_cfg else None
 
     detail = {
         "side": side, "signal_side": signal_side, "price": current_price, "or_high": or_high, "or_low": or_low,
