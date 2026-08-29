@@ -553,6 +553,37 @@ def _breakeven_decision(pos: dict, exit_cfg: dict, r_multiple: float) -> dict:
     return {"action": "hold"}
 
 
+def _profit_lock_decision(pos: dict, exit_cfg: dict, mfe_r: float) -> dict:
+    """MFE-based variant of _breakeven_decision, for staged_trail strategies
+    opted in via exit_cfg["profit_lock_offset_R"] (currently ORB Long v2 /
+    ORB Short v2 only, NOT their Fade siblings - see ORB_v2_MFE_2R_Profit_
+    Lock_025R.md). Investigation (this same conversation, before this
+    change) found trades whose price wicked past +2R and reversed before
+    any tick's close/current-price cleared it - _breakeven_decision never
+    saw the wick (its r_multiple comes from Close/current price only) and
+    the position rode its ORIGINAL stop the rest of the way down. This
+    triggers off the position's own tracked MFE instead (pos["mfe_price"],
+    the real intrabar high/low touch _update_excursion already maintains
+    - the exact same number the trade diagnostics' MFE column reports),
+    and locks in a small profit (entry +/- profit_lock_offset_R) rather
+    than flat entry - a wick that proves +2R happened is worth banking
+    something on, even though the position never actually traded there.
+
+    Only meaningful while pos["state"] == "pre_breakeven" (same contract
+    as _breakeven_decision), and only ever fires ONCE per position - the
+    caller's state machine flips pos["state"] to "post_breakeven" the
+    moment this returns "breakeven_flip" and never calls back in here for
+    that position again, so there's no separate flag to track."""
+    if mfe_r < exit_cfg["breakeven_trigger_R"]:
+        return {"action": "hold"}
+    side = pos.get("side", "long")
+    entry = pos["entry_price"]
+    initial_risk = (pos["initial_stop"] - entry) if side == "short" else (entry - pos["initial_stop"])
+    offset = exit_cfg["profit_lock_offset_R"] * initial_risk
+    new_stop = (entry - offset) if side == "short" else (entry + offset)
+    return {"action": "breakeven_flip", "new_stop_price": new_stop, "new_state": "post_breakeven"}
+
+
 def _trailing_stop_decision(pos: dict, swing_stop_candidate: float | None) -> dict:
     """Pure decision logic for manage_position's "post_breakeven" trailing
     stage — same sharing rationale as _breakeven_decision. The

@@ -788,7 +788,20 @@ def simulate_orb_strategy(
                 r_multiple = ((pos["entry_price"] - price) if side == "short" else (price - pos["entry_price"])) / initial_risk if initial_risk > 0 else 0.0
 
                 if pos["state"] == "pre_breakeven":
-                    decision = cycle._breakeven_decision(pos, exit_cfg, r_multiple)
+                    # profit_lock_offset_R (ORB Long/Short v2 only - see
+                    # cycle._profit_lock_decision's own docstring) triggers
+                    # off MFE (this bar's High/Low, already folded into
+                    # pos["mfe_price"] by _update_excursion above) instead
+                    # of r_multiple's Close-only price - everything else
+                    # (the trailing gate below) is untouched, still Close-
+                    # based, per the spec's own "do not change the existing
+                    # staged trail rules" for that stage.
+                    if "profit_lock_offset_R" in exit_cfg:
+                        mfe_r = (((pos["entry_price"] - pos["mfe_price"]) if side == "short"
+                                  else (pos["mfe_price"] - pos["entry_price"])) / initial_risk if initial_risk > 0 else 0.0)
+                        decision = cycle._profit_lock_decision(pos, exit_cfg, mfe_r)
+                    else:
+                        decision = cycle._breakeven_decision(pos, exit_cfg, r_multiple)
                     if decision["action"] == "breakeven_flip":
                         pos["stop_price"] = decision["new_stop_price"]
                         pos["state"] = decision["new_state"]

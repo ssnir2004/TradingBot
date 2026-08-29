@@ -986,6 +986,7 @@ EXTRA_STRATEGY_PRESETS = [
                 "management_style": "staged_trail",
                 "breakeven_trigger_R": 2.0,
                 "trailing_trigger_R": 3.0,
+                "profit_lock_offset_R": 0.25,
             },
             "risk": {
                 "max_risk_per_trade_pct": 1.0,
@@ -1005,9 +1006,12 @@ EXTRA_STRATEGY_PRESETS = [
         "רצופים אחרונים, **וגם** (EMA(20) על 5 דקות עולה **או** המחיר מעל ה-VWAP של היום). כל התנאים "
         "האלה חייבים להתקיים באותו נר שבו נכנסים.\n\n"
         "## יציאה: Staged Trail (במקום יעד קבוע)\n"
-        "אין יותר יעד R:R קבוע - הסטופ ההתחלתי נשאר קבוע עד 2R, ואז עובר ל-Breakeven. "
-        "כשמגיעים ל-3R, מתחיל טריילינג סטופ מתחת לשפל של שני הנרות האחרונים (5 דקות), ומתעדכן "
-        "כל עוד הוא משתפר. הפוזיציה יכולה לרוץ הרבה מעבר ל-2R אם המניה ממשיכה.\n\n"
+        "אין יותר יעד R:R קבוע - הסטופ ההתחלתי נשאר קבוע עד שה-MFE (השיא שהמחיר בפועל נגע בו, לא "
+        "רק מחיר הסגירה) מגיע ל-2R, ואז עובר ל-**Profit Lock: 0.25R** (לא ל-Breakeven שטוח) - "
+        "כלומר גם עסקה שנגעה ב-2R תוך-יומית וחזרה אחורה, ננעלת עם רווח קטן במקום להסתכן בחזרה "
+        "לסטופ המקורי. כשמגיעים ל-3R (סגירת נר), מתחיל טריילינג סטופ מתחת לשפל של שני הנרות "
+        "האחרונים (5 דקות), ומתעדכן כל עוד הוא משתפר. הפוזיציה יכולה לרוץ הרבה מעבר ל-2R אם המניה "
+        "ממשיכה.\n\n"
         "## יקום, פילטרי תנודתיות, חלון כניסות\n"
         "זהה ל-ORB Long המקורית: S&P 500 עם Market Cap מעל $1B, מחיר מינימלי $3, RVOL מעל 2.0, "
         "ATR% מדורג לפי מחיר, חלון כניסות 09:50-11:30 ET.\n\n"
@@ -1072,6 +1076,7 @@ EXTRA_STRATEGY_PRESETS = [
                 "management_style": "staged_trail",
                 "breakeven_trigger_R": 2.0,
                 "trailing_trigger_R": 3.0,
+                "profit_lock_offset_R": 0.25,
             },
             "risk": {
                 "max_risk_per_trade_pct": 1.0,
@@ -1083,8 +1088,9 @@ EXTRA_STRATEGY_PRESETS = [
         "short",
         "## מה זה עושה\n"
         "מראה הפוכה מדויקת של ORB Long v2 - ראו את התיאור המלא שם. כאן: RSI(14) יורד על פני 3 "
-        "נרות רצופים, וגם (EMA(20) יורד או המחיר מתחת ל-VWAP). סטופ קבוע עד 2R, Breakeven ב-2R, "
-        "טריילינג מ-3R מעל השיא של שני הנרות האחרונים.\n\n"
+        "נרות רצופים, וגם (EMA(20) יורד או המחיר מתחת ל-VWAP). סטופ קבוע עד MFE 2R (השיא/שפל "
+        "שהמחיר בפועל נגע בו, לא רק סגירה), ואז Profit Lock 0.25R, טריילינג מ-3R מעל השיא של שני "
+        "הנרות האחרונים.\n\n"
         "## יקום, פילטרים, חלון כניסות\n"
         "זהה לחלוטין ל-ORB Short המקורית ול-ORB Long v2.\n\n"
         "## סינון כיוון שוק (ES VWAP)\n"
@@ -1862,6 +1868,23 @@ def init_db(seed_rules_path: Path | None = None):
                 (_name,),
             )
 
+        # One-time migration adding "profit_lock_offset_R": 0.25 to
+        # exit_json.exit for ORB Long v2 / ORB Short v2 ONLY (not their
+        # Fade siblings, which keep the old flat-breakeven-on-Close
+        # behavior unchanged - see cycle._profit_lock_decision's own
+        # docstring for the full rationale). Same JSON1-not-exact-text
+        # convention as the es_vwap_filter migration just above, and same
+        # no-op-once-applied / never-overwrites-a-manual-value guarantee.
+        _PROFIT_LOCK_STRATEGY_NAMES = (
+            "ORB Long v2 (RSI/Trend Confluence, Staged Trail)", "ORB Short v2 (RSI/Trend Confluence, Staged Trail)",
+        )
+        for _name in _PROFIT_LOCK_STRATEGY_NAMES:
+            conn.execute(
+                "UPDATE strategies SET rules_json = json_set(rules_json, '$.exit.profit_lock_offset_R', 0.25) "
+                "WHERE name = ? AND json_extract(rules_json, '$.exit.profit_lock_offset_R') IS NULL",
+                (_name,),
+            )
+
         # One-time migration inserting the new "## סינון כיוון שוק (ES VWAP)"
         # description section into the same 8 strategies' description text
         # (see _ES_VWAP_FILTER_STRATEGY_NAMES migration above, which only touches
@@ -1903,6 +1926,27 @@ def init_db(seed_rules_path: Path | None = None):
             ),
         }
         for _name, (_old_text, _new_text) in _ES_VWAP_FILTER_DESCRIPTIONS.items():
+            conn.execute(
+                "UPDATE strategies SET description = ? WHERE name = ? AND description = ?",
+                (_new_text, _name, _old_text),
+            )
+
+        # One-time migration updating ORB Long v2 / ORB Short v2's own
+        # description text for the MFE-based profit-lock change above (see
+        # _PROFIT_LOCK_STRATEGY_NAMES migration, which only touches
+        # rules_json, not description) - same exact-old-text-match
+        # convention as the other description migrations above.
+        _PROFIT_LOCK_DESCRIPTIONS = {
+            'ORB Long v2 (RSI/Trend Confluence, Staged Trail)': (
+                '## מה זה עושה\nגרסה שנייה (v2) של ORB Long - שומרת על אותו מנגנון Opening Range Breakout (OR 15 דקות, אישור 5 דקות, breakout/retest) אבל עם שני שינויים משמעותיים: פילטרים נוספים לפני כניסה, ומנגנון יציאה שונה לגמרי. **נשמרת כאסטרטגיה נפרדת מ-ORB Long המקורית** (לא דריסה במקום) כדי לא לערבב את היסטוריית הבקטסטים של שתיהן תחת אותה זהות.\n\n## פילטר כניסה נוסף: RSI + מגמה\nבנוסף לכל תנאי ה-ORB המקוריים (OR, אישור, RVOL+ATR%), נדרש גם: RSI(14) עולה על פני 3 נרות רצופים אחרונים, **וגם** (EMA(20) על 5 דקות עולה **או** המחיר מעל ה-VWAP של היום). כל התנאים האלה חייבים להתקיים באותו נר שבו נכנסים.\n\n## יציאה: Staged Trail (במקום יעד קבוע)\nאין יותר יעד R:R קבוע - הסטופ ההתחלתי נשאר קבוע עד 2R, ואז עובר ל-Breakeven. כשמגיעים ל-3R, מתחיל טריילינג סטופ מתחת לשפל של שני הנרות האחרונים (5 דקות), ומתעדכן כל עוד הוא משתפר. הפוזיציה יכולה לרוץ הרבה מעבר ל-2R אם המניה ממשיכה.\n\n## יקום, פילטרי תנודתיות, חלון כניסות\nזהה ל-ORB Long המקורית: S&P 500 עם Market Cap מעל $1B, מחיר מינימלי $3, RVOL מעל 2.0, ATR% מדורג לפי מחיר, חלון כניסות 09:50-11:30 ET.\n\n## סינון כיוון שוק (ES VWAP)\nכניסה מתאפשרת רק כש-ES (חוזי E-mini S&P 500) נסחר **מעל** ל-VWAP היומי שלו - שים לב: זה נפרד לגמרי מ-VWAP הסימבול עצמו שכבר מופיע למעלה כחלק מ-RSI+EMA/VWAP (זה בודק את המניה הספציפית, זה בודק את השוק הרחב). "Market first, setup second": גם אם כל תנאי הכניסה מתקיימים, עסקה שסותרת את כיוון השוק הרחב נדחית. כבוי כברירת מחדל (דורש הרשאת נתוני CME futures + הפעלה מפורשת בעמוד Bot) - כל עוד הוא כבוי, או שאין גישה לנתוני ES, האסטרטגיה נשארת ללא סינון (fail-open), לא נחסמת.\n\n## פרופיל סיכון\nדירוג: aggressive - אסטרטגיה חדשה לגמרי שלא נבדקה כלל (v1 המקורית לפחות עברה בקטסט ראשוני - זו עוד לא). סיכון לעסקה: 1% | גודל פוזיציה מקס\': 10% | פוזיציות בו-זמנית: עד 5\n\n## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\nאין לזה שום היסטוריית בקטסט עדיין - כל אזהרות ORB Long המקורית תקפות כאן במלואן, ובנוסף: הפילטרים הנוספים (RSI+EMA/VWAP) מצמצמים עוד יותר את מספר העסקאות הפוטנציאליות, וה-Staged Trail טרם נבדק כלל מול הנתונים ההיסטוריים. הרץ בקטסט מקיף (שבועות-חודשים) לפני כל שיקול נוסף.',
+                '## מה זה עושה\nגרסה שנייה (v2) של ORB Long - שומרת על אותו מנגנון Opening Range Breakout (OR 15 דקות, אישור 5 דקות, breakout/retest) אבל עם שני שינויים משמעותיים: פילטרים נוספים לפני כניסה, ומנגנון יציאה שונה לגמרי. **נשמרת כאסטרטגיה נפרדת מ-ORB Long המקורית** (לא דריסה במקום) כדי לא לערבב את היסטוריית הבקטסטים של שתיהן תחת אותה זהות.\n\n## פילטר כניסה נוסף: RSI + מגמה\nבנוסף לכל תנאי ה-ORB המקוריים (OR, אישור, RVOL+ATR%), נדרש גם: RSI(14) עולה על פני 3 נרות רצופים אחרונים, **וגם** (EMA(20) על 5 דקות עולה **או** המחיר מעל ה-VWAP של היום). כל התנאים האלה חייבים להתקיים באותו נר שבו נכנסים.\n\n## יציאה: Staged Trail (במקום יעד קבוע)\nאין יותר יעד R:R קבוע - הסטופ ההתחלתי נשאר קבוע עד שה-MFE (השיא שהמחיר בפועל נגע בו, לא רק מחיר הסגירה) מגיע ל-2R, ואז עובר ל-**Profit Lock: 0.25R** (לא ל-Breakeven שטוח) - כלומר גם עסקה שנגעה ב-2R תוך-יומית וחזרה אחורה, ננעלת עם רווח קטן במקום להסתכן בחזרה לסטופ המקורי. כשמגיעים ל-3R (סגירת נר), מתחיל טריילינג סטופ מתחת לשפל של שני הנרות האחרונים (5 דקות), ומתעדכן כל עוד הוא משתפר. הפוזיציה יכולה לרוץ הרבה מעבר ל-2R אם המניה ממשיכה.\n\n## יקום, פילטרי תנודתיות, חלון כניסות\nזהה ל-ORB Long המקורית: S&P 500 עם Market Cap מעל $1B, מחיר מינימלי $3, RVOL מעל 2.0, ATR% מדורג לפי מחיר, חלון כניסות 09:50-11:30 ET.\n\n## סינון כיוון שוק (ES VWAP)\nכניסה מתאפשרת רק כש-ES (חוזי E-mini S&P 500) נסחר **מעל** ל-VWAP היומי שלו - שים לב: זה נפרד לגמרי מ-VWAP הסימבול עצמו שכבר מופיע למעלה כחלק מ-RSI+EMA/VWAP (זה בודק את המניה הספציפית, זה בודק את השוק הרחב). "Market first, setup second": גם אם כל תנאי הכניסה מתקיימים, עסקה שסותרת את כיוון השוק הרחב נדחית. כבוי כברירת מחדל (דורש הרשאת נתוני CME futures + הפעלה מפורשת בעמוד Bot) - כל עוד הוא כבוי, או שאין גישה לנתוני ES, האסטרטגיה נשארת ללא סינון (fail-open), לא נחסמת.\n\n## פרופיל סיכון\nדירוג: aggressive - אסטרטגיה חדשה לגמרי שלא נבדקה כלל (v1 המקורית לפחות עברה בקטסט ראשוני - זו עוד לא). סיכון לעסקה: 1% | גודל פוזיציה מקס\': 10% | פוזיציות בו-זמנית: עד 5\n\n## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\nאין לזה שום היסטוריית בקטסט עדיין - כל אזהרות ORB Long המקורית תקפות כאן במלואן, ובנוסף: הפילטרים הנוספים (RSI+EMA/VWAP) מצמצמים עוד יותר את מספר העסקאות הפוטנציאליות, וה-Staged Trail טרם נבדק כלל מול הנתונים ההיסטוריים. הרץ בקטסט מקיף (שבועות-חודשים) לפני כל שיקול נוסף.',
+            ),
+            'ORB Short v2 (RSI/Trend Confluence, Staged Trail)': (
+                '## מה זה עושה\nמראה הפוכה מדויקת של ORB Long v2 - ראו את התיאור המלא שם. כאן: RSI(14) יורד על פני 3 נרות רצופים, וגם (EMA(20) יורד או המחיר מתחת ל-VWAP). סטופ קבוע עד 2R, Breakeven ב-2R, טריילינג מ-3R מעל השיא של שני הנרות האחרונים.\n\n## יקום, פילטרים, חלון כניסות\nזהה לחלוטין ל-ORB Short המקורית ול-ORB Long v2.\n\n## סינון כיוון שוק (ES VWAP)\nכניסה מתאפשרת רק כש-ES (חוזי E-mini S&P 500) נסחר **מתחת** ל-VWAP היומי שלו - שים לב: זה נפרד לגמרי מ-VWAP הסימבול עצמו שכבר מופיע למעלה. "Market first, setup second": גם אם כל תנאי הכניסה מתקיימים, עסקה שסותרת את כיוון השוק הרחב נדחית. כבוי כברירת מחדל (דורש הרשאת נתוני CME futures + הפעלה מפורשת בעמוד Bot) - כל עוד הוא כבוי, או שאין גישה לנתוני ES, האסטרטגיה נשארת ללא סינון (fail-open), לא נחסמת.\n\n## פרופיל סיכון\nדירוג: aggressive - אסטרטגיה חדשה לגמרי שלא נבדקה כלל. סיכון לעסקה: 1% | גודל פוזיציה מקס\': 10% | פוזיציות בו-זמנית: עד 5\n\n## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\nכל אזהרות ORB Long v2 תקפות כאן, ובנוסף: בפוזיציית Short אין תקרה תיאורטית להפסד - מחיר המניה יכול לעלות ללא הגבלה, וה-stop עלול \'לקפוץ מעל\' (gap) במקרה של short squeeze. אל תפעיל LIVE לפני בדיקה מקיפה.',
+                '## מה זה עושה\nמראה הפוכה מדויקת של ORB Long v2 - ראו את התיאור המלא שם. כאן: RSI(14) יורד על פני 3 נרות רצופים, וגם (EMA(20) יורד או המחיר מתחת ל-VWAP). סטופ קבוע עד MFE 2R (השיא/שפל שהמחיר בפועל נגע בו, לא רק סגירה), ואז Profit Lock 0.25R, טריילינג מ-3R מעל השיא של שני הנרות האחרונים.\n\n## יקום, פילטרים, חלון כניסות\nזהה לחלוטין ל-ORB Short המקורית ול-ORB Long v2.\n\n## סינון כיוון שוק (ES VWAP)\nכניסה מתאפשרת רק כש-ES (חוזי E-mini S&P 500) נסחר **מתחת** ל-VWAP היומי שלו - שים לב: זה נפרד לגמרי מ-VWAP הסימבול עצמו שכבר מופיע למעלה. "Market first, setup second": גם אם כל תנאי הכניסה מתקיימים, עסקה שסותרת את כיוון השוק הרחב נדחית. כבוי כברירת מחדל (דורש הרשאת נתוני CME futures + הפעלה מפורשת בעמוד Bot) - כל עוד הוא כבוי, או שאין גישה לנתוני ES, האסטרטגיה נשארת ללא סינון (fail-open), לא נחסמת.\n\n## פרופיל סיכון\nדירוג: aggressive - אסטרטגיה חדשה לגמרי שלא נבדקה כלל. סיכון לעסקה: 1% | גודל פוזיציה מקס\': 10% | פוזיציות בו-זמנית: עד 5\n\n## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\nכל אזהרות ORB Long v2 תקפות כאן, ובנוסף: בפוזיציית Short אין תקרה תיאורטית להפסד - מחיר המניה יכול לעלות ללא הגבלה, וה-stop עלול \'לקפוץ מעל\' (gap) במקרה של short squeeze. אל תפעיל LIVE לפני בדיקה מקיפה.',
+            ),
+        }
+        for _name, (_old_text, _new_text) in _PROFIT_LOCK_DESCRIPTIONS.items():
             conn.execute(
                 "UPDATE strategies SET description = ? WHERE name = ? AND description = ?",
                 (_new_text, _name, _old_text),
