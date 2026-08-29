@@ -81,6 +81,7 @@ def run_one_strategy(
             "exit_quality": report["exit_quality"],
             "entry_vs_exit": report["entry_vs_exit"],
             "exit_reason_breakdown": report["exit_reason_breakdown"],
+            "profit_lock_analysis": report["profit_lock_analysis"],
         },
         # None unless this strategy's rules actually carried
         # "es_vwap_filter" AND ES's own cached bars were available for

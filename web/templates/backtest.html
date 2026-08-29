@@ -283,6 +283,27 @@
   </div>
 
   <div class="card mb-4">
+    <div class="card-header">
+      <span>Compare Strategies <span class="text-muted small">— side-by-side pooled backtest results for two strategies (e.g. ORB Long v2 vs v3)</span></span>
+    </div>
+    <div class="card-body">
+      <div class="d-flex flex-wrap align-items-end gap-2 mb-3">
+        <div>
+          <label class="form-label small mb-1" for="cmp-strategy-a">Strategy A</label>
+          <select id="cmp-strategy-a" class="form-select form-select-sm" style="min-width:280px"></select>
+        </div>
+        <div>
+          <label class="form-label small mb-1" for="cmp-strategy-b">Strategy B</label>
+          <select id="cmp-strategy-b" class="form-select form-select-sm" style="min-width:280px"></select>
+        </div>
+        <button id="btn-run-compare" class="btn btn-primary btn-sm" onclick="runStrategyCompare()">Compare</button>
+      </div>
+      <div id="cmp-error" class="text-danger small mb-2"></div>
+      <div id="cmp-body"></div>
+    </div>
+  </div>
+
+  <div class="card mb-4">
     <div class="card-header d-flex justify-content-between align-items-center">
       <span>History <span class="text-muted small">— click a row to show/hide its results; filtered by the Calendar's strategy checkboxes above</span></span>
       {% if not is_viewer %}
@@ -1184,6 +1205,98 @@ async function refreshStrategyReport() {
   renderStrategyReport();
 }
 
+// Populates the two Compare Strategies pickers from strategiesById (see
+// loadStrategyPicker, which fetches it - already grouped by direction
+// there, just flattened + sorted here since the compare tool isn't
+// restricted to comparing same-direction strategies). Re-populating both
+// selects fresh each call preserves whichever was already picked, same
+// pattern as renderStrategyColumn.
+function loadComparePicker() {
+  const selA = document.getElementById("cmp-strategy-a");
+  const selB = document.getElementById("cmp-strategy-b");
+  if (!selA || !selB) return;
+  const prevA = selA.value, prevB = selB.value;
+  const strategies = Object.values(strategiesById).sort((a, b) => a.direction === b.direction ? a.name.localeCompare(b.name) : a.direction.localeCompare(b.direction));
+  const options = strategies.map(s => `<option value="${s.id}">${s.direction === "short" ? "[SHORT]" : "[LONG]"} ${s.name}</option>`).join("");
+  selA.innerHTML = options;
+  selB.innerHTML = options;
+  if (prevA) selA.value = prevA;
+  if (prevB) selB.value = prevB;
+}
+
+const CMP_STAT_ROWS = [
+  ["Total trades", d => d.aggregate.total_trades, v => v],
+  ["Win rate", d => d.aggregate.win_rate_pct, fmtPct1],
+  ["Profit factor", d => d.aggregate.profit_factor, v => v],
+  ["Gross P&L", d => d.aggregate.gross_pnl_usd, fmtMoney],
+  ["Commission", d => d.aggregate.total_commission_usd, fmtMoney],
+  ["Net P&L", d => d.aggregate.net_pnl_usd, fmtMoney],
+  ["Avg winner", d => d.aggregate.avg_winner, fmtMoney],
+  ["Avg loser", d => d.aggregate.avg_loser, fmtMoney],
+  ["Avg Final R", d => d.summary.avg_final_r, fmtR],
+  ["Median Final R", d => d.summary.median_final_r, fmtR],
+  ["Avg MFE R", d => d.summary.avg_mfe_r, fmtR],
+  ["Avg Capture %", d => d.summary.avg_capture_pct, fmtPct1],
+  ["Max Drawdown", d => d.max_drawdown_usd, fmtMoney],
+];
+
+const CMP_EXIT_CATEGORY_ORDER = ["initial_stop_loss", "profit_lock_stop", "staged_trailing_stop", "legacy_trailing_stop", "eod_close"];
+
+function renderCompareSide(d) {
+  if (!d || d.no_data) {
+    return `<div><div class="fw-semibold">${d ? d.strategy_name : "-"}</div><p class="small text-muted mb-0">No completed backtests yet.</p></div>`;
+  }
+  return `<div><div class="fw-semibold">${d.strategy_name}</div><div class="small text-muted">${d.backtests_included} backtest(s) pooled</div></div>`;
+}
+
+function renderStrategyCompare(data) {
+  const { a, b } = data;
+  let html = `<div class="row mb-3"><div class="col-6">${renderCompareSide(a)}</div><div class="col-6">${renderCompareSide(b)}</div></div>`;
+  if ((!a || a.no_data) && (!b || b.no_data)) return html;
+
+  html += '<div style="overflow-x:auto;"><table class="table table-sm"><thead><tr><th>Metric</th><th>A</th><th>B</th></tr></thead><tbody>';
+  for (const [label, get, fmt] of CMP_STAT_ROWS) {
+    const av = a && !a.no_data ? get(a) : null;
+    const bv = b && !b.no_data ? get(b) : null;
+    html += `<tr><td>${label}</td><td class="mono">${av == null ? "-" : fmt(av)}</td><td class="mono">${bv == null ? "-" : fmt(bv)}</td></tr>`;
+  }
+  html += "</tbody></table></div>";
+
+  html += '<div class="fw-semibold small mt-3 mb-1">Profit-Lock Analysis</div>';
+  html += '<div style="overflow-x:auto;"><table class="table table-sm"><thead><tr><th>Metric</th><th>A</th><th>B</th></tr></thead><tbody>';
+  const thresholds = ["1.5", "2.0", "2.5"];
+  for (const t of thresholds) {
+    const av = a && !a.no_data ? a.profit_lock_analysis.mfe_threshold_counts[t] : null;
+    const bv = b && !b.no_data ? b.profit_lock_analysis.mfe_threshold_counts[t] : null;
+    html += `<tr><td>Trades reaching ${t}R (MFE)</td><td class="mono">${av == null ? "-" : av}</td><td class="mono">${bv == null ? "-" : bv}</td></tr>`;
+  }
+  for (const cat of CMP_EXIT_CATEGORY_ORDER) {
+    const av = a && !a.no_data ? a.profit_lock_analysis.exit_category_counts[cat] : undefined;
+    const bv = b && !b.no_data ? b.profit_lock_analysis.exit_category_counts[cat] : undefined;
+    if (av === undefined && bv === undefined) continue;  // neither side ever produced this category - skip the row
+    html += `<tr><td>${EXIT_REASON_LABELS[cat] || cat} exits</td><td class="mono">${av == null ? "0" : av}</td><td class="mono">${bv == null ? "0" : bv}</td></tr>`;
+  }
+  html += "</tbody></table></div>";
+  return html;
+}
+
+async function runStrategyCompare() {
+  const idA = document.getElementById("cmp-strategy-a").value;
+  const idB = document.getElementById("cmp-strategy-b").value;
+  const errorEl = document.getElementById("cmp-error");
+  const bodyEl = document.getElementById("cmp-body");
+  errorEl.textContent = "";
+  if (!idA || !idB) { errorEl.textContent = "Pick two strategies first."; return; }
+  bodyEl.innerHTML = '<p class="small text-muted mb-0">Loading…</p>';
+  try {
+    const data = await api(`/api/strategies/compare?strategy_id_a=${idA}&strategy_id_b=${idB}`);
+    bodyEl.innerHTML = renderStrategyCompare(data);
+  } catch (e) {
+    errorEl.textContent = e.message || "Failed to load comparison";
+    bodyEl.innerHTML = "";
+  }
+}
+
 function renderResults(detail) {
   document.getElementById("bt-results-card").classList.remove("d-none");
   const badge = document.getElementById("bt-status-badge");
@@ -1920,6 +2033,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (archiveLoaded) renderArchive();  // nothing fetched yet if the Archive card was never opened - no rows to filter
   });
   await loadStrategyPicker();
+  loadComparePicker();
   loadUniverseInfo();
   refreshHistory();
   refreshCalendar();

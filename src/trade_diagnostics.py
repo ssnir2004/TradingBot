@@ -277,6 +277,41 @@ def exit_reason_breakdown(enriched: list[dict], has_profit_lock: bool) -> list[d
     return rows
 
 
+# Fixed reference thresholds for profit_lock_analysis below - deliberately
+# NOT each strategy's own breakeven_trigger_R/trailing_trigger_R (which
+# differ between e.g. ORB v2's 2.0R/3.0R and ORB v3's 1.5R/2.5R), so two
+# differently-configured staged_trail strategies stay comparable on the
+# same MFE axis: "of ALL trades that ever touched 2R intraday, how many
+# did each strategy's own trigger actually catch" is a meaningful
+# side-by-side question, "trades reaching each strategy's own threshold"
+# is not (the thresholds themselves are what's being compared).
+PROFIT_LOCK_ANALYSIS_THRESHOLDS = [1.5, 2.0, 2.5]
+
+
+def mfe_threshold_counts(enriched: list[dict], thresholds: list[float]) -> dict:
+    """Count of diagnosable trades whose MFE R-multiple reached at least
+    each threshold - MFE (the real intrabar high/low touch), not Final R
+    or Close, matching the exact number cycle._profit_lock_decision's own
+    mfe_r itself keys off (see its docstring). Keyed by str(threshold) for
+    straightforward JSON/JS consumption."""
+    d = _diagnosable(enriched)
+    return {str(t): sum(1 for p in d if p["mfe_r"] >= t) for t in thresholds}
+
+
+def profit_lock_analysis(enriched: list[dict], has_profit_lock: bool) -> dict:
+    """The "Profit-Lock Analysis" section from the v3 comparison request:
+    how many trades ever reached each of the fixed reference MFE
+    thresholds above, alongside the exit_reason_breakdown's own per-
+    category trade_count (not recomputed here - same classification,
+    same counts, just re-keyed by category for a comparison table)."""
+    breakdown = exit_reason_breakdown(enriched, has_profit_lock)
+    return {
+        "mfe_threshold_counts": mfe_threshold_counts(enriched, PROFIT_LOCK_ANALYSIS_THRESHOLDS),
+        "exit_category_counts": {row["category"]: row["trade_count"] for row in breakdown},
+        "total_closed_trades": len(enriched),
+    }
+
+
 def es_filter_report(pairs: list[dict]) -> dict | None:
     """Before/after stats for src/es_filter.py's ES-VWAP gate (see
     backtest_engine.py's _es_filter_pass) - None if this strategy never
@@ -343,4 +378,5 @@ def full_report(pairs: list[dict], has_profit_lock: bool = False) -> dict:
         "entry_vs_exit": entry_vs_exit_analysis(enriched),
         "es_filter": es_filter_report(enriched),
         "exit_reason_breakdown": exit_reason_breakdown(enriched, has_profit_lock),
+        "profit_lock_analysis": profit_lock_analysis(enriched, has_profit_lock),
     }

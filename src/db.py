@@ -1136,6 +1136,180 @@ EXTRA_STRATEGY_PRESETS = [
         "אל תפעיל LIVE לפני בדיקה מקיפה.",
     ),
     (
+        # v3 of ORB Long v2 - EXACT same entry logic/filters as v2 (see its
+        # own comment above, not repeated here: opening_range/universe_
+        # filters/volatility_filters/entry_confluence/entry_models/
+        # time_filter/es_vwap_filter/risk are all byte-for-byte copies).
+        # Only exit_cfg's threshold constants change - same staged_trail
+        # algorithm/code path (cycle._profit_lock_decision/_trailing_stop_
+        # decision, backtest_engine.py's _staged_trail_exit_reason - none
+        # of those were touched, only the numbers this rules_json feeds
+        # them):
+        #   MFE >= 2.0R -> Profit Lock +0.25R, MFE >= 3.0R -> trail  (v2)
+        #   MFE >= 1.5R -> Profit Lock +0.50R, MFE >= 2.5R -> trail  (v3)
+        # Motivation (see the "more aggressive profit-protection" request
+        # this conversation implemented): plenty of v2 trades touch
+        # 2R-3R intraday and give back most of the move before the flat
+        # 2R/+0.25R lock ever catches them - v3 locks in a bigger profit
+        # earlier while keeping the exact same trailing mechanism for a
+        # real trend trade to keep running on. Kept as its own strategy_id
+        # (v2 untouched) so backtest history never mixes and the two pool/
+        # compare independently - see /api/strategies/compare.
+        "ORB Long v3 (Early Profit Lock, Staged Trail)",
+        {
+            "strategy_name": "ORB Long v3 (Early Profit Lock, Staged Trail)",
+            "direction": "long_only",
+            "es_vwap_filter": True,
+            "opening_range": {
+                "or_timeframe": "15m",
+                "confirm_timeframe": "5m",
+                "entry_timeframe": "5m",
+                "session": "new_york",
+                "session_open_et": "09:30",
+            },
+            "universe_filters": {
+                "index": "S&P 500",
+                "min_price_usd": 3.0,
+                "custom_universe": "sp500_marketcap_1b",
+            },
+            "volatility_filters": {
+                "V1_rvol_min": 2.0,
+                "V1_rvol_lookback_days": 14,
+                "V2_atr_period": 14,
+                "V2_atr_pct_tiers": [
+                    {"price_min": 3.0, "price_max": 20.0, "atr_pct_min": 4.0},
+                    {"price_min": 20.0, "price_max": 50.0, "atr_pct_min": 3.0},
+                    {"price_min": 50.0, "price_max": 100.0, "atr_pct_min": 2.0},
+                    {"price_min": 100.0, "price_max": None, "atr_pct_min": 1.5},
+                ],
+            },
+            "entry_confluence": {
+                "rsi_period": 14,
+                "rsi_rising_bars": 3,
+                "ema_period": 20,
+            },
+            "entry_models": {
+                "breakout": {"enabled": True},
+                "retest": {"enabled": True},
+            },
+            "time_filter": {"earliest_entry_et": "09:50", "latest_entry_et": "11:30", "force_close_et": "15:51"},
+            "exit": {
+                "management_style": "staged_trail",
+                "breakeven_trigger_R": 1.5,
+                "trailing_trigger_R": 2.5,
+                "profit_lock_offset_R": 0.50,
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+                "min_stop_distance_pct": 0.25,
+            },
+        },
+        "aggressive",
+        "long",
+        "## מה זה עושה\n"
+        "גרסה שלישית (v3) של ORB Long - תנאי כניסה זהים לחלוטין ל-ORB Long v2 (OR breakout/"
+        "retest, RSI+EMA/VWAP, RVOL+ATR%, ES VWAP, אותו יקום וחלון כניסות). ההבדל היחיד: מודל "
+        "הגנת הרווח (trade management) מגן על רווח מוקדם יותר ובכמות גדולה יותר. **נשמרת "
+        "כאסטרטגיה נפרדת מ-v2** (לא דריסה) כדי לא לערבב את היסטוריות הבקטסט של שתיהן.\n\n"
+        "## יציאה: Profit Lock ו-Trail מוקדמים יותר\n"
+        "כש-MFE (השיא שהמחיר בפועל נגע בו תוך-יומית, לא רק סגירה) מגיע ל-**1.5R** (במקום 2R "
+        "ב-v2), הסטופ עובר ל-**Profit Lock +0.50R** (במקום +0.25R ב-v2) - נעילת רווח גדולה יותר, "
+        "מוקדם יותר. כש-MFE מגיע ל-**2.5R** (במקום 3R ב-v2), מתחיל טריילינג סטופ - **אותו "
+        "אלגוריתם בדיוק כמו ב-v2** (מתחת לשפל של שני נרות 5 הדקות האחרונים, ללא שינוי), רק סף "
+        "ההפעלה שונה. המטרה: בהרבה עסקאות v2 המחיר נוגע ב-2R-3R תוך-יומית וחוזר אחורה כמעט עד "
+        "הסטופ לפני שהנעילה השטוחה של 2R/+0.25R תופסת אותו - v3 נועדה לנעול רווח משמעותי מוקדם "
+        "יותר, בלי לפגוע ביכולת לרכב על עסקת מגמה אמיתית.\n\n"
+        "## סיווג סיבת יציאה\n"
+        "בדיוק כמו ב-v2: Initial stop loss / Profit-lock stop / Staged trailing stop / End of "
+        "day - מסווג אוטומטית לפי אותו מנגנון (profit_lock_offset_R קיים ב-exit_cfg).\n\n"
+        "## יקום, פילטרי תנודתיות, חלון כניסות\n"
+        "זהה לחלוטין ל-ORB Long v2.\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive - אסטרטגיה חדשה לגמרי שלא נבדקה כלל, בדיוק כמו v2 בזמנו. סיכון "
+        "לעסקה: 1% | גודל פוזיציה מקס': 10% | פוזיציות בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "אין לזה שום היסטוריית בקטסט עדיין. כל אזהרות ORB Long v2 תקפות כאן במלואן - הרץ בקטסט "
+        "מקיף (שבועות-חודשים, מאות עסקאות) והשווה מול v2 (ראו כלי ההשוואה בעמוד Backtest) לפני "
+        "כל שיקול נוסף.",
+    ),
+    (
+        # v3 of ORB Short v2 - exact mirror of ORB Long v3 above, see its
+        # own comment for the full explanation, not repeated here.
+        "ORB Short v3 (Early Profit Lock, Staged Trail)",
+        {
+            "strategy_name": "ORB Short v3 (Early Profit Lock, Staged Trail)",
+            "direction": "short_only",
+            "es_vwap_filter": True,
+            "opening_range": {
+                "or_timeframe": "15m",
+                "confirm_timeframe": "5m",
+                "entry_timeframe": "5m",
+                "session": "new_york",
+                "session_open_et": "09:30",
+            },
+            "universe_filters": {
+                "index": "S&P 500",
+                "min_price_usd": 3.0,
+                "custom_universe": "sp500_marketcap_1b",
+            },
+            "volatility_filters": {
+                "V1_rvol_min": 2.0,
+                "V1_rvol_lookback_days": 14,
+                "V2_atr_period": 14,
+                "V2_atr_pct_tiers": [
+                    {"price_min": 3.0, "price_max": 20.0, "atr_pct_min": 4.0},
+                    {"price_min": 20.0, "price_max": 50.0, "atr_pct_min": 3.0},
+                    {"price_min": 50.0, "price_max": 100.0, "atr_pct_min": 2.0},
+                    {"price_min": 100.0, "price_max": None, "atr_pct_min": 1.5},
+                ],
+            },
+            "entry_confluence": {
+                "rsi_period": 14,
+                "rsi_rising_bars": 3,
+                "ema_period": 20,
+            },
+            "entry_models": {
+                "breakout": {"enabled": True},
+                "retest": {"enabled": True},
+            },
+            "time_filter": {"earliest_entry_et": "09:50", "latest_entry_et": "11:30", "force_close_et": "15:51"},
+            "exit": {
+                "management_style": "staged_trail",
+                "breakeven_trigger_R": 1.5,
+                "trailing_trigger_R": 2.5,
+                "profit_lock_offset_R": 0.50,
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+                "min_stop_distance_pct": 0.25,
+            },
+        },
+        "aggressive",
+        "short",
+        "## מה זה עושה\n"
+        "מראה הפוכה מדויקת של ORB Long v3 - ראו את התיאור המלא שם. כאן: תנאי כניסה זהים "
+        "לחלוטין ל-ORB Short v2 (RSI יורד, EMA יורד/מחיר מתחת ל-VWAP, אותם פילטרים ויקום). "
+        "אותו שינוי ניהול פוזיציה: MFE >= 1.5R -> Profit Lock -0.50R (במקום 2R -> -0.25R ב-v2), "
+        "MFE >= 2.5R -> טריילינג (במקום 3R) - אותו אלגוריתם טריילינג בדיוק, רק סף ההפעלה "
+        "שונה.\n\n"
+        "## סיווג סיבת יציאה\n"
+        "בדיוק כמו ב-v2: Initial stop loss / Profit-lock stop / Staged trailing stop / End of "
+        "day.\n\n"
+        "## יקום, פילטרים, חלון כניסות\n"
+        "זהה לחלוטין ל-ORB Short v2 ול-ORB Long v3.\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive - אסטרטגיה חדשה לגמרי שלא נבדקה כלל. סיכון לעסקה: 1% | גודל פוזיציה "
+        "מקס': 10% | פוזיציות בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "כל אזהרות ORB Long v3 ו-ORB Short v2 תקפות כאן, ובנוסף: בפוזיציית Short אין תקרה "
+        "תיאורטית להפסד - מחיר המניה יכול לעלות ללא הגבלה, וה-stop עלול 'לקפוץ מעל' (gap) "
+        "במקרה של short squeeze. אל תפעיל LIVE לפני בדיקה מקיפה.",
+    ),
+    (
         # Experimental "fade" pair for ORB v2, same signal_side mechanism
         # (and same research motivation) as "Long Breakout Fade (Short)"/
         # "Short Breakdown Fade (Long)" above, extended to

@@ -1180,6 +1180,53 @@ def api_strategy_trades_pdf_all(account_id: int = Depends(require_account), user
     )
 
 
+def _strategy_compare_side(done_backtests: list[dict], strategy_id: int) -> dict:
+    """One side of api_strategy_compare below - same pooling/has_profit_lock
+    threading as api_strategy_trade_diagnostics, factored out so both sides
+    of a comparison go through the exact same code path (no risk of the A
+    side and B side silently computing their stats two different ways).
+    "no_data": True (rather than a 404) for a strategy that exists but has
+    no completed backtest yet - a comparison should be able to show "ORB
+    Long v3 has no data yet" side-by-side with v2's real numbers, not fail
+    the whole request."""
+    strategy = db.get_strategy(strategy_id)
+    if not strategy:
+        return None
+    pooled = perf.pooled_trades_for_strategy(done_backtests, strategy_id)
+    if not pooled:
+        return {"strategy_id": strategy_id, "strategy_name": strategy["name"], "direction": strategy["direction"], "no_data": True}
+    report = trade_diagnostics.full_report(pooled["pairs"], has_profit_lock=_strategy_has_profit_lock(strategy))
+    return {
+        "strategy_id": strategy_id, "strategy_name": pooled["strategy_name"], "direction": pooled["direction"],
+        "backtests_included": pooled["backtests_included"], "no_data": False,
+        "aggregate": pooled["aggregate"], "max_drawdown_usd": perf.compute_max_drawdown(pooled["pairs"]),
+        "summary": report["summary"], "exit_reason_breakdown": report["exit_reason_breakdown"],
+        "profit_lock_analysis": report["profit_lock_analysis"],
+    }
+
+
+@app.get("/api/strategies/compare")
+def api_strategy_compare(strategy_id_a: int, strategy_id_b: int, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    """Side-by-side comparison of two strategies' pooled backtest results -
+    built for the ORB Long/Short v2 vs v3 profit-protection comparison (see
+    EXTRA_STRATEGY_PRESETS' own v3 comment in src/db.py), but generic over
+    any two strategy_ids. Each side is built via _strategy_compare_side
+    with ITS OWN has_profit_lock fact, so e.g. comparing a profit_lock
+    strategy against a plain one never mixes up which side's exit_reason
+    labels/thresholds apply to which. Registered BEFORE /api/strategies/
+    {strategy_id} below (like trades_pdf_all.zip above it) - Starlette
+    matches route patterns in registration order and {strategy_id}: int
+    would otherwise swallow "compare" as an invalid int path param first,
+    the same collision this file's existing literal-segment routes
+    already avoid by sitting above it."""
+    done = db.list_done_backtest_results(account_id)
+    a = _strategy_compare_side(done, strategy_id_a)
+    b = _strategy_compare_side(done, strategy_id_b)
+    if a is None or b is None:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    return {"a": a, "b": b}
+
+
 @app.get("/api/strategies/{strategy_id}")
 def api_get_strategy(strategy_id: int, user: str = Depends(require_user)):
     strategy = db.get_strategy(strategy_id)
@@ -1295,6 +1342,7 @@ def api_strategy_trade_diagnostics(strategy_id: int, account_id: int = Depends(r
         "summary": report["summary"], "r_distribution": report["r_distribution"],
         "exit_quality": report["exit_quality"], "entry_vs_exit": report["entry_vs_exit"],
         "es_filter": report["es_filter"], "exit_reason_breakdown": report["exit_reason_breakdown"],
+        "profit_lock_analysis": report["profit_lock_analysis"],
     }
 
 
