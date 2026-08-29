@@ -998,7 +998,10 @@ function renderStrategyReportEntry(entry) {
   return `<div class="col-12 col-lg-6 mb-3"><div class="card h-100">
     <div class="card-header d-flex justify-content-between align-items-center">
       <span>${key ? `<span class="badge bg-light text-dark border me-1">${key}</span>` : ""}${entry.strategy_name} ${sideBadge(entry.direction)}</span>
-      ${entry.low_sample ? `<span class="badge bg-warning text-dark" title="Fewer than ${STRATEGY_REPORT_LOW_SAMPLE_TRADES} pooled trades - too small a sample to draw real conclusions from yet">small sample</span>` : ""}
+      <span>
+        ${entry.low_sample ? `<span class="badge bg-warning text-dark" title="Fewer than ${STRATEGY_REPORT_LOW_SAMPLE_TRADES} pooled trades - too small a sample to draw real conclusions from yet">small sample</span>` : ""}
+        <a class="btn btn-sm btn-outline-secondary ms-1" href="/api/strategies/${entry.strategy_id}/trades.pdf" title="Download every pooled trade for this strategy as a PDF">PDF ⬇</a>
+      </span>
     </div>
     <div class="card-body">
       <p class="small text-muted mb-2">${entry.backtests_included} backtest(s) pooled</p>

@@ -13,3 +13,4 @@ bcrypt
 itsdangerous
 python-multipart
 cryptography
+reportlab

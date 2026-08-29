@@ -7,6 +7,7 @@ it never talks to IBKR directly, so it can safely run as a separate process.
 """
 import asyncio
 import json
+import re
 import subprocess
 import sys
 from datetime import date
@@ -14,13 +15,13 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import cycle
 import morning_prefilter
-from src import backtest_data, backtest_engine, db, gateway_provisioning, mode_config, perf, secrets_store
+from src import backtest_data, backtest_engine, db, gateway_provisioning, mode_config, perf, secrets_store, trades_pdf
 from src.sp500_tickers import SP500_TICKERS
 from web import gateway_control
 from web.auth import COOKIE_NAME, make_session_cookie, read_session, require_user
@@ -1187,6 +1188,31 @@ async def api_deactivate_strategy(strategy_id: int, account_id: int = Depends(re
     db.deactivate_strategy(account_id, strategy_id)
     _log_account_action(account_id, user, action="deactivate_strategy", strategy_id=strategy_id, name=strategy["name"])
     return {"ok": True}
+
+
+@app.get("/api/strategies/{strategy_id}/trades.pdf")
+def api_strategy_trades_pdf(strategy_id: int, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    """Full trade-by-trade PDF for one strategy, pooled across every 'done'
+    backtest this account has run against it (same dedup as the Strategy
+    Report card - see perf.pooled_trades_for_strategy). Scoped to this
+    account implicitly through list_done_backtest_results(account_id) -
+    strategies themselves aren't per-account rows, but their backtest
+    history is, so this can never leak another account's trade data."""
+    strategy = db.get_strategy(strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    pooled = perf.pooled_trades_for_strategy(db.list_done_backtest_results(account_id), strategy_id)
+    if not pooled:
+        raise HTTPException(status_code=404, detail="No completed backtests for this strategy yet")
+    pdf_bytes = trades_pdf.build_trades_pdf(
+        pooled["strategy_name"], pooled["direction"], pooled["backtests_included"],
+        pooled["aggregate"], pooled["pairs"],
+    )
+    safe_name = re.sub(r"[^A-Za-z0-9]+", "_", pooled["strategy_name"]).strip("_")
+    return Response(
+        content=pdf_bytes, media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}_trades.pdf"'},
+    )
 
 
 @app.delete("/api/strategies/{strategy_id}")
