@@ -235,6 +235,56 @@ def _es_filter_pass(strategy_rules: dict, es_day_groups: dict, day, bar_ts, side
     return es_filter.check(direction, side)["allowed"]
 
 
+def _quality_filters_pass(entry_ctx: dict, detail: dict, quality_cfg: dict) -> tuple[bool, str | None]:
+    """Entry-quality gate for a strategy that opts in via rules["quality_
+    filters"] (currently ORB Long v5 only - see EXTRA_STRATEGY_PRESETS'
+    own v5 comment in src/db.py) - every other ORB strategy has no such
+    key, so this function is never even called for them (see the call
+    site's own `if quality_cfg:` guard). Reads entirely off entry_ctx
+    (src/entry_metrics.py's own already-computed output for this exact
+    candidate) and detail (orb.evaluate_orb_entry's own result) - never
+    recomputes anything, so the number a filter gates on is always
+    identical to the number that ends up stored/reported for the trade.
+
+    Returns (passed, name-of-first-failing-filter) - only the FIRST
+    filter (in the fixed order below) that a candidate fails is charged
+    in filter_stats at the call site, so a candidate that would have
+    failed multiple filters isn't double-counted against all of them;
+    which filter "actually" rejected it is inherently ambiguous once
+    more than one would - reporting only the first is a simple,
+    deterministic convention, not a claim that the others didn't also
+    apply. Checking every configured sub-key is independently optional -
+    a key not present in quality_cfg is simply not checked, so an
+    ablation variant (this same rules_json with one sub-key omitted -
+    see analyze_v5_ablation.py) reuses this exact function unchanged."""
+    if "pullbacks_max" in quality_cfg:
+        pb = entry_ctx.get("pullbacks_before_entry")
+        if pb is None or not (0 <= pb <= quality_cfg["pullbacks_max"]):
+            return False, "pullbacks"
+    if quality_cfg.get("es_above_vwap_required"):
+        if entry_ctx.get("es_above_vwap") is not True:
+            return False, "es_direction"
+    if "es_vwap_dist_pct_min" in quality_cfg or "es_vwap_dist_pct_max" in quality_cfg:
+        dist = entry_ctx.get("es_vwap_dist_pct")
+        lo = quality_cfg.get("es_vwap_dist_pct_min", float("-inf"))
+        hi = quality_cfg.get("es_vwap_dist_pct_max", float("inf"))
+        if dist is None or not (lo <= dist <= hi):
+            return False, "es_vwap_distance"
+    if "atr_pct_min" in quality_cfg or "atr_pct_max" in quality_cfg:
+        atr_pct = detail.get("atr_pct")
+        lo = quality_cfg.get("atr_pct_min", float("-inf"))
+        hi = quality_cfg.get("atr_pct_max", float("inf"))
+        if atr_pct is None or not (lo <= atr_pct <= hi):
+            return False, "atr"
+    if "breakout_atr_ratio_min" in quality_cfg or "breakout_atr_ratio_max" in quality_cfg:
+        ratio = entry_ctx.get("breakout_candle_range_atr_ratio")
+        lo = quality_cfg.get("breakout_atr_ratio_min", float("-inf"))
+        hi = quality_cfg.get("breakout_atr_ratio_max", float("inf"))
+        if ratio is None or not (lo <= ratio <= hi):
+            return False, "breakout_atr_ratio"
+    return True, None
+
+
 def simulate_strategy(
     strategy_rules: dict,
     side: str,
@@ -1053,6 +1103,38 @@ def simulate_orb_strategy(
                     if r <= 0:
                         continue
 
+                    # Point-in-time entry context (see src/entry_metrics.py's
+                    # own module docstring for the point-in-time-safety
+                    # contract) - computed here (before position sizing/the
+                    # quality-filter gate just below) rather than after, so
+                    # the SAME computed dict both gates the entry (for a
+                    # strategy that opts in via rules["quality_filters"] -
+                    # currently ORB Long v5 only) AND ends up stored/
+                    # reported for the trade - never two separate
+                    # computations that could silently drift apart.
+                    # today_bars_full/intraday are each sliced to <= bar_ts
+                    # here (they otherwise span the whole day/every date
+                    # respectively) - es_bars_so_far mirrors _es_filter_
+                    # pass's own identical slice just below, computed once
+                    # here since that function doesn't hand its own slice
+                    # back.
+                    es_today = es_day_groups.get(day)
+                    es_bars_so_far = es_today[es_today.index <= bar_ts] if es_today is not None else None
+                    entry_ctx = entry_metrics.compute_entry_metrics(
+                        side, price, bar_ts, initial_stop,
+                        today_bars_full[today_bars_full.index <= bar_ts],
+                        intraday[intraday.index <= bar_ts],
+                        daily_slice, detail, es_bars_so_far,
+                        prior_day_bars=prior_day_bars_by_symbol[symbol],
+                    )
+
+                    quality_cfg = strategy_rules.get("quality_filters")
+                    if quality_cfg:
+                        quality_ok, failed_filter = _quality_filters_pass(entry_ctx, detail, quality_cfg)
+                        if not quality_ok:
+                            filter_stats[f"quality_reject_{failed_filter}"] = filter_stats.get(f"quality_reject_{failed_filter}", 0) + 1
+                            continue
+
                     # position_size_multiplier (currently ORB Long/Short v4
                     # only, at 2.0 - see EXTRA_STRATEGY_PRESETS' own v4
                     # comment in src/db.py) scales UP size_by_risk only -
@@ -1070,25 +1152,6 @@ def simulate_orb_strategy(
                         continue
 
                     trade_id += 1
-                    # Point-in-time entry context (see src/entry_metrics.py's
-                    # own module docstring for the point-in-time-safety
-                    # contract) - pure enrichment for offline analysis
-                    # (analyze_entry_metrics.py), never read by any decision
-                    # above. today_bars_full/intraday are each sliced to
-                    # <= bar_ts here (they otherwise span the whole day/every
-                    # date respectively) - es_bars_so_far mirrors
-                    # _es_filter_pass's own identical slice just below,
-                    # computed once here since that function doesn't hand
-                    # its own slice back.
-                    es_today = es_day_groups.get(day)
-                    es_bars_so_far = es_today[es_today.index <= bar_ts] if es_today is not None else None
-                    entry_ctx = entry_metrics.compute_entry_metrics(
-                        side, price, bar_ts, initial_stop,
-                        today_bars_full[today_bars_full.index <= bar_ts],
-                        intraday[intraday.index <= bar_ts],
-                        daily_slice, detail, es_bars_so_far,
-                        prior_day_bars=prior_day_bars_by_symbol[symbol],
-                    )
                     trades.append({
                         "id": trade_id, "symbol": symbol, "side": action,
                         "fill_price": price, "size": size, "timestamp_iso": bar_ts.isoformat(),

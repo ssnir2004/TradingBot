@@ -1529,6 +1529,132 @@ EXTRA_STRATEGY_PRESETS = [
         "בדיקה מקיפה.",
     ),
     (
+        # v5 of ORB Long v3 - EXACT same entry logic/filters/risk/exit as
+        # v3 (see its own comment above, not repeated here: opening_range/
+        # universe_filters/volatility_filters/entry_confluence/
+        # entry_models/es_vwap_filter/exit/risk are all byte-for-byte
+        # copies) - the ONLY changes are two additional entry-quality
+        # gates layered on top of v3's own already-passing signal, never
+        # touching v3's own rules_json/strategy_id/logic at all:
+        #   1. time_filter.latest_entry_et narrowed from 11:30 to 10:00
+        #      (09:50-10:00 instead of 09:50-11:30) - pure config, reuses
+        #      cycle._within_entry_window unchanged, no new code needed.
+        #   2. A new rules_json key, "quality_filters", read by
+        #      backtest_engine.py's new _quality_filters_pass() (called
+        #      right where simulate_orb_strategy already computes this
+        #      candidate's own src/entry_metrics.py context, BEFORE
+        #      position sizing/trade creation - a candidate that fails
+        #      ANY configured sub-check is skipped entirely, same as any
+        #      other entry-rejection path here) - every other ORB
+        #      strategy has no such key at all, so _quality_filters_pass
+        #      is never even called for them; this can only ever narrow
+        #      v5's own trade set, never touch v1-v4/Fade's.
+        # The 5 quality_filters sub-checks (pullbacks_max, es_above_vwap_
+        # required, es_vwap_dist_pct_min/max, atr_pct_min/max, breakout_
+        # atr_ratio_min/max) all read off entry_metrics fields already
+        # computed for every ORB entry regardless of strategy (pullbacks_
+        # before_entry, es_above_vwap, es_vwap_dist_pct, breakout_candle_
+        # range_atr_ratio) or orb.evaluate_orb_entry's own detail dict
+        # (atr_pct) - nothing new needed there either.
+        # See analyze_v5_ablation.py for the requested V3-vs-V5
+        # comparison, per-filter diagnostics, and filter-ablation study.
+        "ORB Long v5 (Quality Entry Filter)",
+        {
+            "strategy_name": "ORB Long v5 (Quality Entry Filter)",
+            "direction": "long_only",
+            "es_vwap_filter": True,
+            "opening_range": {
+                "or_timeframe": "15m",
+                "confirm_timeframe": "5m",
+                "entry_timeframe": "5m",
+                "session": "new_york",
+                "session_open_et": "09:30",
+            },
+            "universe_filters": {
+                "index": "S&P 500",
+                "min_price_usd": 3.0,
+                "custom_universe": "sp500_marketcap_1b",
+            },
+            "volatility_filters": {
+                "V1_rvol_min": 2.0,
+                "V1_rvol_lookback_days": 14,
+                "V2_atr_period": 14,
+                "V2_atr_pct_tiers": [
+                    {"price_min": 3.0, "price_max": 20.0, "atr_pct_min": 4.0},
+                    {"price_min": 20.0, "price_max": 50.0, "atr_pct_min": 3.0},
+                    {"price_min": 50.0, "price_max": 100.0, "atr_pct_min": 2.0},
+                    {"price_min": 100.0, "price_max": None, "atr_pct_min": 1.5},
+                ],
+            },
+            "entry_confluence": {
+                "rsi_period": 14,
+                "rsi_rising_bars": 3,
+                "ema_period": 20,
+            },
+            "entry_models": {
+                "breakout": {"enabled": True},
+                "retest": {"enabled": True},
+            },
+            # Filter #1 (Entry Time): 09:50-10:00 instead of v3's own
+            # 09:50-11:30 - narrower entry window, otherwise identical.
+            "time_filter": {"earliest_entry_et": "09:50", "latest_entry_et": "10:00", "force_close_et": "15:51"},
+            "exit": {
+                "management_style": "staged_trail",
+                "breakeven_trigger_R": 1.5,
+                "trailing_trigger_R": 2.5,
+                "profit_lock_offset_R": 0.50,
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+                "min_stop_distance_pct": 0.25,
+            },
+            # Filters #2-6 - see backtest_engine._quality_filters_pass.
+            "quality_filters": {
+                "pullbacks_max": 2,
+                "es_above_vwap_required": True,
+                "es_vwap_dist_pct_min": 0.10,
+                "es_vwap_dist_pct_max": 0.40,
+                "atr_pct_min": 2.5,
+                "atr_pct_max": 3.5,
+                "breakout_atr_ratio_min": 0.20,
+                "breakout_atr_ratio_max": 0.45,
+            },
+        },
+        "aggressive",
+        "long",
+        "## מה זה עושה\n"
+        "גרסה חמישית (v5) של ORB Long - תנאי כניסה, ניהול סיכון, וניהול פוזיציה **זהים "
+        "לחלוטין** ל-ORB Long v3 (OR breakout/retest, RSI+EMA/VWAP, RVOL+ATR%, ES VWAP, Profit "
+        "Lock+Trailing, אותם פרמטרי סיכון). ההבדל היחיד: שכבת סינון איכות נוספת שמצמצמת אילו "
+        "מהאיתותים שכבר עברו את v3 בפועל נכנסים לעסקה. **נשמרת כאסטרטגיה נפרדת** (לא דריסה) "
+        "כדי לא לערבב היסטוריות בקטסט - אם תרצה/י להריץ בקטסט השוואתי, בדוק/י את "
+        "analyze_v5_ablation.py.\n\n"
+        "## מטרת הניסוי\n"
+        "לבדוק האם סט של פילטרים לאיכות הכניסה (timing, מבנה תוך-יומי, הקשר שוק, תנודתיות, "
+        "איכות נר הפריצה) יכול לשפר Expectancy, Profit Factor, Drawdown ו-Win Rate על ידי "
+        "הסרת איתותים חלשים יותר - או שהוא בסך הכל overfitting.\n\n"
+        "## פילטרי הכניסה החדשים (כולם חייבים להתקיים)\n"
+        "1. **חלון זמן**: רק 09:50-10:00 ET (במקום 09:50-11:30 ב-v3).\n"
+        "2. **Pullbacks**: 0 עד 2 pullbacks לפני הכניסה.\n"
+        "3. **כיוון ES**: ES חייב להיסחר מעל ה-VWAP שלו.\n"
+        "4. **מרחק ES מ-VWAP**: בין 0.10% ל-0.40% - עוצמת שוק חיובית אבל לא מתוחה מדי.\n"
+        "5. **ATR%**: בין 2.5% ל-3.5% - תנודתיות מספקת, לא נמוכה מדי ולא קיצונית.\n"
+        "6. **יחס נר הפריצה ל-ATR**: בין 0.20 ל-0.45 - לא נר חלש מדי ולא נר שכבר מתוח מדי.\n\n"
+        "## יקום, פילטרי כניסה בסיסיים, ניהול פוזיציה\n"
+        "זהה לחלוטין ל-ORB Long v3.\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive - אסטרטגיה חדשה לגמרי שלא נבדקה כלל, עם פחות עסקאות פוטנציאליות "
+        "בגלל הפילטרים הנוספים. סיכון לעסקה: 1% | גודל פוזיציה מקס': 10% | פוזיציות בו-זמנית: "
+        "עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "אין לזה שום היסטוריית בקטסט עדיין. כל אזהרות ORB Long v3 תקפות כאן, ובנוסף: הפילטרים "
+        "הנוספים מצמצמים משמעותית את מספר העסקאות - ייתכן מדגם קטן מדי להסקת מסקנות אמינות "
+        "בטווח זמן קצר. הרץ בקטסט מקיף (חודשים, מאות עסקאות פוטנציאליות לפני הסינון) והרץ את "
+        "מחקר ה-ablation לפני כל שיקול נוסף.",
+    ),
+    (
         # Experimental "fade" pair for ORB v2, same signal_side mechanism
         # (and same research motivation) as "Long Breakout Fade (Short)"/
         # "Short Breakdown Fade (Long)" above, extended to
