@@ -1013,6 +1013,77 @@ def simulate_orb_strategy(
                             pos["stop_price"] = trail_decision["new_stop_price"]
                     continue
 
+                if management_style == "no_stop_delayed_trail":
+                    # ORB v4.1: NO initial-stop exit check at all - unlike
+                    # every other management_style here, this position is
+                    # NEVER closed for adverse price movement (see the
+                    # spec's own "Do NOT exit the position because of
+                    # adverse price movement"). pos["initial_stop"] is
+                    # still computed at entry (same orb.py stop calc/
+                    # risk.initial_stop_r_multiplier widening v4 itself
+                    # uses - "position sizing rules" stay unchanged per
+                    # the spec) but is used ONLY to normalize MFE into R
+                    # below and as _trailing_stop_decision's own validity
+                    # floor (a trail candidate must still be on the
+                    # profitable side of where the original stop would
+                    # have been) - never as a live exit trigger.
+                    #
+                    # Before trailing activates: no stop-out check at all,
+                    # just watch MFE (already intrabar High/Low via
+                    # _update_excursion above, per the spec's own "use
+                    # actual intrabar high/low movement, not candle
+                    # close"). Once MFE first reaches trailing_trigger_R,
+                    # activate - from that bar on this is IDENTICAL to
+                    # v4's own trailing (same orb.low_of_last_n_bars/
+                    # high_of_last_n_bars(2) candidate source, same
+                    # cycle._trailing_stop_decision gate) with no partial
+                    # take at all (the full position trails together, not
+                    # v4's own half) - same "leave the wide/no stop alone
+                    # for one more bar rather than forcing a bad level"
+                    # reasoning as v4's own comment above when the very
+                    # first candidate isn't valid/improving yet.
+                    if pos["trail_activated"]:
+                        stop_hit = _find_stop_out(this_bar, pos["stop_price"], side)
+                        if stop_hit is not None:
+                            trade_id += 1
+                            trades.append({
+                                "id": trade_id, "symbol": symbol, "side": close_action,
+                                "fill_price": pos["stop_price"], "size": pos["qty"],
+                                "timestamp_iso": bar_ts.isoformat(),
+                                "exit_reason": "trailing_stop", "commission": commission_per_trade,
+                                "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
+                                "trail_activated": True, "trail_activated_at_r": pos["trail_activated_at_r"],
+                            })
+                            del open_positions[symbol]
+                            continue
+                        recent_bars = intraday[intraday.index <= bar_ts].tail(2)
+                        candidate = (
+                            orb.low_of_last_n_bars(recent_bars, 2) if side == "long"
+                            else orb.high_of_last_n_bars(recent_bars, 2)
+                        )
+                        trail_decision = cycle._trailing_stop_decision(pos, candidate)
+                        if trail_decision["action"] == "trail_stop":
+                            pos["stop_price"] = trail_decision["new_stop_price"]
+                    else:
+                        initial_risk = (pos["initial_stop"] - pos["entry_price"]) if side == "short" else (pos["entry_price"] - pos["initial_stop"])
+                        mfe_r = (
+                            ((pos["entry_price"] - pos["mfe_price"]) if side == "short" else (pos["mfe_price"] - pos["entry_price"]))
+                            / initial_risk
+                        ) if initial_risk > 0 else 0.0
+                        trailing_trigger_r_v41 = exit_cfg.get("trailing_trigger_R", 1.20)
+                        if mfe_r >= trailing_trigger_r_v41:
+                            pos["trail_activated"] = True
+                            pos["trail_activated_at_r"] = trailing_trigger_r_v41
+                            recent_bars = intraday[intraday.index <= bar_ts].tail(2)
+                            candidate = (
+                                orb.low_of_last_n_bars(recent_bars, 2) if side == "long"
+                                else orb.high_of_last_n_bars(recent_bars, 2)
+                            )
+                            trail_decision = cycle._trailing_stop_decision(pos, candidate)
+                            if trail_decision["action"] == "trail_stop":
+                                pos["stop_price"] = trail_decision["new_stop_price"]
+                    continue
+
                 # staged_trail: stop-out check first (against whatever
                 # stop_price currently is - initial, breakeven, or
                 # trailing), then breakeven-flip and gated-trailing, same

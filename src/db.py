@@ -1453,6 +1453,128 @@ EXTRA_STRATEGY_PRESETS = [
         "נוסף.",
     ),
     (
+        # v4.1 of ORB Long v4 - EXACT same entry logic AND position-sizing
+        # rules as v4 (see its own comment above, not repeated here:
+        # opening_range/universe_filters/volatility_filters/entry_
+        # confluence/entry_models/time_filter/es_vwap_filter/risk -
+        # including initial_stop_r_multiplier: 1.40 and position_size_
+        # multiplier: 2.0 - are all byte-for-byte copies of v4's own).
+        # ONLY the exit management model changes - a brand new
+        # backtest_engine.py management_style, "no_stop_delayed_trail":
+        #   - NO initial stop-loss exit trigger at all - a v4.1 position
+        #     is never closed for adverse price movement, full stop. Note
+        #     risk.initial_stop_r_multiplier still WIDENS the technical
+        #     stop level that gets computed at entry (same as v4) - that
+        #     computed level is just never checked as a live exit anymore,
+        #     only used (unchanged) to size the position (r_multiple) and,
+        #     once trailing activates, as cycle._trailing_stop_decision's
+        #     own validity floor (a trail candidate must still be on the
+        #     profitable side of it).
+        #   - Trailing activates the first time MFE (real intrabar High/
+        #     Low, via _update_excursion - not just Close) reaches
+        #     exit.trailing_trigger_R (1.20, vs v4's own 1.15 partial-take
+        #     trigger) - from that bar on, this is IDENTICAL to v4's own
+        #     trailing (same orb.low_of_last_n_bars/high_of_last_n_bars(2)
+        #     candidate + cycle._trailing_stop_decision gate, completely
+        #     unmodified), except there is NO partial take at all - the
+        #     FULL position trails together, not v4's own 50/50 split (v4
+        #     activates trailing on ITS remaining half at the SAME event
+        #     as the partial fill; v4.1 has no partial fill to piggyback
+        #     on, so it activates on the whole position directly once MFE
+        #     alone crosses the threshold).
+        #   - If trailing never activates, the position is only ever
+        #     closed by the existing shared end-of-day close (unchanged,
+        #     same as every other management_style here) - matching the
+        #     spec's own "close position at end of day" fallback exactly.
+        # Exit reasons: "trailing_stop" (the only way to Peters out before
+        # EOD) and "eod_close" - no "initial_stop_loss"/"partial_profit_
+        # take" at all (v4.1 never produces them, by construction).
+        # See analyze_v41_no_stop.py for the requested v4-vs-v4.1
+        # comparison, including the "for every v4 trade that was stopped
+        # out, what did v4.1 do with the same signal" validation.
+        "ORB Long v4.1 (No Initial Stop, Delayed Trailing)",
+        {
+            "strategy_name": "ORB Long v4.1 (No Initial Stop, Delayed Trailing)",
+            "direction": "long_only",
+            "es_vwap_filter": True,
+            "opening_range": {
+                "or_timeframe": "15m",
+                "confirm_timeframe": "5m",
+                "entry_timeframe": "5m",
+                "session": "new_york",
+                "session_open_et": "09:30",
+            },
+            "universe_filters": {
+                "index": "S&P 500",
+                "min_price_usd": 3.0,
+                "custom_universe": "sp500_marketcap_1b",
+            },
+            "volatility_filters": {
+                "V1_rvol_min": 2.0,
+                "V1_rvol_lookback_days": 14,
+                "V2_atr_period": 14,
+                "V2_atr_pct_tiers": [
+                    {"price_min": 3.0, "price_max": 20.0, "atr_pct_min": 4.0},
+                    {"price_min": 20.0, "price_max": 50.0, "atr_pct_min": 3.0},
+                    {"price_min": 50.0, "price_max": 100.0, "atr_pct_min": 2.0},
+                    {"price_min": 100.0, "price_max": None, "atr_pct_min": 1.5},
+                ],
+            },
+            "entry_confluence": {
+                "rsi_period": 14,
+                "rsi_rising_bars": 3,
+                "ema_period": 20,
+            },
+            "entry_models": {
+                "breakout": {"enabled": True},
+                "retest": {"enabled": True},
+            },
+            "time_filter": {"earliest_entry_et": "09:50", "latest_entry_et": "11:30", "force_close_et": "15:51"},
+            "exit": {
+                "management_style": "no_stop_delayed_trail",
+                "trailing_trigger_R": 1.20,
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+                "min_stop_distance_pct": 0.25,
+                "initial_stop_r_multiplier": 1.40,
+                "position_size_multiplier": 2.0,
+            },
+        },
+        "aggressive",
+        "long",
+        "## מה זה עושה\n"
+        "גרסה 4.1 של ORB Long - תנאי כניסה **וכללי גודל פוזיציה** זהים לחלוטין ל-v4 (OR "
+        "breakout/retest, RSI+EMA/VWAP, RVOL+ATR%, ES VWAP, סטופ רחב פי 1.40, גודל פוזיציה כפול). "
+        "**נשמרת כאסטרטגיה נפרדת** (לא דריסה). השינוי היחיד: מודל ניהול היציאה. **מטרת הניסוי**: "
+        "לבדוק האם הסרת הסטופ ההתחלתי מאפשרת ליותר עסקאות להתפתח לרווחים גדולים יותר, במקום "
+        "להיעצר מוקדם מדי.\n\n"
+        "## יציאה: בלי סטופ התחלתי, טריילינג מושהה\n"
+        "**אין סטופ הפסד התחלתי בכלל** - הפוזיציה לעולם לא נסגרת עקב תנועת מחיר שלילית. הפוזיציה "
+        "נשארת פתוחה עד שהטריילינג סטופ מופעל, או עד סוף היום. הסטופ הטכני עדיין מחושב בכניסה "
+        "(אותו חישוב בדיוק כמו v4, כולל המכפיל 1.40x) - אך הוא משמש רק לנרמול MFE ל-R ולגודל "
+        "הפוזיציה, לעולם לא כרמת יציאה בפועל.\n\n"
+        "## הפעלת טריילינג\n"
+        "כש-MFE (נגיעה בפועל תוך-יומית, לא רק סגירה) מגיע לראשונה ל-**+1.20R**, מופעל טריילינג "
+        "סטופ על **כל הפוזיציה** (בניגוד ל-v4, אין כאן רווח חלקי בכלל) - **אותו אלגוריתם בדיוק** "
+        "כמו ב-v4 (מתחת לשפל של שני נרות 5 הדקות האחרונים, אותם כללי עדכון). אם הטריילינג "
+        "לעולם לא מופעל, הפוזיציה נסגרת בסוף היום.\n\n"
+        "## יקום, פילטרי כניסה, גודל פוזיציה\n"
+        "זהה לחלוטין ל-ORB Long v4.\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive - אסטרטגיה חדשה לגמרי שלא נבדקה כלל. בלי סטופ הפסד בכלל, החשיפה "
+        "הדולרית התיאורטית לעסקה בודדת אינה מוגבלת מלמעלה על ידי מנגנון היציאה עצמו (רק גודל "
+        "הפוזיציה קובע את החשיפה בפועל) - זו נקודת המחקר עצמה, אך גם הסיכון המרכזי. סיכון לעסקה "
+        "(base): 1% | גודל פוזיציה מקס': 10% | פוזיציות בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "אין לזה שום היסטוריית בקטסט עדיין. זו אסטרטגיית מחקר בלבד למדידת האפקט של הסרת הסטופ - "
+        "**אל תפעיל LIVE**. בלי סטופ הפסד, עסקה בודדת יכולה תיאורטית לצבור הפסד גדול משמעותית "
+        "מ-v4 לפני שהטריילינג (אם בכלל) מפעיל הגנה. הרץ בקטסט מקיף והשווה מול v4 (במיוחד את "
+        "בדיקת ה-Critical Validation ב-analyze_v41_no_stop.py) לפני כל שיקול נוסף.",
+    ),
+    (
         # v4 of ORB Short v3 - exact mirror of ORB Long v4 above, see its
         # own comment for the full explanation, not repeated here.
         "ORB Short v4 (Scaled Exit, Immediate Trail)",
