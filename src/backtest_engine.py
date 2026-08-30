@@ -1028,20 +1028,29 @@ def simulate_orb_strategy(
                     # profitable side of where the original stop would
                     # have been) - never as a live exit trigger.
                     #
-                    # Before trailing activates: no stop-out check at all,
-                    # just watch MFE (already intrabar High/Low via
-                    # _update_excursion above, per the spec's own "use
-                    # actual intrabar high/low movement, not candle
-                    # close"). Once MFE first reaches trailing_trigger_R,
-                    # activate - from that bar on this is IDENTICAL to
-                    # v4's own trailing (same orb.low_of_last_n_bars/
-                    # high_of_last_n_bars(2) candidate source, same
-                    # cycle._trailing_stop_decision gate) with no partial
-                    # take at all (the full position trails together, not
-                    # v4's own half) - same "leave the wide/no stop alone
-                    # for one more bar rather than forcing a bad level"
-                    # reasoning as v4's own comment above when the very
-                    # first candidate isn't valid/improving yet.
+                    # ORB v4.2 (opt-in via exit_cfg["hard_stop_R"], see
+                    # Step 2's own setup below and EXTRA_STRATEGY_PRESETS'
+                    # v4.2 comment in src/db.py) is the SAME state machine
+                    # with exactly one extra guard layered in below - v4.1
+                    # itself never sets this key, so pos never carries
+                    # "hard_stop_price" and this whole branch is a no-op
+                    # for it, byte-for-byte the same behavior as before.
+                    #
+                    # Before trailing activates: no stop-out check at all
+                    # UNLESS a hard_stop_price is set (v4.2 only), just
+                    # watch MFE (already intrabar High/Low via _update_
+                    # excursion above, per the spec's own "use actual
+                    # intrabar high/low movement, not candle close"). Once
+                    # MFE first reaches trailing_trigger_R, activate - from
+                    # that bar on this is IDENTICAL to v4's own trailing
+                    # (same orb.low_of_last_n_bars/high_of_last_n_bars(2)
+                    # candidate source, same cycle._trailing_stop_decision
+                    # gate) with no partial take at all (the full position
+                    # trails together, not v4's own half) - same "leave
+                    # the wide/no stop alone for one more bar rather than
+                    # forcing a bad level" reasoning as v4's own comment
+                    # above when the very first candidate isn't valid/
+                    # improving yet.
                     if pos["trail_activated"]:
                         stop_hit = _find_stop_out(this_bar, pos["stop_price"], side)
                         if stop_hit is not None:
@@ -1065,6 +1074,34 @@ def simulate_orb_strategy(
                         if trail_decision["action"] == "trail_stop":
                             pos["stop_price"] = trail_decision["new_stop_price"]
                     else:
+                        # v4.2's hard stop (exit_cfg["hard_stop_R"], e.g.
+                        # 2.5) - checked first, same "stop-out check
+                        # before anything else" convention every other
+                        # management_style branch here already uses,
+                        # since a bar that BOTH breaches -2.5R AND crosses
+                        # the 1.20R MFE trigger (an extreme-range bar) is
+                        # ambiguous about which happened first intrabar -
+                        # resolved conservatively (the hard stop wins),
+                        # matching this whole feature's own point ("prevent
+                        # catastrophic losses"). "hard_stop_price" is only
+                        # ever present on pos when exit_cfg actually
+                        # carries hard_stop_R (v4.2 only - see Step 2's
+                        # own setup below); absent for v4.1 (and everyone
+                        # else), so this check is a no-op there.
+                        if "hard_stop_price" in pos:
+                            hard_stop_hit = _find_stop_out(this_bar, pos["hard_stop_price"], side)
+                            if hard_stop_hit is not None:
+                                trade_id += 1
+                                trades.append({
+                                    "id": trade_id, "symbol": symbol, "side": close_action,
+                                    "fill_price": pos["hard_stop_price"], "size": pos["qty"],
+                                    "timestamp_iso": bar_ts.isoformat(),
+                                    "exit_reason": "hard_stop", "commission": commission_per_trade,
+                                    "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
+                                    "trail_activated": False, "trail_activated_at_r": None,
+                                })
+                                del open_positions[symbol]
+                                continue
                         initial_risk = (pos["initial_stop"] - pos["entry_price"]) if side == "short" else (pos["entry_price"] - pos["initial_stop"])
                         mfe_r = (
                             ((pos["entry_price"] - pos["mfe_price"]) if side == "short" else (pos["mfe_price"] - pos["entry_price"]))
@@ -1344,6 +1381,24 @@ def simulate_orb_strategy(
                         open_positions[symbol]["partial_target_price"] = partial_target
                         open_positions[symbol]["partial_qty"] = partial_qty if 1 <= partial_qty < size else 0
                         open_positions[symbol]["partial_taken"] = False
+                    if management_style == "no_stop_delayed_trail":
+                        # ORB v4.2 only (exit_cfg["hard_stop_R"], e.g. 2.5)
+                        # - a real fillable stop level, same shape as
+                        # fixed_target_no_trail's own stop_price/v4's own
+                        # partial_target_price above, computed once here
+                        # off the SAME initial risk distance `r` position
+                        # sizing already used (never recomputed off a
+                        # moving reference later). Absent entirely (key
+                        # never set on pos) when exit_cfg has no hard_
+                        # stop_R - v4.1's own rules_json never sets it, so
+                        # this is a pure no-op for v4.1 (see the Step-1
+                        # loop's own "hard_stop_price" in pos check).
+                        hard_stop_r = exit_cfg.get("hard_stop_R")
+                        if hard_stop_r is not None:
+                            hard_stop_price = (
+                                price + hard_stop_r * r if side == "short" else price - hard_stop_r * r
+                            )
+                            open_positions[symbol]["hard_stop_price"] = hard_stop_price
                     entries_today += 1
 
         for symbol, pos in open_positions.items():

@@ -1575,6 +1575,115 @@ EXTRA_STRATEGY_PRESETS = [
         "בדיקת ה-Critical Validation ב-analyze_v41_no_stop.py) לפני כל שיקול נוסף.",
     ),
     (
+        # v4.2 of ORB Long v4.1 - EXACT same entry logic AND position-
+        # sizing rules as v4/v4.1 (see their own comments above, not
+        # repeated here - opening_range/universe_filters/volatility_
+        # filters/entry_confluence/entry_models/time_filter/es_vwap_
+        # filter/risk are all byte-for-byte copies). Reuses v4.1's own
+        # "no_stop_delayed_trail" management_style UNCHANGED - v4.2 is
+        # the SAME state machine (MFE-triggered trailing at +1.20R, same
+        # orb.low_of_last_n_bars/high_of_last_n_bars(2) + cycle._
+        # trailing_stop_decision trailing algorithm, same EOD fallback),
+        # with exactly one new opt-in exit_cfg key added:
+        #   exit.hard_stop_R: 2.5 - a real, fillable stop level (entry
+        #     price minus 2.5x the same initial risk distance position
+        #     sizing already uses) checked BEFORE trailing activates
+        #     (backtest_engine.py's own Step-1 loop, "hard_stop_price" in
+        #     pos check) - exit_reason "hard_stop". v4.1's own rules_json
+        #     never sets this key, so pos never carries "hard_stop_price"
+        #     for it and this whole check is a structural no-op there -
+        #     v4.1 is completely untouched, not just unmodified by intent.
+        # Once trailing activates (MFE >= 1.20R, same as v4.1), the hard
+        # stop is never checked again (backtest_engine.py's own branching
+        # - stop_hit is checked against pos["stop_price"], the TRAILING
+        # level, not hard_stop_price, once pos["trail_activated"] is
+        # True) - trailing fully takes over, per the spec's own "Ignore
+        # the original 2.5R stop" / "Trailing Priority".
+        # See analyze_v42_hard_stop.py for the requested v4-vs-v4.1-vs-
+        # v4.2 comparison, exit-reason breakdown, and the Critical
+        # Comparison against every v4.1 loss worse than -2.5R.
+        "ORB Long v4.2 (Hard Stop 2.5R + Early Trailing)",
+        {
+            "strategy_name": "ORB Long v4.2 (Hard Stop 2.5R + Early Trailing)",
+            "direction": "long_only",
+            "es_vwap_filter": True,
+            "opening_range": {
+                "or_timeframe": "15m",
+                "confirm_timeframe": "5m",
+                "entry_timeframe": "5m",
+                "session": "new_york",
+                "session_open_et": "09:30",
+            },
+            "universe_filters": {
+                "index": "S&P 500",
+                "min_price_usd": 3.0,
+                "custom_universe": "sp500_marketcap_1b",
+            },
+            "volatility_filters": {
+                "V1_rvol_min": 2.0,
+                "V1_rvol_lookback_days": 14,
+                "V2_atr_period": 14,
+                "V2_atr_pct_tiers": [
+                    {"price_min": 3.0, "price_max": 20.0, "atr_pct_min": 4.0},
+                    {"price_min": 20.0, "price_max": 50.0, "atr_pct_min": 3.0},
+                    {"price_min": 50.0, "price_max": 100.0, "atr_pct_min": 2.0},
+                    {"price_min": 100.0, "price_max": None, "atr_pct_min": 1.5},
+                ],
+            },
+            "entry_confluence": {
+                "rsi_period": 14,
+                "rsi_rising_bars": 3,
+                "ema_period": 20,
+            },
+            "entry_models": {
+                "breakout": {"enabled": True},
+                "retest": {"enabled": True},
+            },
+            "time_filter": {"earliest_entry_et": "09:50", "latest_entry_et": "11:30", "force_close_et": "15:51"},
+            "exit": {
+                "management_style": "no_stop_delayed_trail",
+                "trailing_trigger_R": 1.20,
+                "hard_stop_R": 2.5,
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+                "min_stop_distance_pct": 0.25,
+                "initial_stop_r_multiplier": 1.40,
+                "position_size_multiplier": 2.0,
+            },
+        },
+        "aggressive",
+        "long",
+        "## מה זה עושה\n"
+        "גרסה 4.2 של ORB Long - תנאי כניסה **וכללי גודל פוזיציה** זהים לחלוטין ל-v4/v4.1. "
+        "**נשמרת כאסטרטגיה נפרדת** (לא דריסה, גם לא של v4.1). זהה ל-v4.1 (טריילינג מושהה "
+        "שמופעל ב-+1.20R, אותו אלגוריתם טריילינג בדיוק) **פרט לתוספת אחת**: סטופ הפסד קשיח "
+        "ב--2.5R שפעיל רק עד שהטריילינג מופעל. **מטרת הניסוי**: לשמר את ההתנהגות הטובה שנצפתה "
+        "ב-v4.1 אחרי +1.2R, תוך מניעת הפסדים קטסטרופליים בעסקאות שלעולם לא מגיעות לסף ההפעלה.\n\n"
+        "## ניהול סיכון: סטופ קשיח -2.5R\n"
+        "מיד עם הכניסה נקבע סטופ הפסד קבוע ב--2.5R (ביחס לאותו מרחק סיכון שגם קובע את גודל "
+        "הפוזיציה - אותו חישוב כמו v4/v4.1, כולל המכפיל 1.40x). אם המחיר נוגע בפועל ב--2.5R "
+        "**לפני** שהטריילינג הופעל - כל הפוזיציה נסגרת מיד. סיבת יציאה: Hard Stop 2.5R.\n\n"
+        "## הפעלת טריילינג ועדיפות\n"
+        "כש-MFE (נגיעה בפועל תוך-יומית) מגיע לראשונה ל-+1.20R, הטריילינג מופעל על כל הפוזיציה - "
+        "**אותו אלגוריתם בדיוק** כמו v4/v4.1 (שפל שני נרות 5 דקות אחרונים). **מרגע ההפעלה, הסטופ "
+        "הקשיח של -2.5R מתעלם לחלוטין** - הטריילינג הוא מנגנון היציאה היחיד מכאן ואילך. אם אף "
+        "אחד מהשניים לא הופעל - סגירה בסוף היום.\n\n"
+        "## יקום, פילטרי כניסה, גודל פוזיציה\n"
+        "זהה לחלוטין ל-ORB Long v4/v4.1.\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive - אסטרטגיה חדשה לגמרי שלא נבדקה כלל, אך עם הגנה מפורשת מפני הפסד "
+        "קטסטרופלי (בניגוד ל-v4.1) - ההפסד המקסימלי התיאורטי לעסקה בודדת מוגבל ל--2.5R (בכפוף "
+        "לפערי מחיר/gaps שיכולים לחצות את הרמה). סיכון לעסקה (base): 1% | גודל פוזיציה מקס': "
+        "10% | פוזיציות בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "אין לזה שום היסטוריית בקטסט עדיין. כל אזהרות ORB Long v4/v4.1 תקפות כאן. הרץ בקטסט "
+        "מקיף והשווה מול v4 ו-v4.1 (במיוחד את ה-Critical Comparison ב-analyze_v42_hard_stop.py) "
+        "לפני כל שיקול נוסף.",
+    ),
+    (
         # v4 of ORB Short v3 - exact mirror of ORB Long v4 above, see its
         # own comment for the full explanation, not repeated here.
         "ORB Short v4 (Scaled Exit, Immediate Trail)",
