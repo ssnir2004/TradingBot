@@ -199,6 +199,36 @@ CREATE TABLE IF NOT EXISTS backtests (
     finished_at TEXT
 );
 
+-- One row per ORB Long v4.3 Parameter Lab optimization sweep (see
+-- run_optimization.py, web/app.py's /api/optimizations routes, and
+-- web/templates/optimization.html) - a completely separate screen/table
+-- from backtests above (see that feature's own "Critical Architecture
+-- Rule": never touch the existing Backtest screen's own architecture).
+-- Deliberately local-only (no execution_mode/claimed_at/remote-worker
+-- support like backtests has) - a sweep is always exactly ONE subprocess
+-- regardless of how many parameter combinations it covers (see run_
+-- optimization.py's own docstring for why: looping combinations
+-- sequentially inside one process, rather than spawning one process per
+-- combination, is what keeps a wide sweep from repeating the exact
+-- concurrent-subprocess memory pressure the New Backtest page's own
+-- chunking was just added to avoid). results_json holds a "combos" list
+-- (one entry per hard_stop_r/trailing_activation_r pair actually run,
+-- each carrying its own analyze_v5_ablation._stats()-shaped stats dict)
+-- plus a "best" entry (whichever combo won under the run's own chosen
+-- objective) and the objective key itself, all filled in once by
+-- run_optimization.py right before finish_optimization.
+CREATE TABLE IF NOT EXISTS optimizations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    params_json TEXT NOT NULL,
+    results_json TEXT,
+    error TEXT,
+    pid INTEGER,
+    created_at TEXT NOT NULL,
+    finished_at TEXT
+);
+
 -- One row per "Update backtest data" run from the dashboard's Backtest page
 -- (see run_backtest_data_fetch.py, spawned as an isolated subprocess for the
 -- exact same reason as backtests above - fetch_backtest_data.py needs its
@@ -1682,6 +1712,107 @@ EXTRA_STRATEGY_PRESETS = [
         "אין לזה שום היסטוריית בקטסט עדיין. כל אזהרות ORB Long v4/v4.1 תקפות כאן. הרץ בקטסט "
         "מקיף והשווה מול v4 ו-v4.1 (במיוחד את ה-Critical Comparison ב-analyze_v42_hard_stop.py) "
         "לפני כל שיקול נוסף.",
+    ),
+    (
+        # v4.3 of ORB Long v4.2 - a research-only BASE strategy for the
+        # Optimization Lab (see web/templates/optimization.html, web/
+        # app.py's /api/optimizations routes, run_optimization.py). EXACT
+        # same entry logic AND position-sizing rules as v4/v4.1/v4.2 (see
+        # their own comments above, not repeated here - opening_range/
+        # universe_filters/volatility_filters/entry_confluence/entry_
+        # models/time_filter/es_vwap_filter/risk are all byte-for-byte
+        # copies). Reuses v4.2's own "no_stop_delayed_trail" management_
+        # style UNCHANGED, with the SAME two exit_cfg keys v4.2 already
+        # introduced (hard_stop_R, trailing_trigger_R) - nothing new in
+        # backtest_engine.py at all for this strategy.
+        # What makes this a "Parameter Lab" rather than just a plain
+        # renamed copy of v4.2: this row's own rules_json is only ever
+        # used by run_optimization.py as the BASE it deep-copies and
+        # overrides hard_stop_R/trailing_trigger_R on, per sweep
+        # combination (see run_optimization.py's own docstring) - the
+        # values baked in here (2.5/1.20, v4.2's own defaults) are never
+        # actually what a sweep runs with except by coincidence when a
+        # combo happens to match them. Running this strategy directly
+        # from the ordinary Backtest page (nothing stops that) is
+        # identical to running v4.2 itself, since the rules_json is
+        # otherwise byte-for-byte the same.
+        # Kept as its own strategy row (never overwrites v4.2, v4.1, v4,
+        # v5, v5.1, or anything else) purely so every optimization sweep
+        # this Lab runs is attributable to ITS OWN stable strategy
+        # identity in the DB/logs, independent of v4.2's own row.
+        "ORB Long v4.3 Parameter Lab",
+        {
+            "strategy_name": "ORB Long v4.3 Parameter Lab",
+            "direction": "long_only",
+            "es_vwap_filter": True,
+            "opening_range": {
+                "or_timeframe": "15m",
+                "confirm_timeframe": "5m",
+                "entry_timeframe": "5m",
+                "session": "new_york",
+                "session_open_et": "09:30",
+            },
+            "universe_filters": {
+                "index": "S&P 500",
+                "min_price_usd": 3.0,
+                "custom_universe": "sp500_marketcap_1b",
+            },
+            "volatility_filters": {
+                "V1_rvol_min": 2.0,
+                "V1_rvol_lookback_days": 14,
+                "V2_atr_period": 14,
+                "V2_atr_pct_tiers": [
+                    {"price_min": 3.0, "price_max": 20.0, "atr_pct_min": 4.0},
+                    {"price_min": 20.0, "price_max": 50.0, "atr_pct_min": 3.0},
+                    {"price_min": 50.0, "price_max": 100.0, "atr_pct_min": 2.0},
+                    {"price_min": 100.0, "price_max": None, "atr_pct_min": 1.5},
+                ],
+            },
+            "entry_confluence": {
+                "rsi_period": 14,
+                "rsi_rising_bars": 3,
+                "ema_period": 20,
+            },
+            "entry_models": {
+                "breakout": {"enabled": True},
+                "retest": {"enabled": True},
+            },
+            "time_filter": {"earliest_entry_et": "09:50", "latest_entry_et": "11:30", "force_close_et": "15:51"},
+            "exit": {
+                "management_style": "no_stop_delayed_trail",
+                "trailing_trigger_R": 1.20,
+                "hard_stop_R": 2.5,
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+                "min_stop_distance_pct": 0.25,
+                "initial_stop_r_multiplier": 1.40,
+                "position_size_multiplier": 2.0,
+            },
+        },
+        "aggressive",
+        "long",
+        "## מה זה עושה\n"
+        "בסיס מחקר בלבד עבור **ORB V4.3 Optimization Lab** (מסך נפרד לגמרי מ-Backtest הרגיל - "
+        "ראה את הניווט). תנאי כניסה **וכללי גודל פוזיציה** זהים לחלוטין ל-v4/v4.1/v4.2. "
+        "**נשמרת כאסטרטגיה נפרדת** (לא דריסה של v4.2 או כל אסטרטגיה אחרת).\n\n"
+        "## איך זה שונה מ-v4.2\n"
+        "מבחינת ה-rules_json זהה ל-v4.2 (Hard Stop 2.5R + טריילינג מושהה ב-+1.20R). ההבדל היחיד: "
+        "בסריקת אופטימיזציה דרך ה-Lab, הערכים של Hard Stop R וסף הפעלת הטריילינג **לא קבועים** - "
+        "הם מוזרקים כפרמטרים בזמן ריצה, קומבינציה אחר קומבינציה, על עותק זמני של הכללים האלה "
+        "(המקור כאן לעולם לא משתנה). הרצה ישירה של האסטרטגיה הזו מדף ה-Backtest הרגיל (בלי דרך "
+        "ה-Lab) מתנהגת בדיוק כמו v4.2, כי ברירות המחדל שלה זהות.\n\n"
+        "## יקום, פילטרי כניסה, גודל פוזיציה, אלגוריתם טריילינג\n"
+        "זהה לחלוטין ל-ORB Long v4/v4.1/v4.2 - שום דבר מהם לא השתנה.\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive - כלי מחקר, לא מיועד להפעלה חיה בכלל. סיכון לעסקה (base): 1% | גודל "
+        "פוזיציה מקס': 10% | פוזיציות בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "אין לזה שום היסטוריית בקטסט עדיין. כל אזהרות ORB Long v4/v4.1/v4.2 תקפות כאן. זו "
+        "אסטרטגיית מחקר/אופטימיזציה בלבד - **אל תפעיל LIVE**. שימוש בפועל דרך ORB V4.3 "
+        "Optimization Lab, לא הרצה ישירה מדף ה-Backtest.",
     ),
     (
         # v4 of ORB Short v3 - exact mirror of ORB Long v4 above, see its
@@ -3452,6 +3583,17 @@ def get_strategy(strategy_id: int) -> dict | None:
         return dict(row) if row else None
 
 
+def get_strategy_by_name(name: str) -> dict | None:
+    """Looks a strategy up by its exact own name rather than id - used by
+    the Optimization Lab (web/app.py's /api/optimizations) to resolve
+    "ORB Long v4.3 Parameter Lab" server-side, so the base strategy a
+    sweep runs against is never something a client request could
+    redirect to a different id."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM strategies WHERE name = ?", (name,)).fetchone()
+        return dict(row) if row else None
+
+
 def create_strategy(name: str, rules: dict, direction: str, risk_rating: str = "moderate", description: str = "", key: str = "") -> int:
     _check_direction(direction)
     _check_risk_rating(risk_rating)
@@ -3896,6 +4038,133 @@ def list_backtest_calendar_entries(account_id: int) -> list[dict]:
             "strategy_ids": params.get("strategy_ids") or [],
         })
     return out
+
+
+# ------------------------------------------------------------- optimizations ---
+# Mirrors the backtests table's own create/set_pid/start/finish/fail/
+# fail_orphaned lifecycle (see above) exactly, for the same reason: an
+# isolated subprocess (run_optimization.py) that the always-on dashboard
+# process spawns and tracks rather than running a whole parameter sweep
+# in-process. No execution_mode/claim/archive support - a sweep is
+# local-only and there's no history-clutter concern yet to justify
+# archiving (see the optimizations table's own comment for why).
+def create_optimization(account_id: int, params: dict) -> int:
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO optimizations (account_id, status, params_json, created_at) VALUES (?, 'pending', ?, ?)",
+            (account_id, json.dumps(params), now),
+        )
+        return cur.lastrowid
+
+
+def start_optimization(optimization_id: int):
+    with get_conn() as conn:
+        conn.execute("UPDATE optimizations SET status = 'running' WHERE id = ?", (optimization_id,))
+
+
+def set_optimization_pid(optimization_id: int, pid: int):
+    with get_conn() as conn:
+        conn.execute("UPDATE optimizations SET pid = ? WHERE id = ?", (pid, optimization_id))
+
+
+def finish_optimization(optimization_id: int, results: dict):
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE optimizations SET status = 'done', results_json = ?, finished_at = ? WHERE id = ?",
+            (json.dumps(results), now, optimization_id),
+        )
+
+
+def fail_optimization(optimization_id: int, error: str):
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE optimizations SET status = 'failed', error = ?, finished_at = ? WHERE id = ?",
+            (error, now, optimization_id),
+        )
+
+
+def fail_orphaned_optimizations():
+    """Same reconciliation as fail_orphaned_backtests, same reason - a
+    dashboard restart mid-sweep kills run_optimization.py along with the
+    rest of dashboard.service's cgroup, leaving the row stuck at
+    'running' with nothing left tracking it."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id, pid FROM optimizations WHERE status = 'running'").fetchall()
+    for row in rows:
+        alive = False
+        if row["pid"]:
+            try:
+                os.kill(row["pid"], 0)
+                alive = True
+            except ProcessLookupError:
+                alive = False
+            except PermissionError:
+                alive = True
+        if not alive:
+            fail_optimization(
+                row["id"],
+                "Orphaned - the dashboard restarted while this optimization was still running, which killed it. Re-run it.",
+            )
+
+
+def get_optimization(optimization_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM optimizations WHERE id = ?", (optimization_id,)).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["params"] = json.loads(result.pop("params_json"))
+        raw_results = result.pop("results_json")
+        result["results"] = json.loads(raw_results) if raw_results else None
+        return result
+
+
+def list_optimizations(account_id: int, limit: int = 50) -> list[dict]:
+    """Summary rows for the Optimization Lab's own history list - full
+    per-combo results (potentially many rows) come from get_optimization,
+    same split as list_backtests/get_backtest."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, account_id, status, params_json, results_json, error, created_at, finished_at FROM optimizations "
+            "WHERE account_id = ? ORDER BY created_at DESC LIMIT ?",
+            (account_id, limit),
+        ).fetchall()
+    out = []
+    for row in rows:
+        params = json.loads(row["params_json"])
+        raw_results = row["results_json"]
+        results = json.loads(raw_results) if raw_results else None
+        out.append({
+            "id": row["id"], "account_id": row["account_id"], "status": row["status"],
+            "error": row["error"], "created_at": row["created_at"], "finished_at": row["finished_at"],
+            "start_date": params.get("start_date"), "end_date": params.get("end_date"),
+            "hard_stop_values": params.get("hard_stop_values"),
+            "trailing_activation_values": params.get("trailing_activation_values"),
+            "objective": params.get("objective"),
+            "combo_count": len(results["combos"]) if results else None,
+            "best": results.get("best") if results else None,
+        })
+    return out
+
+
+def cancel_optimization(optimization_id: int, account_id: int) -> bool:
+    """Same kill-by-pid-then-mark-failed pattern as cancel_backtest."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT pid, status FROM optimizations WHERE id = ? AND account_id = ?", (optimization_id, account_id)
+        ).fetchone()
+    if row is None or row["status"] not in ("pending", "running"):
+        return False
+    if row["pid"]:
+        try:
+            os.kill(row["pid"], signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    fail_optimization(optimization_id, "Cancelled by user")
+    return True
 
 
 # ----------------------------------------------------- backtest data fetch ---

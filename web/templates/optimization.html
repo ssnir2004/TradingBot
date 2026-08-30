@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TradingBot — ORB V4.3 Optimization Lab</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+{% include "_theme.html" %}
+<link href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+<style>
+  body { background:#f4f6f8; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+  th.sortable:hover { background: var(--bs-secondary-bg); }
+  th.sortable .sort-arrow { opacity: 0.35; font-size: .7em; margin-left: 2px; }
+  th.sortable.sort-active .sort-arrow { opacity: 1; }
+  tr.best-combo { outline: 2px solid #1baf7a; outline-offset: -2px; }
+  tr.best-combo td:first-child { position: relative; }
+  tr.best-combo td:first-child::before { content: "★ "; color: #1baf7a; }
+</style>
+</head>
+<body>
+{% include "_nav.html" %}
+
+<div class="container-fluid px-4">
+  <h4 class="mb-3">ORB V4.3 Optimization Lab</h4>
+  <div class="small text-muted mb-4">
+    Research-only parameter sweep for ORB Long v4.3 (identical entry logic, position sizing, and trailing
+    algorithm as v4.2 - see the Guide). Sweeps Hard Stop R and Trailing Activation R across the values you
+    pick below, running every combination as its own independent, fully chronological backtest (entry to
+    exit), then ranks them by whichever objective you choose. Completely separate from the Backtest page -
+    nothing here changes how ordinary backtests work.
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header">New Optimization</div>
+    <div class="card-body">
+      <div class="row g-2 mb-3">
+        <div class="col-12 col-md-3">
+          <label class="form-label small">Hard Stop R values <span class="text-muted fw-normal">(comma-separated, e.g. "2.0, 2.5, 3.0")</span></label>
+          <input type="text" id="opt-hard-stop-values" class="form-control form-control-sm" placeholder="2.0, 2.5, 3.0" value="2.5">
+        </div>
+        <div class="col-12 col-md-3">
+          <label class="form-label small">Trailing Activation R values <span class="text-muted fw-normal">(comma-separated)</span></label>
+          <input type="text" id="opt-trailing-values" class="form-control form-control-sm" placeholder="1.0, 1.2, 1.5" value="1.2">
+        </div>
+        <div class="col-12 col-md-3">
+          <label class="form-label small">Date range</label>
+          <input type="text" id="opt-date-range" class="form-control form-control-sm" placeholder="Pick a date range…" readonly>
+        </div>
+        <div class="col-12 col-md-3">
+          <label class="form-label small">Optimization objective</label>
+          <select id="opt-objective" class="form-select form-select-sm">
+            <option value="net_pnl" selected>Net P&amp;L</option>
+            <option value="profit_factor">Profit Factor</option>
+            <option value="expectancy">Expectancy ($/trade)</option>
+            <option value="avg_r">Average R</option>
+            <option value="win_rate">Win Rate</option>
+          </select>
+        </div>
+      </div>
+      <div class="row g-2 mb-3">
+        <div class="col-6 col-md-3">
+          <label class="form-label small">Portfolio value ($)</label>
+          <input type="number" id="opt-portfolio-value" class="form-control form-control-sm" value="100000">
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label small">Max risk/trade (%)</label>
+          <input type="number" step="0.1" id="opt-max-risk-pct" class="form-control form-control-sm" value="1.0">
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label small">Max trades/day</label>
+          <input type="number" id="opt-max-trades-per-day" class="form-control form-control-sm" value="5">
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label small">Commission/trade ($)</label>
+          <input type="number" step="0.01" id="opt-commission-per-trade" class="form-control form-control-sm" value="1.5">
+        </div>
+      </div>
+      <div class="small text-muted mb-2" id="opt-universe-info">Checking available historical data…</div>
+      <div class="small text-muted mb-2" id="opt-combo-preview"></div>
+      <button id="btn-run-optimization" class="btn btn-primary btn-sm">Run Optimization</button>
+      <div id="opt-run-error" class="text-danger small mt-2"></div>
+      <div id="opt-run-status" class="text-muted small mt-2"></div>
+    </div>
+  </div>
+
+  <div class="card mb-4 d-none" id="opt-results-card">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span>Results</span>
+      <span>
+        <button id="btn-cancel-current-opt" class="btn btn-sm btn-outline-warning me-2 d-none">Cancel</button>
+        <span id="opt-status-badge" class="badge bg-secondary">...</span>
+        <button class="btn btn-sm btn-outline-secondary ms-2" onclick="hideOptResults()" title="Close">×</button>
+      </span>
+    </div>
+    <div class="small text-muted px-3 pt-2" id="opt-results-meta"></div>
+    <div class="card-body" id="opt-results-body"></div>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header">History</div>
+    <div class="card-body">
+      <div id="opt-history-body">Loading…</div>
+    </div>
+  </div>
+</div>
+
+<script>
+async function api(path, options) {
+  const res = await fetch(path, Object.assign({ credentials: "same-origin" }, options || {}));
+  if (res.status === 401) { window.location.href = "/login"; throw new Error("unauthenticated"); }
+  if (!res.ok) {
+    const text = await res.text();
+    try { throw new Error(JSON.parse(text).detail || text); } catch (e) { throw new Error(e.message || text); }
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+function toISODate(d) {
+  const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, "0"), day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+function fmtDateOnly(iso) { return iso ? iso.split("T")[0] : "-"; }
+function fmtMoney(v) { return (v === null || v === undefined || v === "") ? "-" : `$${Number(v).toFixed(2)}`; }
+function parseRValuesPreview(raw) {
+  return (raw || "").split(",").map(s => s.trim()).filter(s => s.length && !isNaN(Number(s)));
+}
+
+const OBJECTIVE_LABELS = {
+  net_pnl: "Net P&L", profit_factor: "Profit Factor", expectancy: "Expectancy",
+  avg_r: "Average R", win_rate: "Win Rate",
+};
+
+let dateRangePicker = null;
+let optPollHandle = null;
+let currentOptimizationId = null;
+
+document.addEventListener("DOMContentLoaded", () => {
+  dateRangePicker = flatpickr("#opt-date-range", { mode: "range", dateFormat: "d/m/Y", allowInput: false });
+
+  api("/api/backtest_universe").then(({ count }) => {
+    document.getElementById("opt-universe-info").textContent =
+      count ? `${count} symbol(s) with cached historical bars available.` : "No symbols have cached historical bars yet - run fetch_backtest_data.py on the server first.";
+  }).catch(e => { document.getElementById("opt-universe-info").textContent = "Could not check available data: " + e.message; });
+
+  function updateComboPreview() {
+    const hs = parseRValuesPreview(document.getElementById("opt-hard-stop-values").value);
+    const ta = parseRValuesPreview(document.getElementById("opt-trailing-values").value);
+    const el = document.getElementById("opt-combo-preview");
+    if (!hs.length || !ta.length) { el.textContent = ""; return; }
+    const n = hs.length * ta.length;
+    el.textContent = `${hs.length} Hard Stop value(s) × ${ta.length} Trailing Activation value(s) = ${n} combination(s) will run, sequentially, in one background job.`;
+  }
+  document.getElementById("opt-hard-stop-values").addEventListener("input", updateComboPreview);
+  document.getElementById("opt-trailing-values").addEventListener("input", updateComboPreview);
+  updateComboPreview();
+
+  document.getElementById("btn-run-optimization").addEventListener("click", runOptimization);
+  document.getElementById("btn-cancel-current-opt").addEventListener("click", () => {
+    if (currentOptimizationId) cancelOptimization(currentOptimizationId);
+  });
+
+  refreshOptHistory();
+});
+
+async function runOptimization() {
+  const errorEl = document.getElementById("opt-run-error");
+  const statusEl = document.getElementById("opt-run-status");
+  errorEl.textContent = "";
+  statusEl.textContent = "";
+
+  const selected = dateRangePicker ? dateRangePicker.selectedDates : [];
+  if (selected.length < 2) { errorEl.textContent = "Pick a start and end date on the calendar."; return; }
+
+  const payload = {
+    hard_stop_values: document.getElementById("opt-hard-stop-values").value,
+    trailing_activation_values: document.getElementById("opt-trailing-values").value,
+    start_date: toISODate(selected[0]),
+    end_date: toISODate(selected[1]),
+    objective: document.getElementById("opt-objective").value,
+    portfolio_value: Number(document.getElementById("opt-portfolio-value").value),
+    max_risk_pct: Number(document.getElementById("opt-max-risk-pct").value),
+    max_trades_per_day: Number(document.getElementById("opt-max-trades-per-day").value),
+    commission_per_trade: Number(document.getElementById("opt-commission-per-trade").value),
+  };
+
+  try {
+    const { id, combo_count } = await api("/api/optimizations", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    statusEl.textContent = `Started optimization #${id} (${combo_count} combination(s)).`;
+    pollOptimization(id);
+    refreshOptHistory();
+  } catch (e) {
+    errorEl.textContent = "Could not start optimization: " + e.message;
+  }
+}
+
+async function cancelOptimization(id) {
+  try {
+    await api(`/api/optimizations/${id}/cancel`, { method: "POST" });
+  } catch (e) {
+    alert("Could not cancel: " + e.message);
+  }
+  refreshOptHistory();
+}
+
+async function pollOptimization(id) {
+  currentOptimizationId = id;
+  if (optPollHandle) clearInterval(optPollHandle);
+  const card = document.getElementById("opt-results-card");
+  card.classList.remove("d-none");
+  const tick = async () => {
+    let record;
+    try {
+      record = await api(`/api/optimizations/${id}`);
+    } catch (e) {
+      return;
+    }
+    renderOptResults(record);
+    if (record.status !== "pending" && record.status !== "running") {
+      clearInterval(optPollHandle);
+      optPollHandle = null;
+      refreshOptHistory();
+    }
+  };
+  await tick();
+  optPollHandle = setInterval(tick, 3000);
+}
+
+function hideOptResults() {
+  document.getElementById("opt-results-card").classList.add("d-none");
+  if (optPollHandle) { clearInterval(optPollHandle); optPollHandle = null; }
+}
+
+let optSortKey = "net_pnl_usd";
+let optSortDir = -1;  // -1 = descending (best first by default)
+let optFilterQuery = "";
+let lastRenderedCombos = [];
+
+const COMBO_COLUMNS = [
+  { key: "hard_stop_r", label: "Hard Stop R", fmt: v => v },
+  { key: "trailing_activation_r", label: "Trailing Activation R", fmt: v => v },
+  { key: "total_trades", label: "Trades", fmt: v => v, statKey: true },
+  { key: "win_rate_pct", label: "Win Rate", fmt: v => v === null ? "-" : `${v}%`, statKey: true },
+  { key: "profit_factor", label: "Profit Factor", fmt: v => v, statKey: true },
+  { key: "net_pnl_usd", label: "Net P&L", fmt: v => fmtMoney(v), statKey: true },
+  { key: "avg_r", label: "Avg R", fmt: v => v === null ? "-" : v, statKey: true },
+  { key: "median_r", label: "Median R", fmt: v => v === null ? "-" : v, statKey: true },
+  { key: "expectancy_usd", label: "Expectancy", fmt: v => fmtMoney(v), statKey: true },
+  { key: "max_drawdown_usd", label: "Max Drawdown", fmt: v => fmtMoney(v), statKey: true },
+];
+
+function comboSortValue(combo, key) {
+  const raw = (key === "hard_stop_r" || key === "trailing_activation_r") ? combo[key] : combo.stats[key];
+  if (raw === "inf") return Infinity;
+  if (raw === "n/a" || raw === null || raw === undefined) return -Infinity;
+  return Number(raw);
+}
+
+function renderOptResults(record) {
+  const badge = document.getElementById("opt-status-badge");
+  badge.textContent = record.status;
+  badge.className = "badge " + (record.status === "done" ? "bg-success" : record.status === "failed" ? "bg-danger" : "bg-secondary");
+  document.getElementById("btn-cancel-current-opt").classList.toggle("d-none", !(record.status === "pending" || record.status === "running"));
+
+  const p = record.params;
+  document.getElementById("opt-results-meta").textContent =
+    `Hard Stop: ${(p.hard_stop_values || []).join(", ")} | Trailing Activation: ${(p.trailing_activation_values || []).join(", ")} | ` +
+    `${fmtDateOnly(p.start_date)} → ${fmtDateOnly(p.end_date)} | Objective: ${OBJECTIVE_LABELS[p.objective] || p.objective}`;
+
+  const body = document.getElementById("opt-results-body");
+  if (record.status === "failed") {
+    body.innerHTML = `<div class="text-danger small">${record.error || "Failed"}</div>`;
+    return;
+  }
+  if (!record.results || !record.results.combos || !record.results.combos.length) {
+    body.innerHTML = `<div class="text-muted small">Running… combinations complete so far will appear here as they finish.</div>`;
+    return;
+  }
+  lastRenderedCombos = record.results.combos;
+  const bestKey = record.results.best ? `${record.results.best.hard_stop_r}|${record.results.best.trailing_activation_r}` : null;
+  body.innerHTML = `
+    <input type="text" id="opt-combo-filter" class="form-control form-control-sm mb-2" style="max-width:300px" placeholder="Filter results…" value="${optFilterQuery}">
+    <div class="table-responsive">
+      <table class="table table-sm table-hover mono" id="opt-combo-table">
+        <thead><tr>${COMBO_COLUMNS.map(c => `<th class="sortable${optSortKey === c.key ? ' sort-active' : ''}" data-key="${c.key}">${c.label} <span class="sort-arrow">${optSortKey === c.key ? (optSortDir === 1 ? '▲' : '▼') : '▲'}</span></th>`).join("")}</tr></thead>
+        <tbody id="opt-combo-tbody"></tbody>
+      </table>
+    </div>
+    <div class="small text-muted mt-1">★ = best combination by ${OBJECTIVE_LABELS[p.objective] || p.objective}. Click a column header to sort.</div>
+  `;
+  document.getElementById("opt-combo-filter").addEventListener("input", (e) => {
+    optFilterQuery = e.target.value;
+    renderComboTable(bestKey);
+  });
+  document.querySelectorAll("#opt-combo-table th.sortable").forEach(th => {
+    th.addEventListener("click", () => {
+      const key = th.dataset.key;
+      if (optSortKey === key) { optSortDir *= -1; } else { optSortKey = key; optSortDir = -1; }
+      renderOptResults(record);
+    });
+  });
+  renderComboTable(bestKey);
+}
+
+function renderComboTable(bestKey) {
+  const tbody = document.getElementById("opt-combo-tbody");
+  if (!tbody) return;
+  const q = optFilterQuery.trim().toLowerCase();
+  let rows = lastRenderedCombos.filter(c => {
+    if (!q) return true;
+    const blob = `${c.hard_stop_r} ${c.trailing_activation_r} ${JSON.stringify(c.stats)}`.toLowerCase();
+    return blob.includes(q);
+  });
+  rows = rows.slice().sort((a, b) => (comboSortValue(a, optSortKey) - comboSortValue(b, optSortKey)) * optSortDir);
+  if (!rows.length) { tbody.innerHTML = `<tr><td colspan="${COMBO_COLUMNS.length}" class="text-center text-muted">No matching combinations</td></tr>`; return; }
+  tbody.innerHTML = rows.map(c => {
+    const key = `${c.hard_stop_r}|${c.trailing_activation_r}`;
+    const cells = COMBO_COLUMNS.map(col => {
+      const raw = (col.key === "hard_stop_r" || col.key === "trailing_activation_r") ? c[col.key] : c.stats[col.key];
+      return `<td>${col.fmt(raw)}</td>`;
+    }).join("");
+    return `<tr class="${key === bestKey ? 'best-combo' : ''}">${cells}</tr>`;
+  }).join("");
+}
+
+async function refreshOptHistory() {
+  const body = document.getElementById("opt-history-body");
+  let rows;
+  try {
+    rows = await api("/api/optimizations");
+  } catch (e) {
+    body.innerHTML = `<div class="text-danger small">Could not load history: ${e.message}</div>`;
+    return;
+  }
+  if (!rows.length) { body.innerHTML = `<div class="text-muted small">No optimizations run yet.</div>`; return; }
+  body.innerHTML = `
+    <div class="table-responsive">
+      <table class="table table-sm table-hover mono">
+        <thead><tr><th>#</th><th>Hard Stop</th><th>Trailing</th><th>Range</th><th>Combos</th><th>Objective</th><th>Status</th><th>Best</th><th>Created</th><th></th></tr></thead>
+        <tbody>
+          ${rows.map(r => `
+            <tr>
+              <td>${r.id}</td>
+              <td>${(r.hard_stop_values || []).join(", ")}</td>
+              <td>${(r.trailing_activation_values || []).join(", ")}</td>
+              <td>${fmtDateOnly(r.start_date)} → ${fmtDateOnly(r.end_date)}</td>
+              <td>${r.combo_count ?? "-"}</td>
+              <td>${OBJECTIVE_LABELS[r.objective] || r.objective || "-"}</td>
+              <td><span class="badge ${r.status === "done" ? "bg-success" : r.status === "failed" ? "bg-danger" : "bg-secondary"}">${r.status}</span></td>
+              <td>${r.best ? `hs=${r.best.hard_stop_r} ta=${r.best.trailing_activation_r} (${fmtMoney(r.best.stats.net_pnl_usd)})` : "-"}</td>
+              <td>${r.created_at || "-"}</td>
+              <td>
+                <button class="btn btn-sm btn-outline-secondary" onclick="pollOptimization(${r.id})">View</button>
+                ${(r.status === "pending" || r.status === "running") ? `<button class="btn btn-sm btn-outline-warning" onclick="cancelOptimization(${r.id})">Cancel</button>` : ""}
+              </td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+</script>
+</body>
+</html>

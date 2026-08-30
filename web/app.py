@@ -23,6 +23,7 @@ from fastapi.templating import Jinja2Templates
 
 import cycle
 import morning_prefilter
+import run_optimization
 from src import backtest_data, backtest_engine, db, gateway_provisioning, mode_config, perf, secrets_store, trade_diagnostics, trades_csv, trades_pdf, trades_xlsx
 from src.sp500_tickers import SP500_TICKERS
 from web import gateway_control
@@ -85,6 +86,7 @@ async def on_startup():
     # that leaves the backtest's row stuck at 'running' forever; this
     # reconciles that on every startup instead.
     db.fail_orphaned_backtests()
+    db.fail_orphaned_optimizations()  # same reconciliation as backtests above, same reason
     db.fail_orphaned_backtest_data_fetches()  # same reconciliation, same reason - see its own docstring
     asyncio.create_task(_requeue_abandoned_worker_backtests_loop())
 
@@ -258,6 +260,28 @@ def backtest_page(request: Request):
         "active_page": "backtest",
         "is_admin": bool(account and account.get("is_admin")),
         "is_viewer": bool(account and account.get("role") == "viewer"),
+    })
+
+
+@app.get("/optimization", response_class=HTMLResponse)
+def optimization_page(request: Request):
+    """ORB V4.3 Optimization Lab - a screen deliberately separate from
+    /backtest (see the feature's own Critical Architecture Rule: never
+    change the existing Backtest page's own behavior). A viewer account
+    is redirected to /backtest same as the main dashboard route already
+    does for "/" - this is a research/compute tool, not something a
+    read-only viewer has any use running."""
+    if not db.any_users_exist():
+        return RedirectResponse("/setup", status_code=303)
+    username = read_session(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    account = db.get_user_by_username(username)
+    if account and account.get("role") == "viewer":
+        return RedirectResponse("/backtest", status_code=303)
+    return templates.TemplateResponse(request, "optimization.html", {
+        "active_page": "optimization",
+        "is_admin": bool(account and account.get("is_admin")),
     })
 
 
@@ -1778,6 +1802,128 @@ def api_retry_backtest(backtest_id: int, account_id: int = Depends(require_accou
 def api_backtest_universe(user: str = Depends(require_user)):
     symbols = backtest_data.cached_symbols(backtest_engine.BAR_SIZE)
     return {"symbols": symbols, "count": len(symbols)}
+
+
+# -------------------------------------------------------------- optimizations ---
+# ORB V4.3 Optimization Lab (web/templates/optimization.html) - a screen
+# deliberately kept separate from everything above (see that feature's
+# own Critical Architecture Rule). Mirrors the backtests routes' own
+# shape (_start_optimization ~ _start_backtest, create/list/get/cancel)
+# but always local (run_optimization.py, one subprocess per sweep
+# regardless of combo count - see its own docstring for why splitting
+# into one subprocess per combo would be the wrong tradeoff here).
+OPTIMIZATION_BASE_STRATEGY_NAME = "ORB Long v4.3 Parameter Lab"
+
+
+def _parse_r_values(raw, field_name: str) -> list[float]:
+    """A comma-separated string ("2.0, 2.5, 3.0") or a JSON list of
+    numbers - either way, at least one positive R multiple. Duplicates
+    are dropped (order preserved) so a sloppy "2.5, 2.5" doesn't run - or
+    report - the same combination twice."""
+    if isinstance(raw, str):
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+    elif isinstance(raw, list):
+        parts = raw
+    else:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a comma-separated string or a list of numbers")
+    if not parts:
+        raise HTTPException(status_code=400, detail=f"{field_name} needs at least one value")
+    values = []
+    for p in parts:
+        try:
+            v = float(p)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"{field_name} has a non-numeric value: {p!r}")
+        if v <= 0:
+            raise HTTPException(status_code=400, detail=f"{field_name} values must be positive R multiples, got {v}")
+        if v not in values:
+            values.append(v)
+    return values
+
+
+def _start_optimization(account_id: int, user: str, params: dict) -> int:
+    optimization_id = db.create_optimization(account_id, params)
+    _log_account_action(
+        account_id, user, action="create_optimization", optimization_id=optimization_id,
+        hard_stop_values=params["hard_stop_values"], trailing_activation_values=params["trailing_activation_values"],
+    )
+    proc = subprocess.Popen([sys.executable, str(PROJECT_DIR / "run_optimization.py"), "--optimization-id", str(optimization_id)])
+    db.set_optimization_pid(optimization_id, proc.pid)
+    return optimization_id
+
+
+@app.post("/api/optimizations")
+async def api_create_optimization(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    body = await request.json()
+
+    try:
+        start_date = date.fromisoformat(body.get("start_date", ""))
+        end_date = date.fromisoformat(body.get("end_date", ""))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="start_date/end_date must be YYYY-MM-DD")
+    if start_date > end_date:
+        raise HTTPException(status_code=400, detail="start_date must not be after end_date")
+
+    symbols = body.get("symbols") or backtest_data.cached_symbols(backtest_engine.BAR_SIZE)
+    if not symbols:
+        raise HTTPException(
+            status_code=400,
+            detail="No symbols have cached historical bars yet - run fetch_backtest_data.py on the server first.",
+        )
+
+    hard_stop_values = _parse_r_values(body.get("hard_stop_values"), "hard_stop_values")
+    trailing_activation_values = _parse_r_values(body.get("trailing_activation_values"), "trailing_activation_values")
+
+    objective = body.get("objective", "net_pnl")
+    if objective not in run_optimization.OBJECTIVE_KEYS:
+        raise HTTPException(status_code=400, detail=f"objective must be one of {sorted(run_optimization.OBJECTIVE_KEYS)}")
+
+    # Always resolved server-side by name, never trusted from the client
+    # (see get_strategy_by_name's own docstring) - the Lab only ever
+    # sweeps its own dedicated base strategy.
+    base_strategy = db.get_strategy_by_name(OPTIMIZATION_BASE_STRATEGY_NAME)
+    if base_strategy is None:
+        raise HTTPException(status_code=500, detail=f'Base strategy "{OPTIMIZATION_BASE_STRATEGY_NAME}" not found - re-run db.init_db (restart the dashboard).')
+
+    combo_count = len(hard_stop_values) * len(trailing_activation_values)
+    params = {
+        "base_strategy_id": base_strategy["id"],
+        "base_strategy_name": base_strategy["name"],
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "symbols": symbols,
+        "hard_stop_values": hard_stop_values,
+        "trailing_activation_values": trailing_activation_values,
+        "objective": objective,
+        "combo_count": combo_count,
+        "portfolio_value": float(body.get("portfolio_value", DEFAULT_BACKTEST_PORTFOLIO_VALUE)),
+        "max_risk_pct": float(body.get("max_risk_pct", DEFAULT_BACKTEST_MAX_RISK_PCT)),
+        "max_trades_per_day": int(body.get("max_trades_per_day", DEFAULT_BACKTEST_MAX_TRADES_PER_DAY)),
+        "commission_per_trade": float(body.get("commission_per_trade", DEFAULT_BACKTEST_COMMISSION_PER_TRADE)),
+    }
+    optimization_id = _start_optimization(account_id, user, params)
+    return {"id": optimization_id, "combo_count": combo_count}
+
+
+@app.get("/api/optimizations")
+def api_list_optimizations(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    return db.list_optimizations(account_id)
+
+
+@app.get("/api/optimizations/{optimization_id}")
+def api_get_optimization(optimization_id: int, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    result = db.get_optimization(optimization_id)
+    if not result or result["account_id"] != account_id:
+        raise HTTPException(status_code=404, detail="Optimization not found")
+    return result
+
+
+@app.post("/api/optimizations/{optimization_id}/cancel")
+def api_cancel_optimization(optimization_id: int, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    if not db.cancel_optimization(optimization_id, account_id):
+        raise HTTPException(status_code=404, detail="Optimization not found, or already finished")
+    _log_account_action(account_id, user, action="cancel_optimization", optimization_id=optimization_id)
+    return {"ok": True}
 
 
 # --------------------------------------------------------- backtest worker ---
