@@ -576,15 +576,17 @@ function weekdaysInRange(startDate, endDate) {
   return days;
 }
 
-// A local-mode multi-day run is split into one subprocess per GROUP of
-// up to this many consecutive trading days, not one per single day -
+// A multi-day New Backtest run (local OR remote) is split into one
+// backtest per GROUP of up to this many consecutive trading days, not
+// one per single day and not one giant request for the whole range -
 // e.g. a 12-weekday selection becomes 3 chunks (5+5+2), each covering
-// its own [start, end] sub-range, rather than 12 single-day subprocesses.
-// Chosen specifically to keep the number of concurrent local subprocess
-// backtests down (each one loads the whole cached symbol universe into
-// memory - see the "Out of host capacity"/OOM-adjacent incident this
-// same reasoning traces back to), while still buying real parallelism
-// for a long range instead of one giant single-threaded run.
+// its own [start, end] sub-range. For local mode this bounds how many
+// concurrent OS subprocesses can pile up on the server at once (each
+// one loads the whole cached symbol universe into memory - see the
+// swap-thrashing incident this reasoning traces back to); for remote
+// mode a worker only ever runs one job at a time anyway (see docs/
+// worker.md), so chunking there just means results land incrementally
+// instead of one long wait for a single giant job.
 const BT_MAX_CHUNK_TRADING_DAYS = 5;
 
 // Groups `days` (a weekdaysInRange()-shaped array, already sorted) into
@@ -1745,23 +1747,57 @@ document.getElementById("btn-run-backtest")?.addEventListener("click", async () 
 
   if (isRemote) {
     // A remote worker claims and runs jobs ONE AT A TIME (see docs/
-    // worker.md) - unlike a local run, splitting a multi-day range into
-    // one job per weekday buys no parallelism at all here, only N times
-    // the per-job overhead (a worker claim round-trip, reloading the
-    // whole cached universe from disk) for nothing. Always a single
-    // request covering the whole picked range - exactly how this worked
-    // before per-weekday splitting existed for local runs. Weekends
-    // inside the range are still skipped, same as always, just by
-    // _trading_days on the server side rather than by anything here.
-    try {
-      const { id } = await api("/api/backtests", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...basePayload, start_date: toISODate(selected[0]), end_date: toISODate(selected[1]) }),
-      });
-      pollBacktest(id);
-    } catch (e) {
-      errorEl.textContent = "Could not start backtest: " + e.message;
+    // worker.md), so chunking here buys no PARALLELISM the way it does
+    // for local runs below - but it's still worth splitting a long range
+    // into the SAME up-to-BT_MAX_CHUNK_TRADING_DAYS chunks, so results
+    // land incrementally as the worker gets through each one instead of
+    // one long wait (and a network hiccup) for a single giant multi-
+    // month job. Weekends inside a chunk are still skipped server-side
+    // by _trading_days, same as always.
+    const weekdays = weekdaysInRange(selected[0], selected[1]);
+    if (!weekdays.length) { errorEl.textContent = "The selected range has no weekdays (Mon–Fri) to backtest."; return; }
+    const chunks = chunkTradingDays(weekdays, BT_MAX_CHUNK_TRADING_DAYS);
+
+    if (chunks.length === 1) {
+      // The whole selection fits in one chunk - unchanged from before:
+      // a single request, opened directly in the Results panel.
+      const chunk = chunks[0];
+      try {
+        const { id } = await api("/api/backtests", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...basePayload, start_date: toISODate(chunk[0]), end_date: toISODate(chunk[chunk.length - 1]) }),
+        });
+        pollBacktest(id);
+      } catch (e) {
+        errorEl.textContent = "Could not start backtest: " + e.message;
+      }
+      return;
     }
+
+    // Multiple chunks queue up as separate "pending" rows for the worker
+    // to claim and run one at a time - no CPU/memory load on the server
+    // itself while they wait (unlike the local branch below), so this
+    // doesn't need a confirm/cancel gate.
+    let started = 0;
+    for (const chunk of chunks) {
+      const startIso = toISODate(chunk[0]);
+      const endIso = toISODate(chunk[chunk.length - 1]);
+      try {
+        await api("/api/backtests", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...basePayload, start_date: startIso, end_date: endIso }),
+        });
+        started++;
+      } catch (e) {
+        errorEl.textContent = `Started ${started}/${chunks.length} before failing on ${startIso}–${endIso}: ${e.message}`;
+        refreshHistory();
+        refreshCalendar();
+        return;
+      }
+    }
+    statusEl.textContent = `Queued ${started} backtest(s) for the remote worker, up to ${BT_MAX_CHUNK_TRADING_DAYS} trading days each - it claims and runs them one at a time, see History/Calendar below.`;
+    refreshHistory();
+    refreshCalendar();
     return;
   }
 
