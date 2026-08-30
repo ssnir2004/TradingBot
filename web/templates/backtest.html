@@ -576,6 +576,31 @@ function weekdaysInRange(startDate, endDate) {
   return days;
 }
 
+// A local-mode multi-day run is split into one subprocess per GROUP of
+// up to this many consecutive trading days, not one per single day -
+// e.g. a 12-weekday selection becomes 3 chunks (5+5+2), each covering
+// its own [start, end] sub-range, rather than 12 single-day subprocesses.
+// Chosen specifically to keep the number of concurrent local subprocess
+// backtests down (each one loads the whole cached symbol universe into
+// memory - see the "Out of host capacity"/OOM-adjacent incident this
+// same reasoning traces back to), while still buying real parallelism
+// for a long range instead of one giant single-threaded run.
+const BT_MAX_CHUNK_TRADING_DAYS = 5;
+
+// Groups `days` (a weekdaysInRange()-shaped array, already sorted) into
+// consecutive chunks of at most `chunkSize` each - a chunk is just the
+// slice's own first/last day, since every weekday in between is
+// implicitly covered by the [start_date, end_date] range the backend
+// simulates (weekends inside a chunk, if any ever land there, are
+// already skipped server-side same as always).
+function chunkTradingDays(days, chunkSize) {
+  const chunks = [];
+  for (let i = 0; i < days.length; i += chunkSize) {
+    chunks.push(days.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
 let strategiesById = {};
 let pollHandle = null;
 let currentBacktestId = null;
@@ -1740,33 +1765,40 @@ document.getElementById("btn-run-backtest")?.addEventListener("click", async () 
     return;
   }
 
-  // Local mode: split into one weekday per backtest - real, separate OS
-  // subprocesses (see _start_backtest) genuinely run concurrently on this
-  // server, so this is where splitting actually buys parallelism instead
-  // of just overhead.
+  // Local mode: split into one subprocess per GROUP of up to
+  // BT_MAX_CHUNK_TRADING_DAYS consecutive trading days (not one per
+  // single day) - real, separate OS subprocesses (see _start_backtest)
+  // genuinely run concurrently on this server, so this is where
+  // splitting still buys parallelism for a long range, while capping
+  // each chunk's size keeps the number of subprocesses running at once
+  // bounded regardless of how long a range gets picked.
   const weekdays = weekdaysInRange(selected[0], selected[1]);
   if (!weekdays.length) { errorEl.textContent = "The selected range has no weekdays (Mon–Fri) to backtest."; return; }
+  const chunks = chunkTradingDays(weekdays, BT_MAX_CHUNK_TRADING_DAYS);
 
   // Firing many local subprocesses at once is exactly the CPU/memory risk
-  // "Run on remote worker" exists to avoid, so a multi-day local run gets
-  // a confirm/cancel gate a single-day run never needed.
-  if (weekdays.length > 1) {
+  // "Run on remote worker" exists to avoid, so a multi-chunk local run
+  // gets a confirm/cancel gate a single-chunk run never needed.
+  if (chunks.length > 1) {
     const ok = confirm(
-      `This starts ${weekdays.length} separate backtests (one per weekday, weekends skipped) running locally on this server at the same time - that can be heavy on CPU/memory.\n\n` +
+      `This starts ${chunks.length} separate backtests (each covering up to ${BT_MAX_CHUNK_TRADING_DAYS} trading days) running locally on this server at the same time - that can be heavy on CPU/memory.\n\n` +
       `Check "Run on remote worker" first to offload this instead, or press OK to continue running locally.`
     );
     if (!ok) return;
   }
 
-  if (weekdays.length === 1) {
-    // Single trading day selected - unchanged from before: open it
-    // directly in the Results panel rather than just dropping it in
-    // History like the multi-day fan-out below does.
-    const dayIso = toISODate(weekdays[0]);
+  if (chunks.length === 1) {
+    // The whole selection fits in one chunk (<= BT_MAX_CHUNK_TRADING_DAYS
+    // trading days, including a single-day selection) - unchanged from
+    // before: open it directly in the Results panel rather than just
+    // dropping it in History like the multi-chunk fan-out below does.
+    const chunk = chunks[0];
+    const startIso = toISODate(chunk[0]);
+    const endIso = toISODate(chunk[chunk.length - 1]);
     try {
       const { id } = await api("/api/backtests", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...basePayload, start_date: dayIso, end_date: dayIso }),
+        body: JSON.stringify({ ...basePayload, start_date: startIso, end_date: endIso }),
       });
       pollBacktest(id);
     } catch (e) {
@@ -1776,22 +1808,23 @@ document.getElementById("btn-run-backtest")?.addEventListener("click", async () 
   }
 
   let started = 0;
-  for (const day of weekdays) {
-    const dayIso = toISODate(day);
+  for (const chunk of chunks) {
+    const startIso = toISODate(chunk[0]);
+    const endIso = toISODate(chunk[chunk.length - 1]);
     try {
       await api("/api/backtests", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...basePayload, start_date: dayIso, end_date: dayIso }),
+        body: JSON.stringify({ ...basePayload, start_date: startIso, end_date: endIso }),
       });
       started++;
     } catch (e) {
-      errorEl.textContent = `Started ${started}/${weekdays.length} before failing on ${dayIso}: ${e.message}`;
+      errorEl.textContent = `Started ${started}/${chunks.length} before failing on ${startIso}–${endIso}: ${e.message}`;
       refreshHistory();
       refreshCalendar();
       return;
     }
   }
-  statusEl.textContent = `Started ${started} backtest(s), one per weekday - see History/Calendar below.`;
+  statusEl.textContent = `Started ${started} backtest(s), up to ${BT_MAX_CHUNK_TRADING_DAYS} trading days each - see History/Calendar below.`;
   refreshHistory();
   refreshCalendar();
 });
