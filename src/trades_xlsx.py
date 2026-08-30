@@ -17,7 +17,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from src import perf
+from src import entry_metrics, perf
 from src.trades_pdf import EXIT_REASON_LABELS
 
 _HEADER_FILL = PatternFill(start_color="EEF1F5", end_color="EEF1F5", fill_type="solid")
@@ -117,13 +117,21 @@ def build_trades_xlsx(strategy_name: str, direction: str, backtests_included: in
     _autosize(summary_ws, 9)
 
     trades_ws = wb.create_sheet("Trades")
-    header = [
+    base_header = [
         "#", "Symbol", "Side", "Model", "Entry $", "Stop", "Risk $", "Exit $", "Size",
         "MFE $", "MFE R", "MAE $", "MAE R", "P&L $", "Final R", "Capture %", "Commission $",
         "Exit Reason", "Profit Lock Activated", "Profit Lock Triggered At (R)",
         "Trail Activated", "Trail Triggered At (R)", "Entry Time (ET)", "Exit Time (ET)",
     ]
+    # Point-in-time entry metrics (see src/entry_metrics.py) appended after
+    # the existing columns - one column per ENTRY_METRICS_KEYS entry, raw
+    # values (None for any pre-feature/non-ORB pair), no per-cell number
+    # formatting given how many there are - still fully usable as numbers/
+    # booleans/strings in Excel as-is.
+    metrics_header = [k.replace("_", " ").title() for k in entry_metrics.ENTRY_METRICS_KEYS]
+    header = base_header + metrics_header
     _write_header(trades_ws, header)
+    metrics_start_col = len(base_header) + 1
 
     money_cols = {5, 6, 7, 8, 10, 12, 14, 17}  # Entry $/Stop/Risk $/Exit $/MFE $/MAE $/P&L $/Commission $
     r_cols = {11, 13, 15, 20, 22}
@@ -148,6 +156,7 @@ def build_trades_xlsx(strategy_name: str, direction: str, backtests_included: in
             p.get("trail_activated_at_r"),
             _naive_et(entry_time), _naive_et(exit_time),
         ]
+        row += [p.get(k) for k in entry_metrics.ENTRY_METRICS_KEYS]
         trades_ws.append(row)
         r = trades_ws.max_row
         for col in money_cols:

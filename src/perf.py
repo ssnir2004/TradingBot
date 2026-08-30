@@ -5,7 +5,7 @@ from the trades/positions tables in src/db.py.
 from collections import defaultdict
 from datetime import datetime
 
-from src import db
+from src import db, entry_metrics
 
 R_BUCKETS = [
     ("<= -2R", lambda r: r <= -2, True),
@@ -123,6 +123,14 @@ def pair_trades(rows: list[dict]) -> list[dict]:
                 "profit_lock_activated_at_r": row.get("profit_lock_activated_at_r"),
                 "trail_activated": row.get("trail_activated"),
                 "trail_activated_at_r": row.get("trail_activated_at_r"),
+                # Point-in-time market/stock/setup context captured at
+                # entry (see src/entry_metrics.py) - off the OPEN leg
+                # (open_row), not the close leg, since these are all
+                # entry-time snapshots, the opposite convention from mfe_
+                # price/profit_lock_activated above. None for every trade
+                # that predates this (any non-ORB pair, or an ORB pair
+                # from before this feature shipped).
+                **{k: open_row.get(k) for k in entry_metrics.ENTRY_METRICS_KEYS},
             })
             open_row["_remaining"] -= matched
             remaining -= matched

@@ -45,7 +45,7 @@ import pandas as pd
 import yfinance as yf
 
 import cycle
-from src import backtest_data, es_filter, orb, touch_turn
+from src import backtest_data, entry_metrics, es_filter, orb, touch_turn
 
 BAR_SIZE = "5 mins"
 DAILY_BAR_SIZE = "1 day"
@@ -1052,6 +1052,25 @@ def simulate_orb_strategy(
                         continue
 
                     trade_id += 1
+                    # Point-in-time entry context (see src/entry_metrics.py's
+                    # own module docstring for the point-in-time-safety
+                    # contract) - pure enrichment for offline analysis
+                    # (analyze_entry_metrics.py), never read by any decision
+                    # above. today_bars_full/intraday are each sliced to
+                    # <= bar_ts here (they otherwise span the whole day/every
+                    # date respectively) - es_bars_so_far mirrors
+                    # _es_filter_pass's own identical slice just below,
+                    # computed once here since that function doesn't hand
+                    # its own slice back.
+                    es_today = es_day_groups.get(day)
+                    es_bars_so_far = es_today[es_today.index <= bar_ts] if es_today is not None else None
+                    entry_ctx = entry_metrics.compute_entry_metrics(
+                        side, price, bar_ts, initial_stop,
+                        today_bars_full[today_bars_full.index <= bar_ts],
+                        intraday[intraday.index <= bar_ts],
+                        daily_slice, detail, es_bars_so_far,
+                        prior_day_bars=prior_day_bars_by_symbol[symbol],
+                    )
                     trades.append({
                         "id": trade_id, "symbol": symbol, "side": action,
                         "fill_price": price, "size": size, "timestamp_iso": bar_ts.isoformat(),
@@ -1063,6 +1082,7 @@ def simulate_orb_strategy(
                         # performance down by model, not just in aggregate.
                         "model": detail.get("model"),
                         "es_filter_pass": _es_filter_pass(strategy_rules, es_day_groups, day, bar_ts, side),
+                        **entry_ctx,
                     })
                     open_positions[symbol] = {
                         # "side" is read internally by cycle._trailing_stop_

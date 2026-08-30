@@ -23,7 +23,7 @@ from fastapi.templating import Jinja2Templates
 
 import cycle
 import morning_prefilter
-from src import backtest_data, backtest_engine, db, gateway_provisioning, mode_config, perf, secrets_store, trade_diagnostics, trades_pdf, trades_xlsx
+from src import backtest_data, backtest_engine, db, gateway_provisioning, mode_config, perf, secrets_store, trade_diagnostics, trades_csv, trades_pdf, trades_xlsx
 from src.sp500_tickers import SP500_TICKERS
 from web import gateway_control
 from web.auth import COOKIE_NAME, make_session_cookie, read_session, require_user
@@ -1404,6 +1404,26 @@ def api_strategy_trades_xlsx(strategy_id: int, account_id: int = Depends(require
     return Response(
         content=xlsx_bytes, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{safe_name}_trades.xlsx"'},
+    )
+
+
+@app.get("/api/strategies/{strategy_id}/trades.csv")
+def api_strategy_trades_csv(strategy_id: int, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    """Same pooled trade log as trades.xlsx just above, as a plain .csv -
+    the direct feed for analyze_entry_metrics.py's own statistical
+    analysis. See src/trades_csv.py."""
+    strategy = db.get_strategy(strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    pooled = perf.pooled_trades_for_strategy(db.list_done_backtest_results(account_id), strategy_id)
+    if not pooled:
+        raise HTTPException(status_code=404, detail="No completed backtests for this strategy yet")
+    report = trade_diagnostics.full_report(pooled["pairs"], has_profit_lock=_strategy_has_profit_lock(strategy))
+    csv_text = trades_csv.build_trades_csv(report["pairs"])
+    safe_name = re.sub(r"[^A-Za-z0-9]+", "_", pooled["strategy_name"]).strip("_")
+    return Response(
+        content=csv_text, media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}_trades.csv"'},
     )
 
 
