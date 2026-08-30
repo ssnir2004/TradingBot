@@ -78,6 +78,12 @@
           <input type="number" step="0.01" id="opt-commission-per-trade" class="form-control form-control-sm" value="1.5">
         </div>
       </div>
+      <div class="form-check mb-3">
+        <input type="checkbox" class="form-check-input" id="opt-run-remote">
+        <label class="form-check-label small" for="opt-run-remote">
+          Run on remote worker <span class="text-muted">(each combination runs on your own machine instead of this server, one at a time, via the same worker as the Backtest page - see docs/worker.md)</span>
+        </label>
+      </div>
       <div class="small text-muted mb-2" id="opt-universe-info">Checking available historical data…</div>
       <div class="small text-muted mb-2" id="opt-combo-preview"></div>
       <button id="btn-run-optimization" class="btn btn-primary btn-sm">Run Optimization</button>
@@ -151,10 +157,13 @@ document.addEventListener("DOMContentLoaded", () => {
     const el = document.getElementById("opt-combo-preview");
     if (!hs.length || !ta.length) { el.textContent = ""; return; }
     const n = hs.length * ta.length;
-    el.textContent = `${hs.length} Hard Stop value(s) × ${ta.length} Trailing Activation value(s) = ${n} combination(s) will run, sequentially, in one background job.`;
+    const remote = document.getElementById("opt-run-remote").checked;
+    el.textContent = `${hs.length} Hard Stop value(s) × ${ta.length} Trailing Activation value(s) = ${n} combination(s) will run` +
+      (remote ? `, one at a time, on your remote worker.` : `, sequentially, in one background job on this server.`);
   }
   document.getElementById("opt-hard-stop-values").addEventListener("input", updateComboPreview);
   document.getElementById("opt-trailing-values").addEventListener("input", updateComboPreview);
+  document.getElementById("opt-run-remote").addEventListener("change", updateComboPreview);
   updateComboPreview();
 
   document.getElementById("btn-run-optimization").addEventListener("click", runOptimization);
@@ -184,6 +193,7 @@ async function runOptimization() {
     max_risk_pct: Number(document.getElementById("opt-max-risk-pct").value),
     max_trades_per_day: Number(document.getElementById("opt-max-trades-per-day").value),
     commission_per_trade: Number(document.getElementById("opt-commission-per-trade").value),
+    execution_mode: document.getElementById("opt-run-remote").checked ? "remote" : "local",
   };
 
   try {

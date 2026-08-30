@@ -92,6 +92,27 @@ def run_one_strategy(
     }
 
 
+def _apply_rules_override(rules: dict, override: dict) -> dict:
+    """Recursively merges `override` onto a COPY of `rules` (never
+    mutates the strategy's own resolved rules dict in place, since the
+    same `strategies` dict can be reused across a loop's own several
+    strategy_ids). Only used by the Optimization Lab (see params.get(
+    "rules_override") below) to swap in a sweep combination's own Hard
+    Stop R / Trailing Activation R on top of ORB Long v4.3's own base
+    rules_json - a plain dict.update() at the top level would silently
+    replace the WHOLE "exit" sub-dict instead of overriding just the two
+    keys inside it, so nested dict values are merged one level at a
+    time instead; a non-dict override value (or a key not already a
+    dict on the base side) just replaces outright, same as .update()."""
+    merged = dict(rules)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _apply_rules_override(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def run_backtest_params(params: dict, strategies: dict) -> dict:
     """strategies is {str(strategy_id): {"name": ..., "direction": ...,
     "rules": {...}}} - already resolved by the caller (run_backtest.py
@@ -99,10 +120,22 @@ def run_backtest_params(params: dict, strategies: dict) -> dict:
     gets them pre-resolved in the claim response, since a remote worker
     has no direct DB access of its own). Returns the same
     {strategy_id_str: {...} | {"error": ...}} shape db.finish_backtest
-    expects for results_json."""
+    expects for results_json.
+
+    params.get("rules_override") is an Optimization Lab addition (see
+    run_optimization.py's own remote-mode docstring) - absent for every
+    ordinary backtest (unchanged behavior), a partial rules dict merged
+    onto EVERY requested strategy's own rules when present. In practice
+    only ever set for a one-strategy remote-mode sweep combination (ORB
+    Long v4.3's own base rules with that combo's hard_stop_R/trailing_
+    trigger_R swapped in), but applying it uniformly here - rather than
+    only when there's exactly one strategy_id - keeps this function's
+    own behavior simple and predictable instead of branching on how many
+    strategies happen to be requested."""
     start_date = date.fromisoformat(params["start_date"])
     end_date = date.fromisoformat(params["end_date"])
     symbols = params["symbols"]
+    rules_override = params.get("rules_override")
     results = {}
     for strategy_id in params["strategy_ids"]:
         key = str(strategy_id)
@@ -110,8 +143,9 @@ def run_backtest_params(params: dict, strategies: dict) -> dict:
         if not strategy:
             results[key] = {"error": "Strategy not found"}
             continue
+        rules = _apply_rules_override(strategy["rules"], rules_override) if rules_override else strategy["rules"]
         results[key] = run_one_strategy(
-            strategy["name"], strategy["direction"], strategy["rules"], symbols,
+            strategy["name"], strategy["direction"], rules, symbols,
             start_date, end_date,
             params["portfolio_value"], params["max_risk_pct"], params["max_trades_per_day"],
             params.get("commission_per_trade", 0.0),

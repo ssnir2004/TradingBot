@@ -2611,6 +2611,16 @@ def init_db(seed_rules_path: Path | None = None):
         _migrate_add_column(conn, "backtests", "claimed_at", "TEXT")
         _migrate_add_column(conn, "backtests", "archived_at", "TEXT")
         _migrate_add_column(conn, "backtests", "archive_folder", "TEXT NOT NULL DEFAULT ''")
+        # Links a backtest row back to the Optimization Lab sweep it's one
+        # combination of (see run_optimization.py's own remote-mode
+        # docstring) - NULL for every ordinary backtest, including every
+        # row that predates this feature. Lets a remote-mode sweep reuse
+        # the EXISTING worker claim/result protocol completely unchanged
+        # (each combination is just an ordinary remote backtest a worker
+        # claims/runs/reports on) - only the aggregation step (web/app.py's
+        # _aggregate_optimizations_loop) needs to find "every backtest
+        # belonging to sweep N" back again once they've all finished.
+        _migrate_add_column(conn, "backtests", "optimization_id", "INTEGER")
         _migrate_add_column(conn, "backtest_data_fetches", "mode", "TEXT NOT NULL DEFAULT 'paper'")
         # The shipped default strategy predates risk_rating and got the
         # generic 'moderate' default from the ALTER TABLE above — it's
@@ -3687,19 +3697,27 @@ def delete_strategy(strategy_id: int):
 
 
 # -------------------------------------------------------------- backtests ---
-def create_backtest(account_id: int, params: dict, execution_mode: str = "local") -> int:
+def create_backtest(account_id: int, params: dict, execution_mode: str = "local", optimization_id: int | None = None) -> int:
     """execution_mode 'local' (default, unchanged behavior) has web/app.py
     spawn run_backtest.py itself right after this returns. 'remote' leaves
     the row at status='pending' for a worker to pick up via
-    claim_next_backtest - see docs/worker.md."""
+    claim_next_backtest - see docs/worker.md.
+
+    optimization_id (default None, unchanged behavior for every ordinary
+    backtest) tags this row as one combination of an Optimization Lab
+    sweep (see run_optimization.py's own remote-mode docstring and
+    list_optimization_child_backtests below) - params itself may also
+    carry a "rules_override" key for the same feature (applied by
+    src/backtest_runner.run_backtest_params, opt-in and additive there
+    too)."""
     if execution_mode not in ("local", "remote"):
         raise ValueError("execution_mode must be 'local' or 'remote'")
     now = datetime.now(ET).isoformat(timespec="seconds")
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO backtests (account_id, status, params_json, execution_mode, created_at) "
-            "VALUES (?, 'pending', ?, ?, ?)",
-            (account_id, json.dumps(params), execution_mode, now),
+            "INSERT INTO backtests (account_id, status, params_json, execution_mode, optimization_id, created_at) "
+            "VALUES (?, 'pending', ?, ?, ?, ?)",
+            (account_id, json.dumps(params), execution_mode, optimization_id, now),
         )
         return cur.lastrowid
 
@@ -3789,6 +3807,27 @@ def get_backtest(backtest_id: int) -> dict | None:
         raw_results = result.pop("results_json")
         result["results"] = json.loads(raw_results) if raw_results else None
         return result
+
+
+def list_optimization_child_backtests(optimization_id: int) -> list[dict]:
+    """Every backtest row belonging to one Optimization Lab remote-mode
+    sweep (see the backtests.optimization_id column's own comment) -
+    used by web/app.py's _aggregate_optimizations_loop to tell whether a
+    sweep's own combinations have all reached a terminal state yet, and
+    by run_optimization.aggregate_from_children to actually build the
+    sweep's combos/best results once they have."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM backtests WHERE optimization_id = ? ORDER BY id ASC", (optimization_id,)
+        ).fetchall()
+    out = []
+    for row in rows:
+        result = dict(row)
+        result["params"] = json.loads(result.pop("params_json"))
+        raw_results = result.pop("results_json")
+        result["results"] = json.loads(raw_results) if raw_results else None
+        out.append(result)
+    return out
 
 
 def delete_backtest(backtest_id: int, account_id: int) -> bool:
@@ -4122,6 +4161,20 @@ def get_optimization(optimization_id: int) -> dict | None:
         return result
 
 
+def list_running_optimizations() -> list[dict]:
+    """Every optimization currently 'pending' or 'running', across ALL
+    accounts - not account-scoped, same as requeue_abandoned_worker_
+    backtests above (a background reconciliation task, not a per-user
+    request). Used by web/app.py's _aggregate_optimizations_loop to find
+    which remote-mode sweeps might be ready to finalize (see run_
+    optimization.aggregate_from_children - itself a no-op, cheaply, for
+    a local-mode sweep that already finished on its own, or one still
+    genuinely waiting on a child)."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id FROM optimizations WHERE status IN ('pending', 'running')").fetchall()
+        return [dict(r) for r in rows]
+
+
 def list_optimizations(account_id: int, limit: int = 50) -> list[dict]:
     """Summary rows for the Optimization Lab's own history list - full
     per-combo results (potentially many rows) come from get_optimization,
@@ -4151,7 +4204,16 @@ def list_optimizations(account_id: int, limit: int = 50) -> list[dict]:
 
 
 def cancel_optimization(optimization_id: int, account_id: int) -> bool:
-    """Same kill-by-pid-then-mark-failed pattern as cancel_backtest."""
+    """Same kill-by-pid-then-mark-failed pattern as cancel_backtest - plus
+    cancelling every still-pending/running CHILD backtest this sweep
+    dispatched (remote mode only - see backtests.optimization_id's own
+    comment; local mode has no child rows at all, so this loop is just a
+    no-op there). Without this, a cancelled sweep's own combinations
+    would keep sitting there for a remote worker to claim and burn real
+    computation on, or (for one a worker already claimed) still try to
+    report a result back into a parent that no longer wants it -
+    cancel_backtest's own status='running' check in submit_worker_result
+    already rejects that once this marks the child row 'failed' instead."""
     with get_conn() as conn:
         row = conn.execute(
             "SELECT pid, status FROM optimizations WHERE id = ? AND account_id = ?", (optimization_id, account_id)
@@ -4163,6 +4225,9 @@ def cancel_optimization(optimization_id: int, account_id: int) -> bool:
             os.kill(row["pid"], signal.SIGTERM)
         except ProcessLookupError:
             pass
+    for child in list_optimization_child_backtests(optimization_id):
+        if child["status"] in ("pending", "running"):
+            cancel_backtest(child["id"], account_id)
     fail_optimization(optimization_id, "Cancelled by user")
     return True
 

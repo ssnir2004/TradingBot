@@ -89,6 +89,7 @@ async def on_startup():
     db.fail_orphaned_optimizations()  # same reconciliation as backtests above, same reason
     db.fail_orphaned_backtest_data_fetches()  # same reconciliation, same reason - see its own docstring
     asyncio.create_task(_requeue_abandoned_worker_backtests_loop())
+    asyncio.create_task(_aggregate_optimizations_loop())
 
 
 def require_mode(mode: str = Query(...)) -> str:
@@ -1808,11 +1809,37 @@ def api_backtest_universe(user: str = Depends(require_user)):
 # ORB V4.3 Optimization Lab (web/templates/optimization.html) - a screen
 # deliberately kept separate from everything above (see that feature's
 # own Critical Architecture Rule). Mirrors the backtests routes' own
-# shape (_start_optimization ~ _start_backtest, create/list/get/cancel)
-# but always local (run_optimization.py, one subprocess per sweep
-# regardless of combo count - see its own docstring for why splitting
-# into one subprocess per combo would be the wrong tradeoff here).
+# shape (_start_optimization ~ _start_backtest, create/list/get/cancel).
+#
+# Local mode: run_optimization.py, one subprocess for the WHOLE sweep
+# regardless of combo count (see its own docstring for why one subprocess
+# per combination would be the wrong tradeoff here).
+#
+# Remote mode: each combination becomes its own ordinary remote-mode
+# backtests row (db.create_backtest's own optimization_id param, plus a
+# "rules_override" in that row's params - see src/backtest_runner.
+# run_backtest_params's own new param) - reuses the EXISTING worker
+# claim/result protocol completely unchanged, no run_optimization.py
+# subprocess at all. _aggregate_optimizations_loop below polls for a
+# sweep whose every child has finished and pulls them together.
 OPTIMIZATION_BASE_STRATEGY_NAME = "ORB Long v4.3 Parameter Lab"
+
+
+async def _aggregate_optimizations_loop():
+    """Background task (same shape as _requeue_abandoned_worker_backtests_
+    loop above - runs for the dashboard process's lifetime, swallows
+    errors so one bad pass doesn't end the loop for good) - the only
+    thing that ever finishes a REMOTE-mode optimization (see run_
+    optimization.aggregate_from_children's own docstring); a local-mode
+    one finishes itself, inside its own run_optimization.py subprocess,
+    same as always."""
+    while True:
+        try:
+            for row in db.list_running_optimizations():
+                run_optimization.aggregate_from_children(row["id"])
+        except Exception:  # noqa: BLE001 - a bad pass must not silently end this background loop
+            pass
+        await asyncio.sleep(30)
 
 
 def _parse_r_values(raw, field_name: str) -> list[float]:
@@ -1841,14 +1868,42 @@ def _parse_r_values(raw, field_name: str) -> list[float]:
     return values
 
 
-def _start_optimization(account_id: int, user: str, params: dict) -> int:
+def _start_optimization(account_id: int, user: str, params: dict, execution_mode: str) -> int:
     optimization_id = db.create_optimization(account_id, params)
     _log_account_action(
-        account_id, user, action="create_optimization", optimization_id=optimization_id,
+        account_id, user, action="create_optimization", optimization_id=optimization_id, execution_mode=execution_mode,
         hard_stop_values=params["hard_stop_values"], trailing_activation_values=params["trailing_activation_values"],
     )
-    proc = subprocess.Popen([sys.executable, str(PROJECT_DIR / "run_optimization.py"), "--optimization-id", str(optimization_id)])
-    db.set_optimization_pid(optimization_id, proc.pid)
+    if execution_mode == "local":
+        # Fire-and-forget (Popen, not run), same as _start_backtest -
+        # this request must return immediately with the new
+        # optimization's id so the dashboard can start polling.
+        proc = subprocess.Popen([sys.executable, str(PROJECT_DIR / "run_optimization.py"), "--optimization-id", str(optimization_id)])
+        db.set_optimization_pid(optimization_id, proc.pid)
+        return optimization_id
+
+    # execution_mode == "remote": dispatch every combination as its own
+    # ordinary remote-mode backtest (reusing the EXISTING worker claim/
+    # result protocol unchanged - see this section's own top comment) -
+    # no subprocess of run_optimization.py at all in this path;
+    # _aggregate_optimizations_loop finishes the optimization row once
+    # every one of these reaches a terminal state.
+    for hard_stop_r in params["hard_stop_values"]:
+        for trailing_activation_r in params["trailing_activation_values"]:
+            child_params = {
+                "strategy_ids": [params["base_strategy_id"]],
+                "start_date": params["start_date"], "end_date": params["end_date"],
+                "symbols": params["symbols"],
+                "portfolio_value": params["portfolio_value"], "max_risk_pct": params["max_risk_pct"],
+                "max_trades_per_day": params["max_trades_per_day"], "commission_per_trade": params["commission_per_trade"],
+                "rules_override": {"exit": {"hard_stop_R": hard_stop_r, "trailing_trigger_R": trailing_activation_r}},
+                # Redundant with rules_override above, but a plain top-
+                # level read is simpler for aggregate_from_children than
+                # re-parsing the override's own nested shape back out.
+                "hard_stop_r": hard_stop_r, "trailing_activation_r": trailing_activation_r,
+            }
+            db.create_backtest(account_id, child_params, execution_mode="remote", optimization_id=optimization_id)
+    db.start_optimization(optimization_id)
     return optimization_id
 
 
@@ -1878,6 +1933,10 @@ async def api_create_optimization(request: Request, account_id: int = Depends(re
     if objective not in run_optimization.OBJECTIVE_KEYS:
         raise HTTPException(status_code=400, detail=f"objective must be one of {sorted(run_optimization.OBJECTIVE_KEYS)}")
 
+    execution_mode = body.get("execution_mode", "local")
+    if execution_mode not in ("local", "remote"):
+        raise HTTPException(status_code=400, detail="execution_mode must be 'local' or 'remote'")
+
     # Always resolved server-side by name, never trusted from the client
     # (see get_strategy_by_name's own docstring) - the Lab only ever
     # sweeps its own dedicated base strategy.
@@ -1901,7 +1960,7 @@ async def api_create_optimization(request: Request, account_id: int = Depends(re
         "max_trades_per_day": int(body.get("max_trades_per_day", DEFAULT_BACKTEST_MAX_TRADES_PER_DAY)),
         "commission_per_trade": float(body.get("commission_per_trade", DEFAULT_BACKTEST_COMMISSION_PER_TRADE)),
     }
-    optimization_id = _start_optimization(account_id, user, params)
+    optimization_id = _start_optimization(account_id, user, params, execution_mode)
     return {"id": optimization_id, "combo_count": combo_count}
 
 

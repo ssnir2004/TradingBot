@@ -1,29 +1,43 @@
 """Runs one ORB Long v4.3 Parameter Lab optimization sweep (see
-web/app.py's POST /api/optimizations, web/templates/optimization.html) as
-an isolated subprocess, spawned by the dashboard - same "a memory-heavy
-run must never risk taking the dashboard itself down" reasoning as
-run_backtest.py, which this deliberately parallels file-for-file rather
-than reusing (see the Critical Architecture Rule this feature was built
-under: never touch the existing Backtest screen's own execution path).
+web/app.py's POST /api/optimizations, web/templates/optimization.html).
 
-Every parameter combination in the sweep is run SEQUENTIALLY inside this
-ONE subprocess, not one subprocess per combination - a wide sweep (many
-hard_stop_R x trailing_activation_R values) would otherwise repeat the
-exact concurrent-subprocess memory pressure that motivated chunking the
-New Backtest page's own multi-day runs down to 5-day groups. Each combo
-still gets a fully independent, correct backtest_runner.run_one_strategy
-call (real chronological simulation, entry to exit, same as any other
-strategy) - "sequential" here only means the OS-process boundary, not
-anything about how one combo's trades are processed.
+Two ways a sweep's combinations actually get computed, matching the New
+Backtest page's own local/remote split:
 
-hard_stop_R/trailing_trigger_R are already fully runtime-configurable via
-rules_json (that's literally how v4.1 and v4.2 differ - see backtest_
-engine.py's "no_stop_delayed_trail" management_style and its opt-in
-exit_cfg["hard_stop_R"]), so this script needs ZERO backtest_engine.py
-changes - it just deep-copies the v4.3 base strategy's own rules_json
-once per combination and overrides those two exit_cfg values before
-calling run_one_strategy, exactly like a human hand-editing rules.json
-between runs would.
+  - LOCAL (main()/run_optimization() below): spawned as its own isolated
+    subprocess by the dashboard - same "a memory-heavy run must never
+    risk taking the dashboard itself down" reasoning as run_backtest.py.
+    Every combination runs SEQUENTIALLY inside this ONE subprocess, not
+    one subprocess per combination - a wide sweep would otherwise repeat
+    the exact concurrent-subprocess memory pressure that motivated
+    chunking the New Backtest page's own multi-day runs. Each combo
+    still gets a fully independent, correct backtest_runner.run_one_
+    strategy call (real chronological simulation, entry to exit) -
+    "sequential" here only means the OS-process boundary.
+
+  - REMOTE (aggregate_from_children() below, called periodically by
+    web/app.py's _aggregate_optimizations_loop - no subprocess of this
+    script runs at all in this path): each combination is dispatched as
+    its own ordinary REMOTE backtest row (see db.create_backtest's own
+    optimization_id param), reusing the EXISTING worker claim/result
+    protocol (backtest_worker.py, docs/worker.md) completely unchanged -
+    a worker has no idea it's running an Optimization Lab combination
+    rather than a normal backtest. Once every one of a sweep's child
+    backtests reaches a terminal state, aggregate_from_children pulls
+    their results back together into the same combos/best shape the
+    local path produces.
+
+Either way, hard_stop_R/trailing_trigger_R are already fully runtime-
+configurable via rules_json (that's literally how v4.1 and v4.2 differ -
+see backtest_engine.py's "no_stop_delayed_trail" management_style and its
+opt-in exit_cfg["hard_stop_R"]), so NEITHER path needed any backtest_
+engine.py changes - a combination is just the v4.3 base strategy's own
+rules_json with those two exit_cfg values overridden (locally via a
+plain deep-copy; remotely via src/backtest_runner.run_backtest_params's
+own new "rules_override" param, applied identically for a local or
+remote ordinary backtest too - unused, so unaffected, unless something
+sets it), exactly like a human hand-editing rules.json between runs
+would produce.
 """
 import argparse
 import copy
@@ -61,6 +75,61 @@ def _objective_value(stats: dict, objective: str) -> float:
     if value is None or value == "n/a":
         return float("-inf")
     return float(value)
+
+
+def _finalize(optimization_id: int, combos: list[dict], objective: str, failed_note: str | None = None):
+    """Shared by both the local and remote paths: picks "best" and writes
+    the terminal result - db.finish_optimization when at least one combo
+    actually produced stats, db.fail_optimization when none did (e.g.
+    every remote combination itself failed - `failed_note` names why)."""
+    if not combos:
+        db.fail_optimization(optimization_id, failed_note or "No combinations produced a result")
+        print(f"optimization {optimization_id}: failed - no combinations produced a result")
+        return
+    best = max(combos, key=lambda c: _objective_value(c["stats"], objective))
+    db.finish_optimization(optimization_id, {"combos": combos, "best": best, "objective": objective})
+    print(f"optimization {optimization_id}: done ({len(combos)} combination(s))")
+
+
+def aggregate_from_children(optimization_id: int) -> bool:
+    """Called periodically by web/app.py's _aggregate_optimizations_loop
+    for a REMOTE-mode sweep (see this module's own docstring) - checks
+    whether every child backtest db.create_backtest tagged with this
+    optimization_id has reached a terminal state ('done'/'failed'), and
+    if so, pulls their results together into the same combos/best shape
+    run_optimization() below produces for a local sweep, then finishes
+    (or fails) the optimization row itself.
+
+    Returns True if this call actually finalized the optimization (so
+    the caller's loop can stop polling it), False if it's still waiting
+    on at least one child (nothing else happens in that case - the next
+    periodic tick checks again)."""
+    record = db.get_optimization(optimization_id)
+    if record is None or record["status"] not in ("pending", "running"):
+        return False
+    children = db.list_optimization_child_backtests(optimization_id)
+    if not children or any(c["status"] not in ("done", "failed") for c in children):
+        return False  # still waiting on at least one combination (or none dispatched yet)
+
+    base_strategy_key = str(record["params"]["base_strategy_id"])
+    combos = []
+    failed_count = 0
+    for child in children:
+        combo_params = child["params"]
+        hard_stop_r = combo_params.get("hard_stop_r")
+        trailing_activation_r = combo_params.get("trailing_activation_r")
+        strategy_result = (child["results"] or {}).get(base_strategy_key) if child["status"] == "done" else None
+        if not strategy_result or "pairs" not in strategy_result:
+            failed_count += 1
+            continue
+        combos.append({
+            "hard_stop_r": hard_stop_r,
+            "trailing_activation_r": trailing_activation_r,
+            "stats": _stats(strategy_result["pairs"]),
+        })
+    note = f"{failed_count} of {len(children)} combination(s) failed and none of the rest succeeded" if failed_count else None
+    _finalize(optimization_id, combos, record["params"].get("objective", "net_pnl"), failed_note=note)
+    return True
 
 
 def run_optimization(optimization_id: int):
@@ -101,9 +170,7 @@ def run_optimization(optimization_id: int):
                 print(f"optimization {optimization_id}: {label} -> "
                       f"{combos[-1]['stats']['total_trades']} trade(s)")
 
-        best = max(combos, key=lambda c: _objective_value(c["stats"], objective)) if combos else None
-        db.finish_optimization(optimization_id, {"combos": combos, "best": best, "objective": objective})
-        print(f"optimization {optimization_id}: done ({len(combos)} combination(s))")
+        _finalize(optimization_id, combos, objective)
     except Exception as exc:  # noqa: BLE001 - a bad run must record failure, not crash silently
         db.fail_optimization(optimization_id, f"{type(exc).__name__}: {exc}")
         print(f"optimization {optimization_id}: failed - {type(exc).__name__}: {exc}")
