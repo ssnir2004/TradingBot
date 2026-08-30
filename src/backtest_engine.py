@@ -89,6 +89,24 @@ def _yf_history(yf_symbol: str, **kwargs) -> pd.DataFrame:
         executor.shutdown(wait=False)
 
 
+def _last_completed_trading_day(today: date) -> date:
+    """The most recent weekday whose regular session has already fully
+    closed as of `today` - Friday when `today` is Sat/Sun/Mon, otherwise
+    just yesterday. Used to decide whether a cached daily-bar tail is
+    "fresh enough" without re-asking yfinance - a plain "yesterday"
+    threshold is wrong on a Sat/Sun/Mon (Friday's own bar is still the
+    freshest one that COULD exist, but "yesterday" is a non-trading day
+    then), which was needlessly re-triggering a full-universe yfinance
+    re-fetch attempt on every single backtest run over an entire weekend.
+    Doesn't know about exchange holidays (a full market calendar is more
+    than this needs) - a holiday just means one extra, harmless re-fetch
+    attempt that yfinance correctly returns empty for (see fetch_daily_
+    bars' own `if fresh.empty: return cached` below), same as it always
+    has, just far less often than every weekend."""
+    offset = {5: 1, 6: 2, 0: 3}.get(today.weekday(), 1)
+    return today - timedelta(days=offset)
+
+
 def fetch_daily_bars(symbol: str) -> pd.DataFrame | None:
     """Daily history via yfinance, cached to disk forever (same cache as
     the intraday IBKR bars, keyed by DAILY_BAR_SIZE) so repeat backtest
@@ -103,7 +121,7 @@ def fetch_daily_bars(symbol: str) -> pd.DataFrame | None:
     yf_symbol = symbol.replace(" ", "-")
     cached = backtest_data.load_cached_bars(symbol, DAILY_BAR_SIZE)
     if cached is not None and not cached.empty:
-        if cached.index.max().date() >= date.today() - timedelta(days=1):
+        if cached.index.max().date() >= _last_completed_trading_day(date.today()):
             return cached
         try:
             fresh = _yf_history(yf_symbol, start=cached.index.max().date(), interval="1d")
