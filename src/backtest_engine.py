@@ -285,6 +285,46 @@ def _quality_filters_pass(entry_ctx: dict, detail: dict, quality_cfg: dict) -> t
     return True, None
 
 
+def _quality_score(entry_ctx: dict, detail: dict, conditions: dict) -> tuple[int, dict]:
+    """Score-based counterpart to _quality_filters_pass (currently ORB
+    Long v5.1 only - see EXTRA_STRATEGY_PRESETS' own v5.1 comment in
+    src/db.py): each of up to 5 independently-optional conditions below
+    contributes at most 1 point (same "key not present in `conditions` ->
+    not checked at all" convention as _quality_filters_pass), returning
+    (total score, {condition_name: bool}) rather than a single pass/fail -
+    the caller decides its own min-score threshold, and the per-condition
+    dict is what the Quality Score Analysis reporting needs to explain
+    WHY a trade scored what it did, not just the number.
+
+    Same fail-closed convention as _quality_filters_pass: missing/None
+    data scores that condition as failed (0), never skipped - this is a
+    backtest-only research scoring system, not a live safety gate, so
+    "can't verify -> don't award the point" is the more defensible
+    default."""
+    checks = {}
+    if "es_vwap_dist_pct_min" in conditions or "es_vwap_dist_pct_max" in conditions:
+        dist = entry_ctx.get("es_vwap_dist_pct")
+        lo = conditions.get("es_vwap_dist_pct_min", float("-inf"))
+        hi = conditions.get("es_vwap_dist_pct_max", float("inf"))
+        checks["es_vwap_distance"] = dist is not None and lo <= dist <= hi
+    if "atr_pct_min" in conditions or "atr_pct_max" in conditions:
+        atr_pct = detail.get("atr_pct")
+        lo = conditions.get("atr_pct_min", float("-inf"))
+        hi = conditions.get("atr_pct_max", float("inf"))
+        checks["atr"] = atr_pct is not None and lo <= atr_pct <= hi
+    if "breakout_atr_ratio_min" in conditions or "breakout_atr_ratio_max" in conditions:
+        ratio = entry_ctx.get("breakout_candle_range_atr_ratio")
+        lo = conditions.get("breakout_atr_ratio_min", float("-inf"))
+        hi = conditions.get("breakout_atr_ratio_max", float("inf"))
+        checks["breakout_atr_ratio"] = ratio is not None and lo <= ratio <= hi
+    if conditions.get("es_or_direction_bullish"):
+        checks["es_or_direction"] = entry_ctx.get("es_or_direction") == "Bullish"
+    if conditions.get("es_trend_strength_positive"):
+        strength = entry_ctx.get("es_trend_strength")
+        checks["es_trend_strength"] = strength is not None and strength > 0
+    return sum(checks.values()), checks
+
+
 def simulate_strategy(
     strategy_rules: dict,
     side: str,
@@ -1133,6 +1173,28 @@ def simulate_orb_strategy(
                         quality_ok, failed_filter = _quality_filters_pass(entry_ctx, detail, quality_cfg)
                         if not quality_ok:
                             filter_stats[f"quality_reject_{failed_filter}"] = filter_stats.get(f"quality_reject_{failed_filter}", 0) + 1
+                            continue
+
+                    # Score-based layer (currently ORB Long v5.1 only, see
+                    # EXTRA_STRATEGY_PRESETS' own v5.1 comment in
+                    # src/db.py) - runs AFTER the mandatory quality_cfg
+                    # gate above (only a candidate that already cleared
+                    # every mandatory filter gets scored at all), and is
+                    # itself independently optional the same way -
+                    # absent for every strategy except v5.1, so this can
+                    # only ever narrow v5.1's own trade set. The score is
+                    # attached to entry_ctx (so **entry_ctx below carries
+                    # it onto the trade record, for the Quality Score
+                    # Analysis reporting) whether or not this candidate
+                    # ends up rejected by min_score - a rejected one just
+                    # never reaches trades.append at all.
+                    score_cfg = strategy_rules.get("quality_score_filters")
+                    if score_cfg:
+                        score, score_checks = _quality_score(entry_ctx, detail, score_cfg.get("conditions", {}))
+                        entry_ctx["quality_score"] = score
+                        entry_ctx["quality_score_detail"] = score_checks
+                        if score < score_cfg.get("min_score", 0):
+                            filter_stats["quality_score_reject"] = filter_stats.get("quality_score_reject", 0) + 1
                             continue
 
                     # position_size_multiplier (currently ORB Long/Short v4

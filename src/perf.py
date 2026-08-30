@@ -131,6 +131,17 @@ def pair_trades(rows: list[dict]) -> list[dict]:
                 # that predates this (any non-ORB pair, or an ORB pair
                 # from before this feature shipped).
                 **{k: open_row.get(k) for k in entry_metrics.ENTRY_METRICS_KEYS},
+                # Quality-score gate result (currently ORB Long v5.1 only -
+                # see backtest_engine._quality_score) - deliberately NOT
+                # part of entry_metrics.ENTRY_METRICS_KEYS above, since
+                # it's computed by backtest_engine.py itself (layered on
+                # top of entry_metrics' own output), not entry_metrics.py.
+                # None for every trade whose strategy doesn't opt into
+                # rules["quality_score_filters"]. Off the OPEN leg, same
+                # entry-time-snapshot reasoning as the entry_metrics spread
+                # just above.
+                "quality_score": open_row.get("quality_score"),
+                "quality_score_detail": open_row.get("quality_score_detail"),
             })
             open_row["_remaining"] -= matched
             remaining -= matched

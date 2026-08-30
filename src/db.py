@@ -1655,6 +1655,146 @@ EXTRA_STRATEGY_PRESETS = [
         "מחקר ה-ablation לפני כל שיקול נוסף.",
     ),
     (
+        # v5.1 of ORB Long - a two-layer rework of v5's own all-must-pass
+        # quality_filters gate (see v5's own comment above): SAME base
+        # entry logic/risk/exit as v3/v5 (opening_range/universe_filters/
+        # volatility_filters/entry_confluence/entry_models/es_vwap_filter/
+        # exit/risk are all byte-for-byte copies), but a candidate now
+        # only needs to clear 3 MANDATORY filters (entry time via
+        # time_filter, pullbacks, ES direction) plus a SCORE threshold
+        # (>=3 of 5 points) instead of ALL 6 of v5's own filters.
+        #   - Mandatory: reuses backtest_engine._quality_filters_pass
+        #     UNCHANGED - this rules_json's own "quality_filters" key
+        #     just omits the es_vwap_dist_pct_*/atr_pct_*/breakout_atr_
+        #     ratio_* sub-keys (each one is already independently
+        #     optional there), so only pullbacks_max/es_above_vwap_
+        #     required are actually checked. Entry time is still v3/v5's
+        #     own time_filter mechanism, unchanged.
+        #   - Score: a NEW rules_json key, "quality_score_filters", read
+        #     by backtest_engine.py's new _quality_score() (called right
+        #     after the mandatory gate above, using the SAME already-
+        #     computed entry_ctx/detail - no second computation) - each
+        #     of its 5 "conditions" sub-keys is worth 1 point (v5's own
+        #     ES-distance/ATR%/breakout-ATR-ratio bands, plus two new
+        #     ones: ES OR direction, ES trend strength), a candidate
+        #     scoring below min_score is rejected exactly like a failed
+        #     mandatory filter, and the score itself (plus a per-
+        #     condition breakdown) is attached onto entry_ctx so it rides
+        #     along into the trade record via the existing **entry_ctx
+        #     merge - never a second, possibly-drifting computation for
+        #     reporting.
+        # Both v5 and v5.1 keep their own strategy rows (v5 untouched) so
+        # a comparative backtest (v3 vs v5 vs v5.1) has both to compare
+        # against - see analyze_v5_1_score.py for that comparison, the
+        # score-bucketed (0-5) outcome table, and the optimal-threshold
+        # edge validation.
+        "ORB Long v5.1 (Quality Score Entry System)",
+        {
+            "strategy_name": "ORB Long v5.1 (Quality Score Entry System)",
+            "direction": "long_only",
+            "es_vwap_filter": True,
+            "opening_range": {
+                "or_timeframe": "15m",
+                "confirm_timeframe": "5m",
+                "entry_timeframe": "5m",
+                "session": "new_york",
+                "session_open_et": "09:30",
+            },
+            "universe_filters": {
+                "index": "S&P 500",
+                "min_price_usd": 3.0,
+                "custom_universe": "sp500_marketcap_1b",
+            },
+            "volatility_filters": {
+                "V1_rvol_min": 2.0,
+                "V1_rvol_lookback_days": 14,
+                "V2_atr_period": 14,
+                "V2_atr_pct_tiers": [
+                    {"price_min": 3.0, "price_max": 20.0, "atr_pct_min": 4.0},
+                    {"price_min": 20.0, "price_max": 50.0, "atr_pct_min": 3.0},
+                    {"price_min": 50.0, "price_max": 100.0, "atr_pct_min": 2.0},
+                    {"price_min": 100.0, "price_max": None, "atr_pct_min": 1.5},
+                ],
+            },
+            "entry_confluence": {
+                "rsi_period": 14,
+                "rsi_rising_bars": 3,
+                "ema_period": 20,
+            },
+            "entry_models": {
+                "breakout": {"enabled": True},
+                "retest": {"enabled": True},
+            },
+            # Mandatory Filter #1 (Entry Time) - same 09:50-10:00 window
+            # as v5.
+            "time_filter": {"earliest_entry_et": "09:50", "latest_entry_et": "10:00", "force_close_et": "15:51"},
+            "exit": {
+                "management_style": "staged_trail",
+                "breakeven_trigger_R": 1.5,
+                "trailing_trigger_R": 2.5,
+                "profit_lock_offset_R": 0.50,
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+                "min_stop_distance_pct": 0.25,
+            },
+            # Mandatory Filters #2-3 - see backtest_engine._quality_filters_pass.
+            # (v5's own es_vwap_dist_pct_*/atr_pct_*/breakout_atr_ratio_*
+            # sub-keys deliberately NOT present here - those 3 moved to
+            # quality_score_filters below.)
+            "quality_filters": {
+                "pullbacks_max": 2,
+                "es_above_vwap_required": True,
+            },
+            # Quality Score System - see backtest_engine._quality_score.
+            # Each condition below is worth 1 point (max 5); a candidate
+            # needs min_score to be taken.
+            "quality_score_filters": {
+                "min_score": 3,
+                "conditions": {
+                    "es_vwap_dist_pct_min": 0.10,
+                    "es_vwap_dist_pct_max": 0.40,
+                    "atr_pct_min": 2.5,
+                    "atr_pct_max": 3.5,
+                    "breakout_atr_ratio_min": 0.20,
+                    "breakout_atr_ratio_max": 0.45,
+                    "es_or_direction_bullish": True,
+                    "es_trend_strength_positive": True,
+                },
+            },
+        },
+        "aggressive",
+        "long",
+        "## מה זה עושה\n"
+        "גרסה 5.1 של ORB Long - שכתוב דו-שכבתי של מנגנון הסינון של v5 (בלי לגעת ב-v5 עצמה, "
+        "שנשארת כאסטרטגיה נפרדת להשוואה). תנאי כניסה בסיסיים, ניהול סיכון, וניהול פוזיציה "
+        "**זהים לחלוטין** ל-v3/v5. השינוי: במקום ש-6 הפילטרים של v5 יהיו כולם חובה (AND), רק "
+        "3 מהם הפכו לחובה, וה-3 הנותרים (יחד עם 2 תנאים חדשים) עברו למערכת ניקוד - עסקה "
+        "מתקבלת אם הניקוד המצטבר הוא 3 ומעלה מתוך 5. המטרה: לצמצם over-filtering תוך שמירה "
+        "על איכות העסקה.\n\n"
+        "## שכבה 1 - פילטרים חובה (כולם חייבים להתקיים)\n"
+        "1. **חלון זמן**: 09:50-10:00 ET.\n"
+        "2. **Pullbacks**: 0 עד 2 pullbacks לפני הכניסה.\n"
+        "3. **כיוון ES**: ES חייב להיסחר מעל ה-VWAP שלו.\n\n"
+        "## שכבה 2 - מערכת ניקוד (כל תנאי = נקודה אחת, סף כניסה: 3 מתוך 5)\n"
+        "1. **מרחק ES מ-VWAP**: בין 0.10% ל-0.40%.\n"
+        "2. **ATR%**: בין 2.5% ל-3.5%.\n"
+        "3. **יחס נר הפריצה ל-ATR**: בין 0.20 ל-0.45.\n"
+        "4. **כיוון ה-OR של ES**: Bullish.\n"
+        "5. **עוצמת מגמת ES**: חיובית (> 0).\n\n"
+        "## יקום, פילטרי כניסה בסיסיים, ניהול פוזיציה\n"
+        "זהה לחלוטין ל-ORB Long v3/v5.\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive - אסטרטגיה חדשה לגמרי שלא נבדקה כלל. סיכון לעסקה: 1% | גודל פוזיציה "
+        "מקס': 10% | פוזיציות בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "אין לזה שום היסטוריית בקטסט עדיין. כל אזהרות ORB Long v3/v5 תקפות כאן. הרץ בקטסט "
+        "מקיף (חודשים, מאות עסקאות פוטנציאליות) והשווה מול v3 ו-v5 לפני כל שיקול נוסף - ראה "
+        "analyze_v5_1_score.py, כולל טבלת ניקוד (0-5) ובחינת סף אופטימלי.",
+    ),
+    (
         # Experimental "fade" pair for ORB v2, same signal_side mechanism
         # (and same research motivation) as "Long Breakout Fade (Short)"/
         # "Short Breakdown Fade (Long)" above, extended to
