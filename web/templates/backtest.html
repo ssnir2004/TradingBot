@@ -1156,6 +1156,7 @@ function renderStrategyReportEntry(entry) {
       <span>
         ${entry.low_sample ? `<span class="badge bg-warning text-dark" title="Fewer than ${STRATEGY_REPORT_LOW_SAMPLE_TRADES} pooled trades - too small a sample to draw real conclusions from yet">small sample</span>` : ""}
         <a class="btn btn-sm btn-outline-secondary ms-1" href="/api/strategies/${entry.strategy_id}/trades.pdf" title="Download every pooled trade for this strategy as a PDF">PDF ⬇</a>
+        <a class="btn btn-sm btn-outline-secondary ms-1" href="/api/strategies/${entry.strategy_id}/trades.xlsx" title="Download every pooled trade for this strategy as an Excel workbook">Excel ⬇</a>
         <button type="button" class="btn btn-sm btn-outline-secondary ms-1" onclick="toggleStrategyDiagnostics(${entry.strategy_id}, this)">Diagnostics</button>
       </span>
     </div>

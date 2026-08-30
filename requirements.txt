@@ -15,3 +15,4 @@ python-multipart
 cryptography
 reportlab
 python-bidi
+openpyxl

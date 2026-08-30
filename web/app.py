@@ -23,7 +23,7 @@ from fastapi.templating import Jinja2Templates
 
 import cycle
 import morning_prefilter
-from src import backtest_data, backtest_engine, db, gateway_provisioning, mode_config, perf, secrets_store, trade_diagnostics, trades_pdf
+from src import backtest_data, backtest_engine, db, gateway_provisioning, mode_config, perf, secrets_store, trade_diagnostics, trades_pdf, trades_xlsx
 from src.sp500_tickers import SP500_TICKERS
 from web import gateway_control
 from web.auth import COOKIE_NAME, make_session_cookie, read_session, require_user
@@ -1377,6 +1377,33 @@ def api_strategy_trades_pdf(strategy_id: int, account_id: int = Depends(require_
     return Response(
         content=pdf_bytes, media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{safe_name}_trades.pdf"'},
+    )
+
+
+@app.get("/api/strategies/{strategy_id}/trades.xlsx")
+def api_strategy_trades_xlsx(strategy_id: int, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    """Full trade-by-trade Excel workbook for one strategy - same pooling/
+    scoping as trades.pdf just above (see its own docstring), but with
+    real numeric cells (sortable/filterable/pivotable in Excel) instead of
+    a print layout, plus a Summary sheet mirroring the PDF's own summary/
+    Exit Reason Breakdown sections. See src/trades_xlsx.py."""
+    strategy = db.get_strategy(strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    pooled = perf.pooled_trades_for_strategy(db.list_done_backtest_results(account_id), strategy_id)
+    if not pooled:
+        raise HTTPException(status_code=404, detail="No completed backtests for this strategy yet")
+    report = trade_diagnostics.full_report(pooled["pairs"], has_profit_lock=_strategy_has_profit_lock(strategy))
+    xlsx_bytes = trades_xlsx.build_trades_xlsx(
+        pooled["strategy_name"], pooled["direction"], pooled["backtests_included"],
+        pooled["aggregate"], report["pairs"],
+        diagnostics={"summary": report["summary"], "exit_reason_breakdown": report["exit_reason_breakdown"]},
+        description=strategy["description"],
+    )
+    safe_name = re.sub(r"[^A-Za-z0-9]+", "_", pooled["strategy_name"]).strip("_")
+    return Response(
+        content=xlsx_bytes, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}_trades.xlsx"'},
     )
 
 
