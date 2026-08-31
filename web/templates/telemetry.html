@@ -249,13 +249,18 @@
           <table class="table table-sm table-hover mono" id="tel-matrix-table">
             <thead>
               <tr>
-                <th>Rule</th><th>TP</th><th>FP</th><th>FN</th><th>TN</th><th>Excl. N/A</th>
+                <th>Rule</th><th>Offset</th><th>TP</th><th>FP</th><th>FN</th><th>TN</th><th>Excl. N/A</th><th>Excl. Missing Data</th>
                 <th>Precision</th><th>Recall</th><th>F1</th><th>Accuracy</th>
                 <th>Flagged</th><th>Net Benefit R</th><th>Net Benefit $</th><th>PF Impact</th><th>Max DD Impact</th>
+                <th>Label</th><th>Net Benefit R vs V3</th>
               </tr>
             </thead>
-            <tbody id="tel-matrix-body"><tr><td colspan="15" class="text-center text-muted">Pick rules above and click "Evaluate Selected Rules"</td></tr></tbody>
+            <tbody id="tel-matrix-body"><tr><td colspan="19" class="text-center text-muted">Pick rules above and click "Evaluate Selected Rules"</td></tr></tbody>
           </table>
+        </div>
+        <div class="small text-muted mt-2">
+          "vs V3" columns compare against Early Failure V3's own result in this same evaluation (blank if V3 isn't
+          selected above). Full detail - Rankings by every axis, per-rule Trades sheets - is in the Excel export.
         </div>
       </div>
     </div>
@@ -329,10 +334,10 @@
             מתוך רשימה (ראו "ארבעת כללי Early Failure" למטה), והמערכת מריצה הערכה אוטומטית מלאה:
           </p>
           <ul class="small">
-            <li><strong>Confusion Matrix</strong> — הכלל מול התוצאה האמיתית (Hard Stop בפועל): True/False Positive/Negative, Precision, Recall, F1, Accuracy, Balanced Accuracy. "Total trades evaluated" סופר רק טריידים שהכלל היה יכול להיבדק עליהם בכלל (ראו "לא ניתן להערכה" למטה).</li>
-            <li><strong>Rule Outcome Breakdown</strong> — מבין הטריידים שהכלל היה מפעיל עליהם, כמה בפועל הפכו ל-Hard Stop, Trailing Winner, End Of Day Winner/Loser, או אחר.</li>
-            <li><strong>Net Benefit Engine</strong> — לכל טרייד מסומן: Delta R = ה-R בנקודת ההערכה פחות ה-Final R בפועל. <strong>Net Benefit R/$ מחושב כעת על סכום Delta R/$ של <u>כל</u> הטריידים המסומנים</strong> (Hard Stop, Trailing Winner, End Of Day Winner/Loser ואחר — כולם, לא רק שני הקטגוריות הראשונות). "Hard Stop Savings R" ו-"Recovery Winner Cost R" נשארים כפירוט נפרד: כמה מתוך Net Benefit R הגיע מטריידים שהפכו ל-Hard Stop בפועל וכמה מטריידים שהפכו ל-Trailing Winner בפועל — וגם השפעה משוערת על Profit Factor ו-Max Drawdown של כל התיק.</li>
-            <li><strong>Candidate Trades</strong> — טבלת כל הטריידים שהכלל היה מסמן, לניתוח פרטני וייצוא.</li>
+            <li><strong>Confusion Matrix</strong> — הכלל מול התוצאה האמיתית (Hard Stop בפועל): True/False Positive/Negative, Precision, Recall, F1, Accuracy, Balanced Accuracy. "Total trades evaluated" סופר רק טריידים שהכלל היה יכול להיבדק עליהם בכלל (ראו "לא ניתן להערכה" ו-"נתונים חסרים" למטה).</li>
+            <li><strong>Rule Outcome Breakdown</strong> — מבין הטריידים שהכלל היה מפעיל עליהם, כמה בפועל הפכו ל-Hard Stop, Trailing Winner, Trailing Loser, End Of Day Winner/Loser, Flat Trade, או אחר.</li>
+            <li><strong>Net Benefit Engine</strong> — לכל טרייד מסומן: Delta R = ה-R בנקודת ההערכה פחות ה-Final R בפועל. <strong>Net Benefit R/$ מחושב על סכום Delta R/$ של <u>כל</u> הטריידים המסומנים</strong> (Hard Stop, Trailing Winner, End Of Day Winner/Loser, Flat Trade ואחר — כולם). "Hard Stop Savings R" ו-"Recovery Winner Cost R" נשארים כפירוט נפרד: כמה מתוך Net Benefit R הגיע מטריידים שהפכו ל-Hard Stop בפועל וכמה מטריידים שהפכו ל-Trailing Winner בפועל — וגם "EOD Winners Sacrificed"/"EOD Losers Improved" (טרייד שהפך ל-EOD Loser אבל היציאה המוקדמת הקטינה את ההפסד שלו נספר כ"Improved"), וגם השפעה משוערת על Profit Factor ו-Max Drawdown של כל התיק.</li>
+            <li><strong>Candidate Trades</strong> — טבלת כל הטריידים שהכלל היה מסמן, לניתוח פרטני וייצוא. עמודות "Signal Current R"/"Estimated Simulated Fill R" זהות מספרית ל-"Current R" — למודול הזה אין מודל Slippage/הוצאה נפרדת (רק Commission קבוע לכל טרייד, שלא נכנס לחישוב R בכלל), אז המחיר בנקודת ההערכה הוא גם ה"אות" וגם ה-Fill המשוער היחיד שאפשר להפיק מהנתונים — לכן נקרא "Estimated" ולא "Simulated Fill" סתם, כדי לא לתת רושם של דיוק שאין.</li>
           </ul>
           <p class="small text-muted">
             <strong>לא ניתן להערכה (rule not applicable):</strong> טרייד שיצא בפועל <strong>לפני</strong>
@@ -341,22 +346,49 @@
             Candidate Trades — כי לכלל לא היה בכלל מידע להחליט עליו באותו רגע. מספר הטריידים
             שהוצאו כך מוצג בנפרד ("Excluded - rule not applicable"), לעולם לא בשקט.
           </p>
-          <h6 class="fw-bold mt-3">ארבעת כללי Early Failure</h6>
+          <p class="small text-muted">
+            <strong>נתונים חסרים (excluded_missing_required_data):</strong> טרייד שהיה פתוח כרונולוגית
+            בנקודת ההערכה (לא "לא ניתן להערכה"), אבל שדה טלמטרי ספציפי שהכלל צריך חסר בפועל (למשל
+            V6/V7 צריכים MFE/MAE R So Far, V5 צריך snapshot תקין ב-15 דקות לחישוב Recovery) — פער
+            נתונים אמיתי, לא סגירה מוקדמת של הטרייד. כלל כזה <strong>לא</strong> מסמן את הטרייד ו<strong>לא</strong>
+            סופר אותו כ-True/False Negative — הוא פשוט מוצא מהחישוב ומופיע בנפרד תחת
+            "Excluded - missing required data", כדי שלא ייצור רושם שקרי של "הכלל לא היה מפעיל כאן".
+          </p>
+          <h6 class="fw-bold mt-3">שבעת כללי Early Failure</h6>
           <ul class="small">
             <li><strong>Early Failure V1</strong> — הכלל המקורי: ב-10 דקות, Trailing עדיין לא הופעל, Current R &le; -0.40R, RSI Delta &le; -5, וגם (Returned Inside Opening Range <strong>או</strong> Lost EMA9).</li>
             <li><strong>Early Failure V2</strong> — כמו V1 אבל דורש ששני תנאי המבנה יתקיימו <strong>יחד</strong> (Returned Inside Opening Range <strong>וגם</strong> Lost EMA9) — בודק אם דרישה מחמירה יותר משפרת את ה-Precision.</li>
             <li><strong>Early Failure V3</strong> — גרסת "שבירת מבנה": כמו V1/V2 אבל דורש Returned Inside Opening Range בוודאות, וגם שבירה אמיתית של מבנה (Broke Retest Low <strong>או</strong> Broke Breakout Candle Low) במקום Lost EMA9.</li>
             <li><strong>Early Failure V4</strong> — גרסת "אישור מושהה": שלב 1 (אזהרה) ב-10 דקות זהה לחלק מ-V1, ורק אם הוא מתקיים נבדק שלב 2 (אישור יציאה) ב-15 דקות עם תנאים מחמירים יותר (Current R &le; -0.75R, RSI Delta &le; -8, המחיר מתחת ל-EMA9, ואין שיא אינטרא-דיי חדש מאז הכניסה) — נותן לטריידים שמתאוששים עוד 5 דקות לפני שמסמנים אותם.
               נקודת ההערכה של V4 היא +15m (לא +10m) — כלומר טרייד שיצא לפני 15 דקות "לא ניתן להערכה" עבור הכלל הזה.</li>
+            <li><strong>Early Failure V5</strong> — גרסת "מודעת להתאוששות": בדיוק כמו V4 (אזהרה ב-10 דקות, אישור ב-15 דקות), אבל האישור ב-15 דקות דורש בנוסף ששני קצבי השינוי בין 10 ל-15 דקות — R Recovery (15m Current R פחות 10m Current R) ו-RSI Recovery (15m RSI פחות 10m RSI, הערך הגולמי, לא ה-Delta) — יהיו <strong>שניהם</strong> &le; 0, כלומר הטרייד לא התחיל להתאושש. טרייד שמתחיל להתאושש בין 10 ל-15 דקות לא יסומן, גם אם שאר התנאים מתקיימים — זה בדיוק ההבדל מ-V4 (ש-V4 לא בודק כיוון תזוזה, רק את הערכים המוחלטים ב-15 דקות).</li>
+            <li><strong>Early Failure V6</strong> — גרסת "ללא התקדמות חיובית": ב-10 דקות בלבד, אותם תנאי חולשה (Current R &le; -0.40R, RSI Delta &le; -5, Returned Inside Opening Range, Lost EMA9), <strong>וגם</strong> הטרייד מעולם לא הראה תזוזה חיובית משמעותית (10m MFE R So Far &le; +0.30R).</li>
+            <li><strong>Early Failure V7</strong> — גרסת "יחס התקדמות": ב-10 דקות בלבד, משווה תזוזה חיובית מול שלילית: Progress Ratio = 10m MFE R So Far חלקי max(10m MAE R So Far, 0.05) &le; 0.30 (ה-0.05 הוא רצפה כדי למנוע חלוקה באפס לטרייד כמעט ללא תזוזה שלילית עדיין).</li>
           </ul>
           <h6 class="fw-bold mt-3">טאב Rule Evaluation Matrix</h6>
           <p>
             מריץ את אותה הערכה בדיוק (evaluate_rule) על כמה כללים בבת אחת, ומציג אותם זה לצד זה
             בטבלה אחת — Confusion Matrix, Precision/Recall/F1/Accuracy, כמה טריידים סומנו, ו-Net
             Benefit R/$ ו-Profit Factor/Max Drawdown Impact לכל כלל בשורה משלו. מיועד להשוות במהירות
-            בין V1/V2/V3/V4 (או כל כלל עתידי שיתווסף) על אותו scope בדיוק, בלי לעבור בין הכללים
-            אחד־אחד בטאב Rule Evaluation. יש כפתור ייצוא ל-Excel נפרד (גיליון סיכום + גיליון
-            Candidate Trades לכל כלל שנבחר).
+            בין כל שבעת הכללים (V1-V7, או כל כלל עתידי שיתווסף) על אותו scope בדיוק, בלי לעבור בין
+            הכללים אחד־אחד בטאב Rule Evaluation.
+          </p>
+          <p>
+            <strong>דירוג (Rankings)</strong> — בקובץ ה-Excex יש גיליון "Rankings" שמדרג את כל הכללים
+            לפי 8 צירים: Net Benefit R, Net Benefit $, Precision, Recall, F1, Profit Factor Impact,
+            Drawdown Reduction (הכי הרבה שיפור ב-Max Drawdown), ומספר הכי קטן של Trailing Winners
+            Sacrificed. תווית "Net Benefit R" כל כלל (Positive/Near Break-Even/Negative) היא לצורך
+            תצוגה בלבד — לא משנה שום מספר.
+          </p>
+          <p>
+            <strong>השוואה מול V3</strong> — כש-Early Failure V3 נכלל בהערכה, כל שאר הכללים מקבלים
+            עמודות "vs V3" (Net Benefit R, Net Benefit $, Precision, Recall, Trailing Winners
+            Sacrificed, Max Drawdown Impact) שמחושבות מהתוצאות של אותה הרצה בדיוק — לא ערך קבוע
+            מראש. אם V3 לא נבחר בהערכה הנוכחית, עמודות אלה ריקות.
+          </p>
+          <p>
+            יש כפתור ייצוא ל-Excel נפרד: גיליון "Matrix" (כל העמודות הנ"ל לכל כלל), גיליון "Rankings",
+            וגיליון "Trades" נפרד לכל כלל שנבחר (כל הטריידים המסומנים, לא רק True Positives).
           </p>
         </div>
         <div class="modal-footer">
@@ -701,7 +733,7 @@ function onScopeChange() {
   document.getElementById("tel-rule-error").textContent = "";
   document.getElementById("tel-matrix-error").textContent = "";
   document.getElementById("tel-export-matrix-xlsx").classList.add("disabled");
-  document.getElementById("tel-matrix-body").innerHTML = `<tr><td colspan="15" class="text-center text-muted">Pick rules above and click "Evaluate Selected Rules"</td></tr>`;
+  document.getElementById("tel-matrix-body").innerHTML = `<tr><td colspan="19" class="text-center text-muted">Pick rules above and click "Evaluate Selected Rules"</td></tr>`;
   if (picked) { loadTrades(); refreshAnalysis(); loadMetricColumns(); }
 }
 
@@ -902,9 +934,10 @@ async function evaluateRule() {
   exportLink.classList.remove("disabled");
   resultsEl.classList.remove("d-none");
 
-  document.getElementById("tel-rule-na-note").textContent = data.excluded_not_applicable
-    ? `${data.excluded_not_applicable} trade(s) excluded - the trade had already exited before this rule's own evaluation point (rule not applicable).`
-    : "";
+  const naNotes = [];
+  if (data.excluded_not_applicable) naNotes.push(`${data.excluded_not_applicable} trade(s) excluded - the trade had already exited before this rule's own evaluation point (rule not applicable).`);
+  if (data.excluded_missing_required_data) naNotes.push(`${data.excluded_missing_required_data} trade(s) excluded - required telemetry field(s) missing for this rule (data gap, not scored either way).`);
+  document.getElementById("tel-rule-na-note").textContent = naNotes.join(" ");
   renderConfusionMatrix(data.confusion_matrix);
   renderRuleMetrics(data.metrics);
   renderRuleDashboardCard(data.net_benefit);
@@ -946,6 +979,8 @@ function renderRuleDashboardCard(nb) {
     ["Hard Stops Captured", nb.hard_stops_captured],
     ["Hard Stops Missed", nb.hard_stops_missed],
     ["Trailing Winners Sacrificed", nb.trailing_winners_sacrificed],
+    ["EOD Winners Sacrificed", nb.eod_winners_sacrificed],
+    ["EOD Losers Improved", nb.eod_losers_improved],
     ["Hard Stop Savings R", fmtNum(nb.hard_stop_savings_r, 2)],
     ["Recovery Winner Cost R", fmtNum(nb.recovery_winner_cost_r, 2)],
     ["Net Benefit R", fmtNum(nb.net_benefit_r, 2)],
@@ -1024,17 +1059,22 @@ async function evaluateRuleMatrix() {
   exportLink.classList.remove("disabled");
 
   const results = data.results || [];
-  if (!results.length) { tbody.innerHTML = `<tr><td colspan="15" class="text-center text-muted">No results</td></tr>`; return; }
+  if (!results.length) { tbody.innerHTML = `<tr><td colspan="19" class="text-center text-muted">No results</td></tr>`; return; }
   tbody.innerHTML = results.map(r => {
-    const cm = r.confusion_matrix, m = r.metrics, nb = r.net_benefit || {};
+    const cm = r.confusion_matrix, m = r.metrics, nb = r.net_benefit || {}, vs3 = r.vs_v3 || {};
+    const labelBadge = r.net_benefit_label
+      ? `<span class="badge ${r.net_benefit_label.startsWith('Positive') ? 'bg-success' : r.net_benefit_label.startsWith('Negative') ? 'bg-danger' : 'bg-secondary'}">${r.net_benefit_label}</span>`
+      : "-";
     return `
     <tr>
-      <td>${r.label}</td><td>${cm.tp}</td><td>${cm.fp}</td><td>${cm.fn}</td><td>${cm.tn}</td>
-      <td>${r.excluded_not_applicable || 0}</td>
+      <td>${r.label}</td><td>${r.evaluation_offset || "-"}</td>
+      <td>${cm.tp}</td><td>${cm.fp}</td><td>${cm.fn}</td><td>${cm.tn}</td>
+      <td>${r.excluded_not_applicable || 0}</td><td>${r.excluded_missing_required_data || 0}</td>
       <td>${fmtNum(m.precision)}</td><td>${fmtNum(m.recall)}</td><td>${fmtNum(m.f1_score)}</td><td>${fmtNum(m.accuracy)}</td>
       <td>${nb.trades_flagged ?? 0}</td>
       <td>${fmtNum(nb.net_benefit_r, 2)}</td><td>${fmtNum(nb.net_benefit_dollars, 2)}</td>
       <td>${fmtNum(nb.profit_factor_impact, 3)}</td><td>${fmtNum(nb.max_drawdown_impact, 2)}</td>
+      <td>${labelBadge}</td><td>${vs3.net_benefit_r !== undefined && vs3.net_benefit_r !== null ? fmtNum(vs3.net_benefit_r, 2) : "-"}</td>
     </tr>`;
   }).join("");
 }
