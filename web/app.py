@@ -25,7 +25,7 @@ from fastapi.templating import Jinja2Templates
 import cycle
 import morning_prefilter
 import run_optimization
-from src import backtest_data, backtest_engine, db, gateway_provisioning, mode_config, perf, secrets_store, telemetry_engine, trade_diagnostics, trades_csv, trades_pdf, trades_xlsx
+from src import backtest_data, backtest_engine, db, gateway_provisioning, mode_config, perf, risk_reduction_report, secrets_store, telemetry_engine, trade_diagnostics, trades_csv, trades_pdf, trades_xlsx
 from src.sp500_tickers import SP500_TICKERS
 from web import gateway_control
 from web.auth import COOKIE_NAME, make_session_cookie, read_session, require_user
@@ -1853,6 +1853,63 @@ def api_retry_backtest(backtest_id: int, account_id: int = Depends(require_accou
     new_id = _start_backtest(account_id, user, record["params"], record["execution_mode"])
     _log_account_action(account_id, user, action="retry_backtest", backtest_id=backtest_id, new_backtest_id=new_id)
     return {"id": new_id}
+
+
+def _risk_reduction_context(backtest_id: int, account_id: int, baseline_strategy_id: int, variant_strategy_ids: str):
+    """Shared validation for both risk-reduction-report routes below -
+    resolves and checks the backtest + strategy ids once, so the JSON and
+    .xlsx endpoints can never disagree about what counts as a valid
+    request."""
+    backtest = db.get_backtest(backtest_id)
+    if backtest is None or backtest["account_id"] != account_id:
+        raise HTTPException(status_code=404, detail="Backtest not found")
+    if backtest["status"] != "done":
+        raise HTTPException(status_code=400, detail=f"Backtest is not done (status={backtest['status']})")
+    results = backtest["results"] or {}
+    baseline_id = str(baseline_strategy_id)
+    variant_ids = [v for v in variant_strategy_ids.split(",") if v]
+    if not variant_ids:
+        raise HTTPException(status_code=400, detail="variant_strategy_ids must include at least one strategy id")
+    missing = [sid for sid in [baseline_id, *variant_ids] if sid not in results or not isinstance(results.get(sid), dict) or "pairs" not in results[sid]]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Strategy id(s) {missing} have no results in this backtest")
+    labels = {sid: r.get("strategy_name", f"Strategy #{sid}") for sid, r in results.items() if isinstance(r, dict)}
+    return backtest, results, labels, baseline_id, variant_ids
+
+
+@app.get("/api/backtests/{backtest_id}/risk_reduction_report")
+def api_risk_reduction_report(
+    backtest_id: int, baseline_strategy_id: int, variant_strategy_ids: str,
+    account_id: int = Depends(require_account), user: str = Depends(require_user),
+):
+    """ORB Long V8/V9's own "Dynamic Risk Reduction" comparison report
+    (see src/risk_reduction_report.py) - a read-only view over ONE
+    already-finished multi-strategy backtest that included the baseline
+    (ORB Long v4.2) and one or more variants (V8/V9) together, matched by
+    (symbol, entry timestamp). variant_strategy_ids is comma-separated
+    (e.g. "8,9")."""
+    _backtest, results, labels, baseline_id, variant_ids = _risk_reduction_context(
+        backtest_id, account_id, baseline_strategy_id, variant_strategy_ids,
+    )
+    return risk_reduction_report.build_risk_reduction_report(results, labels, baseline_id, variant_ids)
+
+
+@app.get("/api/backtests/{backtest_id}/risk_reduction_report_export.xlsx")
+def api_risk_reduction_report_export(
+    backtest_id: int, baseline_strategy_id: int, variant_strategy_ids: str,
+    account_id: int = Depends(require_account), user: str = Depends(require_user),
+):
+    backtest, results, labels, baseline_id, variant_ids = _risk_reduction_context(
+        backtest_id, account_id, baseline_strategy_id, variant_strategy_ids,
+    )
+    report = risk_reduction_report.build_risk_reduction_report(results, labels, baseline_id, variant_ids)
+    scope_label = f"Backtest #{backtest_id} ({backtest['params'].get('start_date')} → {backtest['params'].get('end_date')})"
+    xlsx_bytes = risk_reduction_report.export_risk_reduction_report_xlsx(report, scope_label)
+    _log_account_action(account_id, user, action="risk_reduction_report_export", backtest_id=backtest_id, baseline_strategy_id=baseline_strategy_id, variant_strategy_ids=variant_ids)
+    return Response(
+        content=xlsx_bytes, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="orb_v8_v9_risk_reduction_report.xlsx"'},
+    )
 
 
 @app.get("/api/backtest_universe")

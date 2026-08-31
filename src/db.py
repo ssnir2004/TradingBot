@@ -1880,6 +1880,211 @@ EXTRA_STRATEGY_PRESETS = [
         "Optimization Lab, לא הרצה ישירה מדף ה-Backtest.",
     ),
     (
+        # ORB Long V8 - "Build ORB Long V8 and V9: Dynamic Risk Reduction
+        # Based On V6 Detection". Byte-for-byte copy of v4.2's own rules_
+        # json (opening_range/universe_filters/volatility_filters/entry_
+        # confluence/entry_models/time_filter/es_vwap_filter/risk/exit.
+        # hard_stop_R/exit.trailing_trigger_R - NOT repeated in v4.2's own
+        # comment, not touched here) with exactly one new opt-in key added
+        # under "exit": "dynamic_risk_reduction". Entry logic, breakout/
+        # retest logic, RSI/EMA/VWAP/RVOL filters, position sizing,
+        # commission model, hard stop initialization (-2.5R), and the
+        # trailing algorithm are ALL unchanged from v4.2 - see src.
+        # backtest_engine.simulate_orb_strategy's own "no_stop_delayed_
+        # trail" branch, where this key is read (Step 2, position-open
+        # time) and acted on (Step 1, the "V6 Risk Event" check) as a pure
+        # ADDITION, never a modification of any existing line - v4/v4.1/
+        # v4.2/v4.3/v5/v5.1 never set this key, so it is structurally
+        # unreachable for them.
+        #
+        # "V6 Risk Event": at the first bar >= trigger_offset_minutes
+        # (10) after entry, while still not yet trailing, if Current R <=
+        # current_r_max (-0.40R) AND RSI Delta <= rsi_delta_max (-5) AND
+        # the trade Returned Inside the Opening Range AND it Lost EMA9
+        # AND MFE R So Far <= mfe_r_max (+0.30R) - the SAME "Early Failure
+        # V6" rule src.telemetry_engine.py already evaluates POST-HOC on
+        # closed trades (see its own _early_failure_v6), computed LIVE
+        # here instead (src.backtest_engine._dynamic_risk_reduction_
+        # check) - the active hard stop is moved from -2.5R to new_hard_
+        # stop_R (2.0R for v8) - but ONLY if that's actually TIGHTER than
+        # whatever stop is already active ("never loosen a stop" - same
+        # one-way rule cycle._trailing_stop_decision already applies to
+        # trailing). The position is NEVER closed by this event itself -
+        # only its own hard-stop LEVEL changes; if the event never fires,
+        # or fires but the trade later activates trailing anyway, this
+        # strategy is byte-for-byte identical to v4.2.
+        "ORB Long V8 (Dynamic Risk Reduction 2.0R)",
+        {
+            "strategy_name": "ORB Long V8 (Dynamic Risk Reduction 2.0R)",
+            "direction": "long_only",
+            "es_vwap_filter": True,
+            "opening_range": {
+                "or_timeframe": "15m",
+                "confirm_timeframe": "5m",
+                "entry_timeframe": "5m",
+                "session": "new_york",
+                "session_open_et": "09:30",
+            },
+            "universe_filters": {
+                "index": "S&P 500",
+                "min_price_usd": 3.0,
+                "custom_universe": "sp500_marketcap_1b",
+            },
+            "volatility_filters": {
+                "V1_rvol_min": 2.0,
+                "V1_rvol_lookback_days": 14,
+                "V2_atr_period": 14,
+                "V2_atr_pct_tiers": [
+                    {"price_min": 3.0, "price_max": 20.0, "atr_pct_min": 4.0},
+                    {"price_min": 20.0, "price_max": 50.0, "atr_pct_min": 3.0},
+                    {"price_min": 50.0, "price_max": 100.0, "atr_pct_min": 2.0},
+                    {"price_min": 100.0, "price_max": None, "atr_pct_min": 1.5},
+                ],
+            },
+            "entry_confluence": {
+                "rsi_period": 14,
+                "rsi_rising_bars": 3,
+                "ema_period": 20,
+            },
+            "entry_models": {
+                "breakout": {"enabled": True},
+                "retest": {"enabled": True},
+            },
+            "time_filter": {"earliest_entry_et": "09:50", "latest_entry_et": "11:30", "force_close_et": "15:51"},
+            "exit": {
+                "management_style": "no_stop_delayed_trail",
+                "trailing_trigger_R": 1.20,
+                "hard_stop_R": 2.5,
+                "dynamic_risk_reduction": {
+                    "trigger_offset_minutes": 10,
+                    "current_r_max": -0.40,
+                    "rsi_delta_max": -5,
+                    "mfe_r_max": 0.30,
+                    "rsi_period": 14,
+                    "ema_period": 9,
+                    "new_hard_stop_R": 2.0,
+                },
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+                "min_stop_distance_pct": 0.25,
+                "initial_stop_r_multiplier": 1.40,
+                "position_size_multiplier": 2.0,
+            },
+        },
+        "aggressive",
+        "long",
+        "## מה זה עושה\n"
+        "גרסה V8 של ORB Long - **זהה לחלוטין** ל-v4.2 (יקום, כניסה, גודל פוזיציה, סטופ התחלתי "
+        "-2.5R, טריילינג) פרט לתוספת אחת: הפחתת סיכון דינמית שמתבססת על אירוע Risk Event שכבר "
+        "מוגדר כ-\"Early Failure V6\" בדשבורד ה-Trade Telemetry. **זו לא אסטרטגיית יציאה מוקדמת** "
+        "- הטרייד נשאר פתוח, רק רמת הסטופ הקשיח עשויה להתהדק.\n\n"
+        "## V6 Risk Event\n"
+        "ב-10 דקות אחרי הכניסה, אם כל אלה מתקיימים: הטריילינג עדיין לא הופעל, Current R ≤ -0.40R, "
+        "RSI Delta ≤ -5, המחיר חזר לתוך ה-Opening Range, ו-EMA9 אבד (המחיר היה מעליו בכניסה "
+        "ומתחתיו עכשיו), וגם MFE R So Far ≤ +0.30R (הטרייד מעולם לא הראה התקדמות חיובית משמעותית) "
+        "- הסטופ הקשיח הפעיל זז מ--2.5R ל--2.0R, **רק אם זה מהדק אותו בפועל** (לעולם לא מרפה סטופ "
+        "שכבר הדוק יותר). האירוע נבדק פעם אחת בלבד לכל טרייד, בדיוק ב-10 הדקות הראשונות שהטרייד "
+        "עדיין פתוח.\n\n"
+        "## הפעלת טריילינג ועדיפות\n"
+        "זהה לחלוטין ל-v4.2 - ברגע שהטריילינג מופעל (MFE ≥ +1.20R), הסטופ הקשיח (בין אם "
+        "-2.5R המקורי או -2.0R המהודק) מתעלם לחלוטין, בדיוק כמו ב-v4.2.\n\n"
+        "## יקום, פילטרי כניסה, גודל פוזיציה\n"
+        "זהה לחלוטין ל-ORB Long v4/v4.1/v4.2 - שום דבר מהם לא השתנה.\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive - אסטרטגיה חדשה לגמרי שלא נבדקה כלל. סיכון לעסקה (base): 1% | גודל "
+        "פוזיציה מקס': 10% | פוזיציות בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "אין לזה שום היסטוריית בקטסט עדיין. כל אזהרות ORB Long v4.2 תקפות כאן. הרץ בקטסט מקיף "
+        "והשווה מול v4.2 ו-V9 (אותה עסקה בדיוק - הכניסות זהות, רק הסטופ הקשיח שונה) לפני כל שיקול "
+        "נוסף. **כלי מחקר בלבד - אל תפעיל LIVE.**",
+    ),
+    (
+        # ORB Long V9 - identical to V8 above except new_hard_stop_R
+        # (1.5R instead of 2.0R) - a MORE aggressive tightening of the
+        # same "V6 Risk Event" mechanism. See V8's own comment for the
+        # full explanation of the shared mechanism, not repeated here.
+        "ORB Long V9 (Dynamic Risk Reduction 1.5R)",
+        {
+            "strategy_name": "ORB Long V9 (Dynamic Risk Reduction 1.5R)",
+            "direction": "long_only",
+            "es_vwap_filter": True,
+            "opening_range": {
+                "or_timeframe": "15m",
+                "confirm_timeframe": "5m",
+                "entry_timeframe": "5m",
+                "session": "new_york",
+                "session_open_et": "09:30",
+            },
+            "universe_filters": {
+                "index": "S&P 500",
+                "min_price_usd": 3.0,
+                "custom_universe": "sp500_marketcap_1b",
+            },
+            "volatility_filters": {
+                "V1_rvol_min": 2.0,
+                "V1_rvol_lookback_days": 14,
+                "V2_atr_period": 14,
+                "V2_atr_pct_tiers": [
+                    {"price_min": 3.0, "price_max": 20.0, "atr_pct_min": 4.0},
+                    {"price_min": 20.0, "price_max": 50.0, "atr_pct_min": 3.0},
+                    {"price_min": 50.0, "price_max": 100.0, "atr_pct_min": 2.0},
+                    {"price_min": 100.0, "price_max": None, "atr_pct_min": 1.5},
+                ],
+            },
+            "entry_confluence": {
+                "rsi_period": 14,
+                "rsi_rising_bars": 3,
+                "ema_period": 20,
+            },
+            "entry_models": {
+                "breakout": {"enabled": True},
+                "retest": {"enabled": True},
+            },
+            "time_filter": {"earliest_entry_et": "09:50", "latest_entry_et": "11:30", "force_close_et": "15:51"},
+            "exit": {
+                "management_style": "no_stop_delayed_trail",
+                "trailing_trigger_R": 1.20,
+                "hard_stop_R": 2.5,
+                "dynamic_risk_reduction": {
+                    "trigger_offset_minutes": 10,
+                    "current_r_max": -0.40,
+                    "rsi_delta_max": -5,
+                    "mfe_r_max": 0.30,
+                    "rsi_period": 14,
+                    "ema_period": 9,
+                    "new_hard_stop_R": 1.5,
+                },
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+                "min_stop_distance_pct": 0.25,
+                "initial_stop_r_multiplier": 1.40,
+                "position_size_multiplier": 2.0,
+            },
+        },
+        "aggressive",
+        "long",
+        "## מה זה עושה\n"
+        "גרסה V9 של ORB Long - **זהה לחלוטין ל-V8** (וממילא ל-v4.2) פרט לערך אחד: כש-V6 Risk "
+        "Event מתרחש, הסטופ הקשיח מתהדק ל--1.5R במקום ל--2.0R (הידוק אגרסיבי יותר). ראה את "
+        "התיעוד המלא של V8 למנגנון עצמו - לא חוזר כאן.\n\n"
+        "## ההבדל היחיד מ-V8\n"
+        "new_hard_stop_R = 1.5 במקום 2.0. שום דבר אחר לא שונה - אותה כניסה בדיוק, אותו Risk "
+        "Event בדיוק (10 דקות, אותם תנאים), אותו טריילינג בדיוק.\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive - אסטרטגיה חדשה לגמרי שלא נבדקה כלל. סיכון לעסקה (base): 1% | גודל "
+        "פוזיציה מקס': 10% | פוזיציות בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "אין לזה שום היסטוריית בקטסט עדיין. כל אזהרות ORB Long v4.2/V8 תקפות כאן. הרץ בקטסט מקיף "
+        "והשווה מול v4.2 ו-V8 (אותה עסקה בדיוק - הכניסות זהות, רק הסטופ הקשיח שונה) לפני כל שיקול "
+        "נוסף. **כלי מחקר בלבד - אל תפעיל LIVE.**",
+    ),
+    (
         # v4 of ORB Short v3 - exact mirror of ORB Long v4 above, see its
         # own comment for the full explanation, not repeated here.
         "ORB Short v4 (Scaled Exit, Immediate Trail)",
