@@ -4577,9 +4577,18 @@ def delete_trade_telemetry(account_id: int, backtest_id: int | None = None, stra
     telemetry rows to match yet anyway, and must never be touched here
     regardless (deleting its own row out from under an in-flight
     subprocess would break its own finish_telemetry_run write back).
+
     strategy_id has no column on telemetry_runs (only backtest_id does),
-    so that scope is resolved via the backtest_ids trade_telemetry itself
-    names for that strategy, read BEFORE the delete below removes them.
+    so that scope is resolved from the backtests TABLE's own params_json
+    strategy_ids list (every backtest this account has ever run that
+    strategy through, whether or not it currently has any trade_telemetry
+    rows at all) - NOT from trade_telemetry itself, which would silently
+    resolve to nothing on a second delete for the same strategy (its own
+    rows, and so the very backtest_ids needed to find the matching runs,
+    are already gone after the first delete - confirmed by direct
+    testing: a second call found 0 telemetry rows to delete and, with the
+    old trade_telemetry-derived resolution, also found and deleted 0
+    stale runs, even though plenty were still sitting there).
     Returns the number of trade_telemetry rows actually deleted."""
     telemetry_where = "account_id = ?"
     telemetry_params: list = [account_id]
@@ -4595,9 +4604,10 @@ def delete_trade_telemetry(account_id: int, backtest_id: int | None = None, stra
             run_backtest_ids = [backtest_id]
         elif strategy_id is not None:
             run_backtest_ids = [
-                r["backtest_id"] for r in conn.execute(
-                    f"SELECT DISTINCT backtest_id FROM trade_telemetry WHERE {telemetry_where}", telemetry_params
+                r["id"] for r in conn.execute(
+                    "SELECT id, params_json FROM backtests WHERE account_id = ?", (account_id,)
                 ).fetchall()
+                if strategy_id in (json.loads(r["params_json"]).get("strategy_ids") or [])
             ]
         else:
             run_backtest_ids = None  # every backtest for this account - no IN (...) needed
