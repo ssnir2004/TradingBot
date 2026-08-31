@@ -2260,6 +2260,50 @@ def api_telemetry_export(
     )
 
 
+# ------------------------------------------------------------ rule evaluation ---
+# The /telemetry page's "Rule Evaluation" tab (separate from "Compare
+# Groups" - see telemetry_engine.RULES's own docstring for why these are
+# two different questions even though "Early Failure Candidate" is both a
+# DEFAULT_GROUPS entry AND a RULES entry, sharing the same predicate). No
+# Group A/B selector here - the user picks a rule, everything else
+# (confusion matrix, outcome breakdown, Net Benefit Engine, candidate
+# trades) is computed automatically against the trade's own real outcome.
+@app.get("/api/telemetry/rules")
+def api_telemetry_rules(user: str = Depends(require_user)):
+    return {"rules": [{"key": k, "label": v["label"], "description": v["description"]} for k, v in telemetry_engine.RULES.items()]}
+
+
+@app.get("/api/telemetry/rule_evaluation")
+def api_telemetry_rule_evaluation(
+    rule: str, backtest_id: int | None = Query(None), strategy_id: int | None = Query(None),
+    account_id: int = Depends(require_account), user: str = Depends(require_user),
+):
+    if rule not in telemetry_engine.RULES:
+        raise HTTPException(status_code=400, detail=f"rule must be one of {sorted(telemetry_engine.RULES)}")
+    rows, df = _telemetry_dataframe(account_id, backtest_id, strategy_id)
+    return telemetry_engine.evaluate_rule(rows, df, rule)
+
+
+@app.get("/api/telemetry/rule_evaluation_export.xlsx")
+def api_telemetry_rule_evaluation_export(
+    rule: str, backtest_id: int | None = Query(None), strategy_id: int | None = Query(None),
+    account_id: int = Depends(require_account), user: str = Depends(require_user),
+):
+    if rule not in telemetry_engine.RULES:
+        raise HTTPException(status_code=400, detail=f"rule must be one of {sorted(telemetry_engine.RULES)}")
+    rows, df = _telemetry_dataframe(account_id, backtest_id, strategy_id)
+    if df.empty:
+        raise HTTPException(status_code=404, detail="No telemetry rows to evaluate for this selection")
+    payload = telemetry_engine.evaluate_rule(rows, df, rule)
+    scope_label = f"Backtest #{backtest_id}" if backtest_id else (f"Strategy #{strategy_id} (pooled)" if strategy_id else "All telemetry")
+    xlsx_bytes = telemetry_engine.export_rule_evaluation_xlsx(payload, scope_label)
+    _log_account_action(account_id, user, action="telemetry_rule_evaluation_export", rule=rule, backtest_id=backtest_id, strategy_id=strategy_id)
+    return Response(
+        content=xlsx_bytes, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="trade_telemetry_rule_evaluation.xlsx"'},
+    )
+
+
 # --------------------------------------------------------- backtest worker ---
 # Token management is browser-session-authenticated (a real logged-in user
 # creates/revokes these), like everything else in this file up to here.

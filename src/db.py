@@ -305,6 +305,7 @@ CREATE TABLE IF NOT EXISTS trade_telemetry (
     exit_reason TEXT,
     trail_activated INTEGER NOT NULL DEFAULT 0,
     capture_pct REAL,
+    risk_dollars REAL,
     snapshots_json TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -2693,6 +2694,14 @@ def init_db(seed_rules_path: Path | None = None):
         # fetch.py's own run() branches on to pick which of the two it runs.
         _migrate_add_column(conn, "backtest_data_fetches", "start_date", "TEXT")
         _migrate_add_column(conn, "backtest_data_fetches", "end_date", "TEXT")
+        # Dollar risk (initial risk-per-share x size) for this trade - NULL
+        # for any row generated before this column existed (re-run
+        # "Generate Telemetry" to backfill it, same as any other telemetry
+        # field - a regeneration always deletes and replaces every row for
+        # that backtest_id). Needed by the Rule Evaluation tab's own Net
+        # Benefit Engine to convert an R-multiple delta into dollars - see
+        # telemetry_engine.evaluate_rule.
+        _migrate_add_column(conn, "trade_telemetry", "risk_dollars", "REAL")
         # The shipped default strategy predates risk_rating and got the
         # generic 'moderate' default from the ALTER TABLE above — it's
         # actually the conservative baseline every preset above is loosened
@@ -4551,10 +4560,10 @@ def delete_trade_telemetry_for_backtest(backtest_id: int):
 def insert_trade_telemetry_rows(rows: list[dict]):
     """`rows`: [{"account_id", "backtest_id", "strategy_id", "strategy_name",
     "symbol", "side", "entry_time", "exit_time", "final_r", "exit_reason",
-    "trail_activated", "capture_pct", "snapshots"}, ...] - see telemetry_
-    engine.generate_telemetry_for_backtest's own row shape. One bulk
-    executemany, not one INSERT per row - a backtest can carry hundreds of
-    trades."""
+    "trail_activated", "capture_pct", "risk_dollars", "snapshots"}, ...] -
+    see telemetry_engine.generate_telemetry_for_backtest's own row shape.
+    One bulk executemany, not one INSERT per row - a backtest can carry
+    hundreds of trades."""
     if not rows:
         return
     now = datetime.now(ET).isoformat(timespec="seconds")
@@ -4562,14 +4571,14 @@ def insert_trade_telemetry_rows(rows: list[dict]):
         conn.executemany(
             "INSERT INTO trade_telemetry "
             "(account_id, backtest_id, strategy_id, strategy_name, symbol, side, entry_time, exit_time, "
-            "final_r, exit_reason, trail_activated, capture_pct, snapshots_json, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "final_r, exit_reason, trail_activated, capture_pct, risk_dollars, snapshots_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     r["account_id"], r["backtest_id"], r["strategy_id"], r["strategy_name"],
                     r["symbol"], r["side"], r["entry_time"], r["exit_time"],
                     r.get("final_r"), r.get("exit_reason"), int(bool(r.get("trail_activated"))), r.get("capture_pct"),
-                    json.dumps(r["snapshots"]), now,
+                    r.get("risk_dollars"), json.dumps(r["snapshots"]), now,
                 )
                 for r in rows
             ],

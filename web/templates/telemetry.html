@@ -107,57 +107,123 @@
   </div>
 
   <div class="card mb-4">
-    <div class="card-header">Analysis / Comparison Engine</div>
+    <div class="card-header">Analysis Engine</div>
     <div class="card-body">
       <div class="alert alert-secondary small py-2 mb-3">
         1m and 3m telemetry snapshots are unavailable because the backtest data resolution does not support
         these offsets. They are excluded from all statistical analysis.
       </div>
-      <div class="row g-2 align-items-end mb-3">
-        <div class="col-6 col-md-3">
-          <label class="form-label small">Group A</label>
-          <select id="tel-group-a" class="form-select form-select-sm"></select>
+
+      <ul class="nav nav-pills small mb-3" id="tel-analysis-mode-tabs">
+        <li class="nav-item"><button class="nav-link active" data-mode="compare">Compare Groups</button></li>
+        <li class="nav-item"><button class="nav-link" data-mode="rule">Rule Evaluation</button></li>
+      </ul>
+
+      <div id="tel-mode-compare">
+        <div class="small text-muted mb-3">Compare characteristics of two cohorts you pick yourself - e.g. Hard Stop vs Trailing Winners, Winners vs Losers.</div>
+        <div class="row g-2 align-items-end mb-3">
+          <div class="col-6 col-md-3">
+            <label class="form-label small">Group A</label>
+            <select id="tel-group-a" class="form-select form-select-sm"></select>
+          </div>
+          <div class="col-6 col-md-3">
+            <label class="form-label small">Group B</label>
+            <select id="tel-group-b" class="form-select form-select-sm"></select>
+          </div>
+          <div class="col-6 col-md-3">
+            <label class="form-label small">Capture Disaster threshold (%)</label>
+            <input type="number" id="tel-capture-threshold" class="form-control form-control-sm" value="-1000">
+          </div>
+          <div class="col-6 col-md-3">
+            <button id="btn-refresh-analysis" class="btn btn-primary btn-sm">Refresh Analysis</button>
+            <a id="tel-export-analysis-xlsx" class="btn btn-outline-secondary btn-sm disabled" href="#">Export Analysis (Excel)</a>
+            <button type="button" class="info-icon" style="border:none;" data-bs-toggle="modal" data-bs-target="#tel-analysis-export-help-modal" aria-label="הסבר">i</button>
+          </div>
         </div>
-        <div class="col-6 col-md-3">
-          <label class="form-label small">Group B</label>
-          <select id="tel-group-b" class="form-select form-select-sm"></select>
-        </div>
-        <div class="col-6 col-md-3">
-          <label class="form-label small">Capture Disaster threshold (%)</label>
-          <input type="number" id="tel-capture-threshold" class="form-control form-control-sm" value="-1000">
-        </div>
-        <div class="col-6 col-md-3">
-          <button id="btn-refresh-analysis" class="btn btn-primary btn-sm">Refresh Analysis</button>
-          <a id="tel-export-analysis-xlsx" class="btn btn-outline-secondary btn-sm disabled" href="#">Export Analysis (Excel)</a>
-          <button type="button" class="info-icon" style="border:none;" data-bs-toggle="modal" data-bs-target="#tel-analysis-export-help-modal" aria-label="הסבר">i</button>
+        <div id="tel-analysis-error" class="text-danger small"></div>
+        <div id="tel-group-counts" class="small text-muted mb-3"></div>
+
+        <ul class="nav nav-tabs small" id="tel-analysis-tabs">
+          <li class="nav-item"><button class="nav-link active" data-tab="comparison">Comparison</button></li>
+          <li class="nav-item"><button class="nav-link" data-tab="ranking">Predictive Ranking</button></li>
+          <li class="nav-item"><button class="nav-link" data-tab="early">Early Failure Analysis</button></li>
+          <li class="nav-item"><button class="nav-link" data-tab="suggestions">Suggested Filters</button></li>
+          <li class="nav-item"><button class="nav-link" data-tab="heatmap">Heatmap</button></li>
+        </ul>
+        <div class="tab-pane-content pt-3">
+          <div id="tel-tab-comparison"></div>
+          <div id="tel-tab-ranking" class="d-none"></div>
+          <div id="tel-tab-early" class="d-none"></div>
+          <div id="tel-tab-suggestions" class="d-none"></div>
+          <div id="tel-tab-heatmap" class="d-none">
+            <div class="row g-2 align-items-end mb-2">
+              <div class="col-12 col-md-4">
+                <label class="form-label small">Metric</label>
+                <select id="tel-heatmap-metric" class="form-select form-select-sm"></select>
+              </div>
+              <div class="col-12 col-md-2">
+                <button id="btn-load-heatmap" class="btn btn-outline-primary btn-sm">Load</button>
+              </div>
+            </div>
+            <div id="tel-heatmap-body"></div>
+          </div>
         </div>
       </div>
-      <div id="tel-analysis-error" class="text-danger small"></div>
-      <div id="tel-group-counts" class="small text-muted mb-3"></div>
 
-      <ul class="nav nav-tabs small" id="tel-analysis-tabs">
-        <li class="nav-item"><button class="nav-link active" data-tab="comparison">Comparison</button></li>
-        <li class="nav-item"><button class="nav-link" data-tab="ranking">Predictive Ranking</button></li>
-        <li class="nav-item"><button class="nav-link" data-tab="early">Early Failure Analysis</button></li>
-        <li class="nav-item"><button class="nav-link" data-tab="suggestions">Suggested Filters</button></li>
-        <li class="nav-item"><button class="nav-link" data-tab="heatmap">Heatmap</button></li>
-      </ul>
-      <div class="tab-pane-content pt-3">
-        <div id="tel-tab-comparison"></div>
-        <div id="tel-tab-ranking" class="d-none"></div>
-        <div id="tel-tab-early" class="d-none"></div>
-        <div id="tel-tab-suggestions" class="d-none"></div>
-        <div id="tel-tab-heatmap" class="d-none">
-          <div class="row g-2 align-items-end mb-2">
-            <div class="col-12 col-md-4">
-              <label class="form-label small">Metric</label>
-              <select id="tel-heatmap-metric" class="form-select form-select-sm"></select>
+      <div id="tel-mode-rule" class="d-none">
+        <div class="small text-muted mb-3">
+          Evaluate whether a specific proposed rule would actually improve strategy results - no Group A/B to
+          pick, the system evaluates the rule automatically against every trade's own real outcome.
+        </div>
+        <div class="row g-2 align-items-end mb-3">
+          <div class="col-12 col-md-6">
+            <label class="form-label small">Rule</label>
+            <select id="tel-rule-picker" class="form-select form-select-sm"></select>
+          </div>
+          <div class="col-12 col-md-6">
+            <button id="btn-evaluate-rule" class="btn btn-primary btn-sm">Evaluate Rule</button>
+            <a id="tel-export-rule-xlsx" class="btn btn-outline-secondary btn-sm disabled" href="#">Export Rule Evaluation (Excel)</a>
+            <button type="button" class="info-icon" style="border:none;" data-bs-toggle="modal" data-bs-target="#tel-analysis-export-help-modal" aria-label="הסבר">i</button>
+          </div>
+        </div>
+        <div id="tel-rule-error" class="text-danger small"></div>
+        <div id="tel-rule-description" class="small text-muted mb-3"></div>
+
+        <div id="tel-rule-results" class="d-none">
+          <div class="row g-3 mb-3">
+            <div class="col-12 col-md-6">
+              <div class="small fw-bold mb-1">Confusion Matrix <span class="text-muted fw-normal">(vs actual Hard Stop)</span></div>
+              <table class="table table-sm mono mb-0" id="tel-confusion-matrix"></table>
             </div>
-            <div class="col-12 col-md-2">
-              <button id="btn-load-heatmap" class="btn btn-outline-primary btn-sm">Load</button>
+            <div class="col-12 col-md-6">
+              <div class="small fw-bold mb-1">Classification Metrics</div>
+              <table class="table table-sm mono mb-0" id="tel-rule-metrics"></table>
             </div>
           </div>
-          <div id="tel-heatmap-body"></div>
+
+          <div class="small fw-bold mb-1">Early Failure Rule Performance</div>
+          <div class="row g-2 mb-3" id="tel-rule-dashboard-card"></div>
+
+          <div class="small fw-bold mb-1">Rule Outcome Breakdown <span class="text-muted fw-normal">(what flagged trades actually became)</span></div>
+          <table class="table table-sm table-hover mono mb-3" id="tel-outcome-breakdown">
+            <thead><tr><th>Outcome</th><th>Count</th><th>%</th><th>Avg Final R</th><th>Median Final R</th><th>Avg Capture %</th></tr></thead>
+            <tbody></tbody>
+          </table>
+
+          <div class="small fw-bold mb-1">Candidate Trades <span class="text-muted fw-normal">(every flagged trade)</span></div>
+          <input type="text" id="tel-candidates-filter" class="form-control form-control-sm mb-2" style="max-width:300px" placeholder="Filter candidate trades…">
+          <div class="table-responsive">
+            <table class="table table-sm table-hover mono">
+              <thead>
+                <tr>
+                  <th>Symbol</th><th>Entry Time</th><th id="tel-candidates-r-header">Current R</th><th id="tel-candidates-rsi-header">RSI Delta</th>
+                  <th>Returned Inside OR</th><th>Lost EMA9</th><th>Actual Exit Reason</th><th>Actual Final R</th>
+                  <th>Capture %</th><th>Delta R</th><th>Class</th>
+                </tr>
+              </thead>
+              <tbody id="tel-candidates-body"></tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
@@ -215,7 +281,7 @@
             +10m, מתקיימים <strong>כל</strong> התנאים הבאים יחד:
           </p>
           <ul class="small">
-            <li>Trailing מעולם לא הופעל בטרייד (Trail Activated = False)</li>
+            <li>Trailing עדיין לא הופעל <strong>נכון לנקודת +10m</strong> (גם אם הוא כן הופעל מאוחר יותר בטרייד — זו נקודת הזמן שקובעת, לא התוצאה הסופית)</li>
             <li>Current R בנקודת +10m &le; -0.40R</li>
             <li>RSI Delta בנקודת +10m &le; -5</li>
             <li>וגם: Returned Inside Opening Range = True <strong>או</strong> Lost EMA9 = True (בנקודת +10m)</li>
@@ -224,6 +290,22 @@
             <strong>זה לא משנה שום אסטרטגיה, כניסה, יציאה או תוצאת בקטסט בפועל</strong> — זה רק
             מתייג רטרואקטיבית אילו טריידים היו נחתכים לו הכלל הזה היה קיים, כדי לבדוק סטטיסטית
             אם יש בו ערך לפני החלטה אם לממש אותו בפועל באסטרטגיה.
+          </p>
+          <h6 class="fw-bold mt-3">טאב Rule Evaluation</h6>
+          <p>
+            בניגוד ל-Compare Groups (שבו בוחרים שתי קבוצות באופן ידני), בטאב הזה בוחרים רק כלל
+            (למשל Early Failure Candidate), והמערכת מריצה הערכה אוטומטית מלאה:
+          </p>
+          <ul class="small">
+            <li><strong>Confusion Matrix</strong> — הכלל מול התוצאה האמיתית (Hard Stop בפועל): True/False Positive/Negative, Precision, Recall, F1, Accuracy, Balanced Accuracy.</li>
+            <li><strong>Rule Outcome Breakdown</strong> — מבין הטריידים שהכלל היה מפעיל עליהם, כמה בפועל הפכו ל-Hard Stop, Trailing Winner, End Of Day Winner/Loser, או אחר.</li>
+            <li><strong>Net Benefit Engine</strong> — לכל טרייד מסומן: Delta R = ה-R בנקודת ההערכה פחות ה-Final R בפועל. "Total R Saved" מחושב רק על טריידים שהפכו בפועל ל-Hard Stop (יציאה מוקדמת הייתה מיטיבה), "Total R Lost" רק על טריידים שהפכו בפועל ל-Trailing Winner (יציאה מוקדמת הייתה עולה רווח). Net Benefit R/$ = Saved פחות Lost, וגם השפעה משוערת על Profit Factor ו-Max Drawdown של כל התיק.</li>
+            <li><strong>Candidate Trades</strong> — טבלת כל הטריידים שהכלל היה מסמן, לניתוח פרטני וייצוא.</li>
+          </ul>
+          <p class="small text-muted">
+            טריידים מסומנים שהפכו ל-End Of Day Winner/Loser או "אחר" אינם נכללים ב-Total Saved/Lost R
+            (רק Hard Stop ו-Trailing Winner) — מספרם מוצג בנפרד כדי שהסכומים לא ייראו כאילו הם מכסים
+            את כל הטריידים המסומנים.
           </p>
         </div>
         <div class="modal-footer">
@@ -289,6 +371,8 @@ let telRunningId = null;
 let lastTrades = [];
 let tradesFilterQuery = "";
 let eligibleBacktests = [];  // last /api/telemetry/eligible_backtests result - reused to build the bulk-generate strategy picker client-side
+let lastCandidateTrades = [];
+let candidatesFilterQuery = "";
 
 document.addEventListener("DOMContentLoaded", () => {
   for (const [key, label] of Object.entries(GROUP_LABELS)) {
@@ -301,11 +385,13 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("btn-bulk-generate-telemetry").addEventListener("click", bulkGenerateTelemetry);
   document.getElementById("btn-refresh-analysis").addEventListener("click", refreshAnalysis);
   document.getElementById("btn-load-heatmap").addEventListener("click", loadHeatmap);
+  document.getElementById("btn-evaluate-rule").addEventListener("click", evaluateRule);
   document.getElementById("tel-scope-backtest").addEventListener("change", onScopeChange);
   document.getElementById("tel-scope-strategy").addEventListener("change", onScopeChange);
   document.getElementById("tel-scope-mode-backtest").addEventListener("change", onScopeModeChange);
   document.getElementById("tel-scope-mode-strategy").addEventListener("change", onScopeModeChange);
   document.getElementById("tel-trades-filter").addEventListener("input", (e) => { tradesFilterQuery = e.target.value.trim().toLowerCase(); renderTrades(); });
+  document.getElementById("tel-candidates-filter").addEventListener("input", (e) => { candidatesFilterQuery = e.target.value.trim().toLowerCase(); renderCandidateTrades(); });
 
   document.querySelectorAll("#tel-analysis-tabs .nav-link").forEach(btn => {
     btn.addEventListener("click", () => {
@@ -316,9 +402,19 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
+  document.querySelectorAll("#tel-analysis-mode-tabs .nav-link").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll("#tel-analysis-mode-tabs .nav-link").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      document.getElementById("tel-mode-compare").classList.toggle("d-none", btn.dataset.mode !== "compare");
+      document.getElementById("tel-mode-rule").classList.toggle("d-none", btn.dataset.mode !== "rule");
+    });
+  });
+
   refreshBacktestPicker();
   refreshScopeStrategyPicker();
   refreshRunHistory();
+  refreshRulePicker();
 });
 
 async function refreshBacktestPicker() {
@@ -516,6 +612,9 @@ function onScopeChange() {
   csvLink.classList.toggle("disabled", !picked);
   xlsxLink.classList.toggle("disabled", !picked);
   document.getElementById("tel-scope-summary").textContent = "";
+  document.getElementById("tel-rule-results").classList.add("d-none");
+  document.getElementById("tel-export-rule-xlsx").classList.add("disabled");
+  document.getElementById("tel-rule-error").textContent = "";
   if (picked) { loadTrades(); refreshAnalysis(); loadMetricColumns(); }
 }
 
@@ -681,6 +780,121 @@ async function loadHeatmap() {
         </tbody>
       </table>
     </div>`;
+}
+
+// --- Rule Evaluation tab -------------------------------------------------
+async function refreshRulePicker() {
+  const select = document.getElementById("tel-rule-picker");
+  let payload;
+  try { payload = await api("/api/telemetry/rules"); } catch (e) { select.innerHTML = `<option>${e.message}</option>`; return; }
+  const rules = payload.rules || [];
+  select.innerHTML = rules.map(r => `<option value="${r.key}">${r.label}</option>`).join("");
+  document.getElementById("tel-rule-description").textContent = rules[0] ? rules[0].description : "";
+  select.addEventListener("change", () => {
+    const picked = rules.find(r => r.key === select.value);
+    document.getElementById("tel-rule-description").textContent = picked ? picked.description : "";
+  });
+}
+
+async function evaluateRule() {
+  const errorEl = document.getElementById("tel-rule-error");
+  const exportLink = document.getElementById("tel-export-rule-xlsx");
+  const resultsEl = document.getElementById("tel-rule-results");
+  errorEl.textContent = "";
+  exportLink.classList.add("disabled");
+  resultsEl.classList.add("d-none");
+  if (!telemetryScope.backtest_id && !telemetryScope.strategy_id) { errorEl.textContent = "Pick a scope above first."; return; }
+  const rule = document.getElementById("tel-rule-picker").value;
+  if (!rule) { errorEl.textContent = "Pick a rule first."; return; }
+  const params = new URLSearchParams(scopeQuery());
+  params.set("rule", rule);
+  let data;
+  try { data = await api(`/api/telemetry/rule_evaluation?${params.toString()}`); } catch (e) { errorEl.textContent = e.message; return; }
+
+  exportLink.href = `/api/telemetry/rule_evaluation_export.xlsx?${params.toString()}`;
+  exportLink.classList.remove("disabled");
+  resultsEl.classList.remove("d-none");
+
+  renderConfusionMatrix(data.confusion_matrix);
+  renderRuleMetrics(data.metrics);
+  renderRuleDashboardCard(data.net_benefit);
+  renderOutcomeBreakdown(data.outcome_breakdown);
+  lastCandidateTrades = data.candidate_trades || [];
+  const offsetLabel = (lastCandidateTrades[0] && lastCandidateTrades[0].evaluation_offset) || "10m";
+  document.getElementById("tel-candidates-r-header").textContent = `${offsetLabel} Current R`;
+  document.getElementById("tel-candidates-rsi-header").textContent = `${offsetLabel} RSI Delta`;
+  renderCandidateTrades();
+}
+
+function renderConfusionMatrix(cm) {
+  document.getElementById("tel-confusion-matrix").innerHTML = `
+    <tbody>
+      <tr><td>True Positive <span class="text-muted">(flagged &amp; hard stop)</span></td><td>${cm.tp}</td></tr>
+      <tr><td>False Positive <span class="text-muted">(flagged &amp; not hard stop)</span></td><td>${cm.fp}</td></tr>
+      <tr><td>False Negative <span class="text-muted">(not flagged &amp; hard stop)</span></td><td>${cm.fn}</td></tr>
+      <tr><td>True Negative <span class="text-muted">(not flagged &amp; not hard stop)</span></td><td>${cm.tn}</td></tr>
+      <tr><td><strong>Total trades</strong></td><td><strong>${cm.total}</strong></td></tr>
+    </tbody>`;
+}
+
+function renderRuleMetrics(m) {
+  document.getElementById("tel-rule-metrics").innerHTML = `
+    <tbody>
+      <tr><td>Precision</td><td>${fmtNum(m.precision)}</td></tr>
+      <tr><td>Recall</td><td>${fmtNum(m.recall)}</td></tr>
+      <tr><td>F1 Score</td><td>${fmtNum(m.f1_score)}</td></tr>
+      <tr><td>Accuracy</td><td>${fmtNum(m.accuracy)}</td></tr>
+      <tr><td>Balanced Accuracy</td><td>${fmtNum(m.balanced_accuracy)}</td></tr>
+    </tbody>`;
+}
+
+function renderRuleDashboardCard(nb) {
+  const el = document.getElementById("tel-rule-dashboard-card");
+  if (!nb) { el.innerHTML = `<div class="text-muted small">No trades flagged in this scope.</div>`; return; }
+  const tiles = [
+    ["Trades Flagged", nb.trades_flagged],
+    ["Hard Stops Captured", nb.hard_stops_captured],
+    ["Hard Stops Missed", nb.hard_stops_missed],
+    ["Trailing Winners Sacrificed", nb.trailing_winners_sacrificed],
+    ["Total R Saved", fmtNum(nb.total_saved_r, 2)],
+    ["Total R Lost", fmtNum(nb.total_lost_r, 2)],
+    ["Net Benefit R", fmtNum(nb.net_benefit_r, 2)],
+    ["Net Benefit $", fmtNum(nb.net_benefit_dollars, 2)],
+    ["Profit Factor Impact", fmtNum(nb.profit_factor_impact, 3)],
+    ["Max Drawdown Impact $", fmtNum(nb.max_drawdown_impact, 2)],
+  ];
+  el.innerHTML = tiles.map(([label, value]) => `
+    <div class="col-6 col-md-3 col-lg-2">
+      <div class="border rounded p-2 text-center h-100">
+        <div class="small text-muted">${label}</div>
+        <div class="fw-bold">${value}</div>
+      </div>
+    </div>`).join("") + (nb.excluded_from_r_accounting ? `
+    <div class="col-12"><div class="small text-muted mt-1">${nb.excluded_from_r_accounting} flagged trade(s) excluded from R/$ accounting (ended as End Of Day Winner/Loser/Other, not Hard Stop or Trailing Winner).</div></div>` : "");
+}
+
+function renderOutcomeBreakdown(rows) {
+  const tbody = document.querySelector("#tel-outcome-breakdown tbody");
+  if (!rows.length) { tbody.innerHTML = `<tr><td colspan="6" class="text-center text-muted">No flagged trades</td></tr>`; return; }
+  tbody.innerHTML = rows.map(r => `
+    <tr><td>${r.label}</td><td>${r.count}</td><td>${fmtNum(r.pct, 1)}%</td><td>${fmtNum(r.avg_final_r)}</td><td>${fmtNum(r.median_final_r)}</td><td>${fmtNum(r.avg_capture_pct, 1)}</td></tr>
+  `).join("");
+}
+
+function renderCandidateTrades() {
+  const tbody = document.getElementById("tel-candidates-body");
+  const q = candidatesFilterQuery;
+  const rows = q ? lastCandidateTrades.filter(t => `${t.symbol} ${t.exit_reason} ${t.classification}`.toLowerCase().includes(q)) : lastCandidateTrades;
+  if (!rows.length) { tbody.innerHTML = `<tr><td colspan="11" class="text-center text-muted">No candidate trades</td></tr>`; return; }
+  tbody.innerHTML = rows.map(t => `
+    <tr>
+      <td>${t.symbol}</td><td>${(t.entry_time || "").replace("T", " ").slice(0, 16)}</td>
+      <td>${fmtNum(t.current_r)}</td><td>${fmtNum(t.rsi_delta, 2)}</td>
+      <td>${t.returned_inside_opening_range ? "✓" : ""}</td><td>${t.lost_ema9 ? "✓" : ""}</td>
+      <td>${t.exit_reason || "-"}</td><td>${fmtNum(t.final_r)}</td>
+      <td>${fmtNum(t.capture_pct, 1)}</td><td>${fmtNum(t.delta_r)}</td>
+      <td><span class="badge ${t.classification === 'TP' ? 'bg-success' : 'bg-warning text-dark'}">${t.classification}</span></td>
+    </tr>`).join("");
 }
 </script>
 </body>

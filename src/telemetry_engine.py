@@ -85,10 +85,16 @@ def _early_failure_candidate(t, cfg) -> bool:
     long before this label is ever computed.
 
     Membership requires ALL of, evaluated strictly at the +10m snapshot:
-      - trail_activated is False (the trade's own final outcome - same
-        field never_trailed already keys off, not a per-snapshot value,
-        since there's no "trailing activated as of this snapshot" fact to
-        read - only "did it ever activate, by the time the trade closed")
+      - trailing had NOT activated YET as of +10m (see build_trade_
+        telemetry's own "trail_activated_as_of" - a POINT-IN-TIME fact,
+        deliberately NOT the trade's overall trail_activated field: that
+        field is true for a trade's entire life once it ever activates,
+        even if that happens well after +10m, which would make "not yet
+        trailing at +10m" indistinguishable from "never trails at all" -
+        and silently make this rule unable to ever flag a trade that
+        later recovers and becomes a Trailing Winner, exactly the
+        trades the Rule Evaluation tab's own Net Benefit Engine needs to
+        find to price the cost of a false-positive early exit)
       - 10m current_r <= -0.40R
       - 10m RSI Delta <= -5
       - EITHER 10m Returned Inside Opening Range OR 10m Lost EMA9
@@ -97,11 +103,11 @@ def _early_failure_candidate(t, cfg) -> bool:
     snapshot came back None (see _snapshot_bar's own "no bar yet" case)
     simply has no 10m_* columns to read at all for THAT row; missing
     numeric values as NaN safely fail every "<=" comparison below (never
-    raise), and the two boolean checks use "== 1" rather than bool(...)
+    raise), and the boolean checks use "== 1"/"!= 0" rather than bool(...)
     for the same reason - flatten_trades stores a bool snapshot field as
     int 0/1, and bool(float('nan')) is True in Python, which would
     otherwise silently treat "unknown" as "condition met"."""
-    if t.get("trail_activated") is not False:
+    if t.get("10m_trail_activated_as_of") != 0:
         return False
     current_r = t.get("10m_current_r")
     rsi_delta = t.get("10m_rsi_delta")
@@ -124,13 +130,36 @@ DEFAULT_GROUPS = {
     "early_failure_candidate": _early_failure_candidate,
 }
 
+# Rule Evaluation tab registry (see evaluate_rule below) - deliberately
+# separate from DEFAULT_GROUPS/apply_group even though "Early Failure
+# Candidate" is also a Compare Groups option: Compare Groups treats it as
+# just another cohort to line up against a second cohort of the analyst's
+# own choosing (Group A/B), while Rule Evaluation treats it as a proposed
+# DECISION RULE with one fixed ground truth (did the trade actually become
+# a Hard Stop) - a confusion matrix, precision/recall, and a Net Benefit
+# R/$ estimate, not a side-by-side comparison. Same predicate function
+# either way (single source of truth for what "triggers" means), but the
+# two tabs ask genuinely different questions of it. "evaluation_offset"
+# names which snapshot offset's own current_r/rsi_delta the rule's
+# Early Exit R and Net Benefit accounting read - not hardcoded to "10m"
+# in evaluate_rule itself, so a future rule can be defined against a
+# different offset (e.g. a 5-minute rule) by adding an entry here alone.
+RULES = {
+    "early_failure_candidate": {
+        "label": "Early Failure Candidate (10-minute rule)",
+        "description": "Trades that would have triggered the proposed 10-minute Early Failure rule.",
+        "predicate": _early_failure_candidate,
+        "evaluation_offset": "10m",
+    },
+}
+
 # Trade-level columns flatten_trades always carries alongside the per-
 # snapshot metric columns - never treated as a predictive FEATURE by
 # predictive_ranking/suggested_candidate_filters (they're the labels being
 # predicted, or identifying metadata, not indicator inputs).
 NON_FEATURE_COLUMNS = {
     "telemetry_id", "backtest_id", "strategy_id", "strategy_name", "symbol", "side",
-    "entry_time", "exit_time", "final_r", "exit_reason", "trail_activated", "capture_pct",
+    "entry_time", "exit_time", "final_r", "exit_reason", "trail_activated", "capture_pct", "risk_dollars",
 }
 
 # "1m"/"3m" are excluded from every STATISTICAL computation (Comparison,
@@ -460,6 +489,7 @@ def _derive_since_entry_fields(entry_snapshot: dict, snapshot: dict, frame: pd.D
 def build_trade_telemetry(
     frame: pd.DataFrame, today_bars: pd.DataFrame, market_frames: dict, prior_day_bars: dict,
     entry_ts, entry_price: float, side: str, risk: float | None, model: str | None,
+    trail_activated_at_r: float | None = None,
 ) -> dict:
     """Builds the full {"entry": {...}, "1m": {...}, ...} snapshots dict
     for ONE closed trade - the core of the snapshot engine. `frame` is the
@@ -469,7 +499,11 @@ def build_trade_telemetry(
     and structure context); `market_frames` is {"es"|"spy"|"qqq":
     _market_context_frame|None}; `prior_day_bars` is {date: that day's raw
     bars}, the same shape backtest_engine.py already threads into orb.
-    evaluate_orb_entry, reused here for orb._compute_rvol's own lookback."""
+    evaluate_orb_entry, reused here for orb._compute_rvol's own lookback.
+    `trail_activated_at_r` is the pair's own "trail_activated_at_r" field
+    (the exact MFE R-multiple at which THIS trade's trailing stop actually
+    turned on, None if it never did) - used only to derive each snapshot's
+    own "trail_activated_as_of" (see the loop below), not stored itself."""
     struct_ctx = _structure_context(today_bars, entry_ts, model)
     intraday_upto = frame  # RSI/EMA/etc. converge over the full multi-day series already
     snapshots = {}
@@ -508,6 +542,27 @@ def build_trade_telemetry(
         for key, mkt_frame in market_frames.items():
             snap[key] = _market_context_snapshot(mkt_frame, entry_ts, offset_minutes)
         snap.update(_structure_snapshot(struct_ctx, frame.loc[entry_ts:bar_ts], bar_row))
+        # Point-in-time fact: had trailing already activated BY this
+        # snapshot - NOT the same as the trade's own final trail_activated
+        # (true for the trade's WHOLE life once it ever activates, even if
+        # that happened well after this snapshot's own timestamp - using
+        # it here would make "not yet trailing at +10m" impossible to ever
+        # tell apart from "never trails at all", silently making any rule
+        # requiring both "not yet trailing" and "later became a Trailing
+        # Winner" unsatisfiable by construction). MFE-so-far crossing
+        # trail_activated_at_r is the EXACT condition backtest_engine.py's
+        # own no_stop_delayed_trail branch uses to flip pos["trail_
+        # activated"] True in the first place, so comparing this
+        # snapshot's own mfe_r_so_far against the trade's real activation
+        # threshold reconstructs the same fact without re-deriving
+        # trailing_trigger_R from the strategy's own rules_json at all.
+        # False (not None) both when it hadn't activated YET and when it
+        # NEVER did - "as of this snapshot" only needs the yes/no answer,
+        # not which of those two is true.
+        snap["trail_activated_as_of"] = bool(
+            trail_activated_at_r is not None and snap["mfe_r_so_far"] is not None
+            and snap["mfe_r_so_far"] >= trail_activated_at_r
+        )
         snapshots[label] = snap
 
     entry_snapshot = snapshots.get("entry")
@@ -613,7 +668,7 @@ def generate_telemetry_for_backtest(account_id: int, backtest_id: int) -> dict:
             try:
                 snapshots = build_trade_telemetry(
                     cached["frame"], today_bars, market_frame_cache, cached["prior_day_bars"],
-                    entry_ts, entry_price, side, risk, pair.get("model"),
+                    entry_ts, entry_price, side, risk, pair.get("model"), pair.get("trail_activated_at_r"),
                 )
             except Exception as exc:  # noqa: BLE001 - see comment above
                 skipped_reasons["trade_processing_error"] = skipped_reasons.get("trade_processing_error", 0) + 1
@@ -626,6 +681,15 @@ def generate_telemetry_for_backtest(account_id: int, backtest_id: int) -> dict:
                 "symbol": symbol, "side": side, "entry_time": entry_iso, "exit_time": exit_iso,
                 "final_r": pair.get("final_r"), "exit_reason": pair.get("exit_reason"),
                 "trail_activated": bool(pair.get("trail_activated")), "capture_pct": pair.get("capture_pct"),
+                # Dollar risk (risk-per-share x size) for THIS trade - the
+                # Rule Evaluation tab's own Net Benefit Engine (evaluate_
+                # rule below) uses it to convert an R-multiple delta into
+                # dollars. pnl_usd itself is never stored (final_r *
+                # risk_dollars already reproduces it exactly - both derive
+                # from the same open/close price move, see perf.r_multiple
+                # vs pair_trades' own pnl_usd - so storing it separately
+                # would just be a redundant, driftable copy).
+                "risk_dollars": (risk * pair["size"]) if risk is not None else None,
                 "snapshots": snapshots,
             })
             trades_processed += 1
@@ -663,6 +727,7 @@ def flatten_trades(rows: list[dict]) -> pd.DataFrame:
             "entry_time": t["entry_time"], "exit_time": t["exit_time"],
             "final_r": t["final_r"], "exit_reason": t["exit_reason"],
             "trail_activated": bool(t["trail_activated"]), "capture_pct": t["capture_pct"],
+            "risk_dollars": t.get("risk_dollars"),
         }
         for snap_label, snap in (t.get("snapshots") or {}).items():
             if not snap:
@@ -830,6 +895,261 @@ def early_failure_analysis(df: pd.DataFrame, mask_hard_stop: pd.Series, mask_tra
     return result
 
 
+OUTCOME_CATEGORY_LABELS = {
+    "hard_stop": "Hard Stops", "trailing_winner": "Trailing Winners",
+    "eod_winner": "End Of Day Winners", "eod_loser": "End Of Day Losers", "other": "Other",
+}
+
+
+def _rule_outcome_category(row) -> str:
+    """Mutually-exclusive, first-match-wins bucket for the Rule Outcome
+    Breakdown - every possible (exit_reason, trail_activated, final_r
+    sign) combination a closed ORB trade in this codebase can have lands
+    in exactly one of these 5 categories:
+      - hard_stop: exit_reason == "hard_stop"
+      - trailing_winner: trail ever activated AND closed positive
+        (regardless of the exact exit_reason - a real trailing-stop exit
+        or an eod_close after activating both count, same "trailing_
+        winners" definition DEFAULT_GROUPS already uses)
+      - eod_winner / eod_loser: never trailed, held to end of day, split
+        by whether it closed positive or not
+      - other: the remainder (e.g. trail activated but still closed
+        non-positive - a real, if less common, possible outcome)."""
+    if row.get("exit_reason") == "hard_stop":
+        return "hard_stop"
+    trail_activated = bool(row.get("trail_activated"))
+    final_r = row.get("final_r")
+    if trail_activated and final_r is not None and final_r > 0:
+        return "trailing_winner"
+    if row.get("exit_reason") == "eod_close" and not trail_activated:
+        return "eod_winner" if (final_r is not None and final_r > 0) else "eod_loser"
+    return "other"
+
+
+def _numeric_col(df: pd.DataFrame, col: str) -> pd.Series:
+    """pd.to_numeric over df[col], or an all-NaN Series aligned to df's
+    own index if `col` doesn't exist at all (e.g. every trade in this
+    scope happens to be missing the offset this rule evaluates at) -
+    every caller below can then treat a missing column exactly like a
+    present-but-empty one, never a crash."""
+    if col not in df.columns:
+        return pd.Series(np.nan, index=df.index)
+    return pd.to_numeric(df[col], errors="coerce")
+
+
+def _group_stats(sub: pd.DataFrame) -> dict:
+    final_r = pd.to_numeric(sub["final_r"], errors="coerce").dropna()
+    capture = pd.to_numeric(sub["capture_pct"], errors="coerce").dropna()
+    return {
+        "avg_final_r": _round(final_r.mean(), 3) if len(final_r) else None,
+        "median_final_r": _round(final_r.median(), 3) if len(final_r) else None,
+        "avg_capture_pct": _round(capture.mean(), 1) if len(capture) else None,
+    }
+
+
+def _profit_factor(pnl: pd.Series):
+    """Same "inf when there are no losers at all" convention perf.
+    aggregate's own profit_factor already uses - None only when there's
+    literally nothing to divide (no trades)."""
+    pnl = pnl.dropna()
+    if pnl.empty:
+        return None
+    wins = pnl[pnl > 0].sum()
+    losses = pnl[pnl <= 0].sum()
+    if losses == 0:
+        return float("inf") if wins > 0 else None
+    return float(wins / abs(losses))
+
+
+def _max_drawdown_from_pnls(items: list[tuple]) -> float:
+    """Same walk-in-exit-order peak-to-trough algorithm as perf.compute_
+    max_drawdown, generalized to plain (exit_time, pnl) pairs rather than
+    real trade-pair dicts - evaluate_rule's own Max Drawdown Impact needs
+    to recompute the equity curve against a MODIFIED scenario (flagged
+    trades swapped to their early-exit time/pnl), which perf.compute_max_
+    drawdown has no way to express. A pair with a missing time or NaN pnl
+    is dropped (same "can't place it on the curve" reasoning throughout
+    this module) - 0.0 if nothing valid is left."""
+    valid = [(t, p) for t, p in items if t and pd.notna(p)]
+    if not valid:
+        return 0.0
+    valid.sort(key=lambda x: x[0])
+    equity = peak = max_dd = 0.0
+    for _, pnl in valid:
+        equity += pnl
+        peak = max(peak, equity)
+        max_dd = max(max_dd, peak - equity)
+    return max_dd
+
+
+def evaluate_rule(rows: list[dict], df: pd.DataFrame, rule_key: str) -> dict:
+    """The Rule Evaluation tab's full computation - everything is purely
+    RETROSPECTIVE/DESCRIPTIVE over already-closed, already-recorded trades
+    (see RULES/_early_failure_candidate's own docstrings): a confusion
+    matrix and classification metrics against the trade's own actual
+    outcome (Hard Stop vs not), a breakdown of what flagged trades
+    actually became, the Net Benefit Engine (R and $ that exiting early on
+    every flagged trade would have saved/cost, plus the resulting
+    Profit Factor/Max Drawdown impact over the WHOLE scoped trade set),
+    and the per-trade Candidate Trades table. Nothing here writes back to
+    any strategy, backtest run, or stored trade in any way.
+
+    `rows` is the raw list[dict] (see db.list_trade_telemetry) - needed
+    alongside the flattened `df` only for each trade's own snapshots[...]
+    ["bar_time"] (Max Drawdown Impact's own modified exit-time lookup;
+    flatten_trades doesn't carry bar_time forward, on purpose - see its
+    own docstring)."""
+    rule = RULES[rule_key]
+    offset = rule["evaluation_offset"]
+    r_col, rsi_col = f"{offset}_current_r", f"{offset}_rsi_delta"
+    or_col, ema9_col = f"{offset}_returned_inside_opening_range", f"{offset}_lost_ema9"
+
+    empty = {
+        "rule": rule_key, "label": rule["label"], "description": rule["description"],
+        "confusion_matrix": {"tp": 0, "fp": 0, "fn": 0, "tn": 0, "total": 0},
+        "metrics": {"precision": None, "recall": None, "f1_score": None, "accuracy": None, "balanced_accuracy": None},
+        "outcome_breakdown": [], "net_benefit": None, "candidate_trades": [],
+    }
+    if df.empty:
+        return empty
+
+    triggered = df.apply(lambda row: bool(rule["predicate"](row, {})), axis=1)
+    actual_hard_stop = df["exit_reason"] == "hard_stop"
+
+    tp = int((triggered & actual_hard_stop).sum())
+    fp = int((triggered & ~actual_hard_stop).sum())
+    fn = int((~triggered & actual_hard_stop).sum())
+    tn = int((~triggered & ~actual_hard_stop).sum())
+    total = tp + fp + fn + tn
+    precision = (tp / (tp + fp)) if (tp + fp) else None
+    recall = (tp / (tp + fn)) if (tp + fn) else None
+    f1 = (2 * precision * recall / (precision + recall)) if (precision and recall and (precision + recall) > 0) else None
+    accuracy = ((tp + tn) / total) if total else None
+    specificity = (tn / (tn + fp)) if (tn + fp) else None
+    balanced_accuracy = ((recall + specificity) / 2) if (recall is not None and specificity is not None) else None
+
+    flagged = df[triggered].copy()
+    flagged_count = len(flagged)
+    if flagged_count == 0:
+        return {
+            **empty,
+            "confusion_matrix": {"tp": tp, "fp": fp, "fn": fn, "tn": tn, "total": total},
+            "metrics": {
+                "precision": _round(precision, 3), "recall": _round(recall, 3), "f1_score": _round(f1, 3),
+                "accuracy": _round(accuracy, 3), "balanced_accuracy": _round(balanced_accuracy, 3),
+            },
+        }
+    flagged["_category"] = flagged.apply(_rule_outcome_category, axis=1)
+
+    outcome_breakdown = []
+    for cat in ("hard_stop", "trailing_winner", "eod_winner", "eod_loser", "other"):
+        sub = flagged[flagged["_category"] == cat]
+        outcome_breakdown.append({
+            "category": cat, "label": OUTCOME_CATEGORY_LABELS[cat],
+            "count": len(sub), "pct": _round(len(sub) / flagged_count * 100, 1),
+            **_group_stats(sub),
+        })
+
+    # --- Net Benefit Engine ---
+    # Delta R = Early Exit R (this rule's own evaluation-offset current_r)
+    # minus Actual Final R - positive means exiting early would have been
+    # BETTER than what actually happened, negative means WORSE. Total
+    # Saved R only sums it over flagged trades that actually became Hard
+    # Stops (where a positive Delta R is a real avoided loss); Total Lost
+    # R sums its negation over flagged trades that actually became
+    # Trailing Winners (where a positive Delta R there means upside was
+    # cut short). Flagged trades in neither category (End Of Day Winner/
+    # Loser/Other - see _rule_outcome_category) are NOT part of either sum
+    # - "excluded_from_r_accounting" below reports how many, so the R/$
+    # totals are never silently short of what "trades flagged" implies.
+    flagged["_early_exit_r"] = _numeric_col(flagged, r_col)
+    flagged["_delta_r"] = flagged["_early_exit_r"] - pd.to_numeric(flagged["final_r"], errors="coerce")
+    hard_stop_rows = flagged[flagged["_category"] == "hard_stop"]
+    trailing_winner_rows = flagged[flagged["_category"] == "trailing_winner"]
+
+    total_saved_r = _round(hard_stop_rows["_delta_r"].sum(), 3)
+    total_lost_r = _round(-trailing_winner_rows["_delta_r"].sum(), 3)
+    net_benefit_r = _round((total_saved_r or 0.0) - (total_lost_r or 0.0), 3)
+
+    flagged["_delta_dollars"] = flagged["_delta_r"] * _numeric_col(flagged, "risk_dollars")
+    total_saved_dollars = _round(flagged.loc[hard_stop_rows.index, "_delta_dollars"].sum(), 2)
+    total_lost_dollars = _round(-flagged.loc[trailing_winner_rows.index, "_delta_dollars"].sum(), 2)
+    net_benefit_dollars = _round((total_saved_dollars or 0.0) - (total_lost_dollars or 0.0), 2)
+
+    # --- Profit Factor / Max Drawdown impact, over the WHOLE scoped trade
+    # set (not just flagged ones) - "if this rule had been live, what
+    # would the strategy's own aggregate numbers have looked like" -
+    # original_pnl is derived (final_r * risk_dollars reproduces pnl_usd
+    # exactly - see generate_telemetry_for_backtest's own risk_dollars
+    # comment), modified_pnl swaps a flagged trade's own pnl for its
+    # early-exit equivalent (r_col * risk_dollars), everything else
+    # unchanged.
+    all_risk_dollars = _numeric_col(df, "risk_dollars")
+    original_pnl = pd.to_numeric(df["final_r"], errors="coerce") * all_risk_dollars
+    modified_pnl = original_pnl.copy()
+    modified_pnl.loc[triggered] = (_numeric_col(df, r_col) * all_risk_dollars).loc[triggered]
+
+    original_pf = _profit_factor(original_pnl)
+    modified_pf = _profit_factor(modified_pnl)
+    profit_factor_impact = (
+        _round(modified_pf - original_pf, 3)
+        if isinstance(original_pf, (int, float)) and isinstance(modified_pf, (int, float))
+        else None
+    )
+
+    bar_time_by_id = {r["id"]: (r.get("snapshots") or {}).get(offset, {}).get("bar_time") for r in rows}
+    original_dd = _max_drawdown_from_pnls(list(zip(df["exit_time"], original_pnl)))
+    modified_exit_times = df["exit_time"].copy()
+    for idx in df.index[triggered]:
+        bar_time = bar_time_by_id.get(df.loc[idx, "telemetry_id"])
+        if bar_time:
+            modified_exit_times.loc[idx] = bar_time
+    modified_dd = _max_drawdown_from_pnls(list(zip(modified_exit_times, modified_pnl)))
+    max_drawdown_impact = _round(modified_dd - original_dd, 2)
+
+    net_benefit = {
+        "trades_flagged": flagged_count,
+        "hard_stops_captured": tp, "hard_stops_missed": fn,
+        "trailing_winners_sacrificed": len(trailing_winner_rows),
+        "total_saved_r": total_saved_r, "total_lost_r": total_lost_r, "net_benefit_r": net_benefit_r,
+        "total_saved_dollars": total_saved_dollars, "total_lost_dollars": total_lost_dollars,
+        "net_benefit_dollars": net_benefit_dollars,
+        "profit_factor_original": _round(original_pf, 3) if isinstance(original_pf, (int, float)) else original_pf,
+        "profit_factor_modified": _round(modified_pf, 3) if isinstance(modified_pf, (int, float)) else modified_pf,
+        "profit_factor_impact": profit_factor_impact,
+        "max_drawdown_original": _round(original_dd, 2), "max_drawdown_modified": _round(modified_dd, 2),
+        "max_drawdown_impact": max_drawdown_impact,
+        "excluded_from_r_accounting": flagged_count - len(hard_stop_rows) - len(trailing_winner_rows),
+    }
+
+    candidate_trades = []
+    for idx in flagged.index:
+        row = flagged.loc[idx]
+        candidate_trades.append({
+            "telemetry_id": int(row["telemetry_id"]), "symbol": row["symbol"], "entry_time": row["entry_time"],
+            "evaluation_offset": offset,
+            "current_r": _round(row.get(r_col), 3), "rsi_delta": _round(row.get(rsi_col), 2),
+            "returned_inside_opening_range": bool(row.get(or_col) == 1),
+            "lost_ema9": bool(row.get(ema9_col) == 1),
+            "exit_reason": row["exit_reason"], "final_r": _round(row["final_r"], 3),
+            "capture_pct": _round(row["capture_pct"], 1),
+            "delta_r": _round(row["_delta_r"], 3),
+            "classification": "TP" if row["_category"] == "hard_stop" else "FP",
+        })
+
+    return {
+        "rule": rule_key, "label": rule["label"], "description": rule["description"],
+        "confusion_matrix": {"tp": tp, "fp": fp, "fn": fn, "tn": tn, "total": total},
+        "metrics": {
+            "precision": _round(precision, 3), "recall": _round(recall, 3), "f1_score": _round(f1, 3),
+            "accuracy": _round(accuracy, 3), "balanced_accuracy": _round(balanced_accuracy, 3),
+        },
+        "outcome_breakdown": outcome_breakdown,
+        "net_benefit": net_benefit,
+        "candidate_trades": candidate_trades,
+    }
+
+
 def export_dataframe(df: pd.DataFrame, fmt: str, path):
     """CSV/Excel export of the flattened trade matrix (see flatten_trades)
     - `fmt` is "csv" or "xlsx"."""
@@ -917,6 +1237,95 @@ def export_analysis_xlsx(payload: dict, scope_label: str, group_a_label: str, gr
     write_table(early_ws, early_rows, columns=["offset", "metric", "feature_importance", "mutual_information"] if early_rows else None)
 
     write_table(wb.create_sheet("Suggested Filters"), payload["suggested_filters"])
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def export_rule_evaluation_xlsx(payload: dict, scope_label: str) -> bytes:
+    """One Rule Evaluation result (see evaluate_rule) as a downloadable
+    multi-sheet .xlsx workbook - Summary (confusion matrix, classification
+    metrics, Net Benefit Engine), Outcome Breakdown, and the full Candidate
+    Trades table (every flagged trade - "Export all flagged trades" per
+    the feature's own spec). Same styling convention as export_analysis_
+    xlsx/src.trades_xlsx.build_trades_xlsx."""
+    from io import BytesIO
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    header_fill = PatternFill(start_color="EEF1F5", end_color="EEF1F5", fill_type="solid")
+    header_font = Font(bold=True)
+
+    def autosize(ws, ncols):
+        for col in range(1, ncols + 1):
+            letter = get_column_letter(col)
+            width = max((len(str(c.value)) for c in ws[letter] if c.value is not None), default=8)
+            ws.column_dimensions[letter].width = min(max(width + 2, 8), 40)
+
+    def write_table(ws, rows: list[dict], columns: list[str] | None = None):
+        if not rows:
+            ws.append(["No data"])
+            return
+        cols = columns or list(rows[0].keys())
+        ws.append(cols)
+        for cell in ws[ws.max_row]:
+            cell.font, cell.fill = header_font, header_fill
+        for row in rows:
+            ws.append([row.get(c) for c in cols])
+        ws.freeze_panes = "A2"
+        autosize(ws, len(cols))
+
+    wb = Workbook()
+    summary_ws = wb.active
+    summary_ws.title = "Summary"
+    summary_ws.append([f"Rule Evaluation - {payload['label']}"])
+    summary_ws["A1"].font = Font(bold=True, size=14)
+    summary_ws.append([payload["description"]])
+    summary_ws.append([f"Scope: {scope_label} | Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}"])
+    summary_ws.append([])
+
+    cm = payload["confusion_matrix"]
+    summary_ws.append(["Confusion Matrix (vs actual Hard Stop)"])
+    summary_ws[summary_ws.max_row][0].font = Font(bold=True)
+    summary_ws.append(["True Positive (flagged & hard stop)", cm["tp"]])
+    summary_ws.append(["False Positive (flagged & not hard stop)", cm["fp"]])
+    summary_ws.append(["False Negative (not flagged & hard stop)", cm["fn"]])
+    summary_ws.append(["True Negative (not flagged & not hard stop)", cm["tn"]])
+    summary_ws.append(["Total trades", cm["total"]])
+    summary_ws.append([])
+
+    m = payload["metrics"]
+    summary_ws.append(["Metric", "Value"])
+    for cell in summary_ws[summary_ws.max_row]:
+        cell.font, cell.fill = header_font, header_fill
+    for label, key in [("Precision", "precision"), ("Recall", "recall"), ("F1 Score", "f1_score"),
+                        ("Accuracy", "accuracy"), ("Balanced Accuracy", "balanced_accuracy")]:
+        summary_ws.append([label, m[key]])
+    summary_ws.append([])
+
+    nb = payload.get("net_benefit")
+    if nb:
+        summary_ws.append(["Net Benefit Engine"])
+        summary_ws[summary_ws.max_row][0].font = Font(bold=True)
+        for label, key in [
+            ("Trades Flagged", "trades_flagged"), ("Hard Stops Captured", "hard_stops_captured"),
+            ("Hard Stops Missed", "hard_stops_missed"), ("Trailing Winners Sacrificed", "trailing_winners_sacrificed"),
+            ("Total R Saved", "total_saved_r"), ("Total R Lost", "total_lost_r"), ("Net Benefit R", "net_benefit_r"),
+            ("Net Benefit $", "net_benefit_dollars"),
+            ("Profit Factor (original)", "profit_factor_original"), ("Profit Factor (modified)", "profit_factor_modified"),
+            ("Profit Factor Impact", "profit_factor_impact"),
+            ("Max Drawdown $ (original)", "max_drawdown_original"), ("Max Drawdown $ (modified)", "max_drawdown_modified"),
+            ("Max Drawdown Impact", "max_drawdown_impact"),
+            ("Flagged trades excluded from R accounting (not Hard Stop/Trailing Winner)", "excluded_from_r_accounting"),
+        ]:
+            summary_ws.append([label, nb[key]])
+    autosize(summary_ws, 2)
+
+    write_table(wb.create_sheet("Outcome Breakdown"), payload["outcome_breakdown"])
+    write_table(wb.create_sheet("Candidate Trades"), payload["candidate_trades"])
 
     buf = BytesIO()
     wb.save(buf)
