@@ -2320,6 +2320,54 @@ def api_telemetry_rule_evaluation_export(
     )
 
 
+def _parse_rule_keys(rules: str) -> list[str]:
+    """Shared validation for the Rule Evaluation Matrix endpoints below -
+    `rules` is a comma-separated list of RULES keys (e.g. "early_failure_
+    v1,early_failure_v2"). Raises the same 400 either endpoint would want
+    on an empty or unknown key, so both stay identical."""
+    rule_keys = [r for r in rules.split(",") if r]
+    if not rule_keys:
+        raise HTTPException(status_code=400, detail="rules must include at least one rule key")
+    unknown = [r for r in rule_keys if r not in telemetry_engine.RULES]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown rule(s): {', '.join(unknown)}. Must be one of {sorted(telemetry_engine.RULES)}")
+    return rule_keys
+
+
+@app.get("/api/telemetry/rule_evaluation_matrix")
+def api_telemetry_rule_evaluation_matrix(
+    rules: str, backtest_id: int | None = Query(None), strategy_id: int | None = Query(None),
+    account_id: int = Depends(require_account), user: str = Depends(require_user),
+):
+    """The "Rule Evaluation Matrix" section - the same evaluate_rule
+    computation run for every rule key in `rules` at once, so their
+    results can be lined up side by side (see telemetry_engine.evaluate_
+    rule_matrix's own docstring for why this reuses evaluate_rule rather
+    than a separate computation path)."""
+    rule_keys = _parse_rule_keys(rules)
+    rows, df = _telemetry_dataframe(account_id, backtest_id, strategy_id)
+    return {"results": telemetry_engine.evaluate_rule_matrix(rows, df, rule_keys)}
+
+
+@app.get("/api/telemetry/rule_evaluation_matrix_export.xlsx")
+def api_telemetry_rule_evaluation_matrix_export(
+    rules: str, backtest_id: int | None = Query(None), strategy_id: int | None = Query(None),
+    account_id: int = Depends(require_account), user: str = Depends(require_user),
+):
+    rule_keys = _parse_rule_keys(rules)
+    rows, df = _telemetry_dataframe(account_id, backtest_id, strategy_id)
+    if df.empty:
+        raise HTTPException(status_code=404, detail="No telemetry rows to evaluate for this selection")
+    results = telemetry_engine.evaluate_rule_matrix(rows, df, rule_keys)
+    scope_label = f"Backtest #{backtest_id}" if backtest_id else (f"Strategy #{strategy_id} (pooled)" if strategy_id else "All telemetry")
+    xlsx_bytes = telemetry_engine.export_rule_matrix_xlsx(results, scope_label)
+    _log_account_action(account_id, user, action="telemetry_rule_matrix_export", rules=rule_keys, backtest_id=backtest_id, strategy_id=strategy_id)
+    return Response(
+        content=xlsx_bytes, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="trade_telemetry_rule_matrix.xlsx"'},
+    )
+
+
 # --------------------------------------------------------- backtest worker ---
 # Token management is browser-session-authenticated (a real logged-in user
 # creates/revokes these), like everything else in this file up to here.

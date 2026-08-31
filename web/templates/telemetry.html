@@ -120,6 +120,7 @@
       <ul class="nav nav-pills small mb-3" id="tel-analysis-mode-tabs">
         <li class="nav-item"><button class="nav-link active" data-mode="compare">Compare Groups</button></li>
         <li class="nav-item"><button class="nav-link" data-mode="rule">Rule Evaluation</button></li>
+        <li class="nav-item"><button class="nav-link" data-mode="matrix">Rule Evaluation Matrix</button></li>
       </ul>
 
       <div id="tel-mode-compare">
@@ -193,6 +194,7 @@
         <div id="tel-rule-description" class="small text-muted mb-3"></div>
 
         <div id="tel-rule-results" class="d-none">
+          <div id="tel-rule-na-note" class="small text-muted mb-2"></div>
           <div class="row g-3 mb-3">
             <div class="col-12 col-md-6">
               <div class="small fw-bold mb-1">Confusion Matrix <span class="text-muted fw-normal">(vs actual Hard Stop)</span></div>
@@ -227,6 +229,33 @@
               <tbody id="tel-candidates-body"></tbody>
             </table>
           </div>
+        </div>
+      </div>
+
+      <div id="tel-mode-matrix" class="d-none">
+        <div class="small text-muted mb-3">
+          Evaluate several proposed rules at once and compare their headline numbers side by side - each row is
+          the exact same evaluate_rule computation the "Rule Evaluation" tab uses for a single rule, so a rule
+          can never behave differently here.
+        </div>
+        <div class="mb-2" id="tel-matrix-rule-checks"></div>
+        <div class="mb-3">
+          <button id="btn-evaluate-matrix" class="btn btn-primary btn-sm">Evaluate Selected Rules</button>
+          <a id="tel-export-matrix-xlsx" class="btn btn-outline-secondary btn-sm disabled" href="#">Export Matrix (Excel)</a>
+          <button type="button" class="info-icon" style="border:none;" data-bs-toggle="modal" data-bs-target="#tel-analysis-export-help-modal" aria-label="הסבר">i</button>
+        </div>
+        <div id="tel-matrix-error" class="text-danger small"></div>
+        <div class="table-responsive">
+          <table class="table table-sm table-hover mono" id="tel-matrix-table">
+            <thead>
+              <tr>
+                <th>Rule</th><th>TP</th><th>FP</th><th>FN</th><th>TN</th><th>Excl. N/A</th>
+                <th>Precision</th><th>Recall</th><th>F1</th><th>Accuracy</th>
+                <th>Flagged</th><th>Net Benefit R</th><th>Net Benefit $</th><th>PF Impact</th><th>Max DD Impact</th>
+              </tr>
+            </thead>
+            <tbody id="tel-matrix-body"><tr><td colspan="15" class="text-center text-muted">Pick rules above and click "Evaluate Selected Rules"</td></tr></tbody>
+          </table>
         </div>
       </div>
     </div>
@@ -297,18 +326,37 @@
           <h6 class="fw-bold mt-3">טאב Rule Evaluation</h6>
           <p>
             בניגוד ל-Compare Groups (שבו בוחרים שתי קבוצות באופן ידני), בטאב הזה בוחרים רק כלל
-            (למשל Early Failure Candidate), והמערכת מריצה הערכה אוטומטית מלאה:
+            מתוך רשימה (ראו "ארבעת כללי Early Failure" למטה), והמערכת מריצה הערכה אוטומטית מלאה:
           </p>
           <ul class="small">
-            <li><strong>Confusion Matrix</strong> — הכלל מול התוצאה האמיתית (Hard Stop בפועל): True/False Positive/Negative, Precision, Recall, F1, Accuracy, Balanced Accuracy.</li>
+            <li><strong>Confusion Matrix</strong> — הכלל מול התוצאה האמיתית (Hard Stop בפועל): True/False Positive/Negative, Precision, Recall, F1, Accuracy, Balanced Accuracy. "Total trades evaluated" סופר רק טריידים שהכלל היה יכול להיבדק עליהם בכלל (ראו "לא ניתן להערכה" למטה).</li>
             <li><strong>Rule Outcome Breakdown</strong> — מבין הטריידים שהכלל היה מפעיל עליהם, כמה בפועל הפכו ל-Hard Stop, Trailing Winner, End Of Day Winner/Loser, או אחר.</li>
-            <li><strong>Net Benefit Engine</strong> — לכל טרייד מסומן: Delta R = ה-R בנקודת ההערכה פחות ה-Final R בפועל. "Total R Saved" מחושב רק על טריידים שהפכו בפועל ל-Hard Stop (יציאה מוקדמת הייתה מיטיבה), "Total R Lost" רק על טריידים שהפכו בפועל ל-Trailing Winner (יציאה מוקדמת הייתה עולה רווח). Net Benefit R/$ = Saved פחות Lost, וגם השפעה משוערת על Profit Factor ו-Max Drawdown של כל התיק.</li>
+            <li><strong>Net Benefit Engine</strong> — לכל טרייד מסומן: Delta R = ה-R בנקודת ההערכה פחות ה-Final R בפועל. <strong>Net Benefit R/$ מחושב כעת על סכום Delta R/$ של <u>כל</u> הטריידים המסומנים</strong> (Hard Stop, Trailing Winner, End Of Day Winner/Loser ואחר — כולם, לא רק שני הקטגוריות הראשונות). "Hard Stop Savings R" ו-"Recovery Winner Cost R" נשארים כפירוט נפרד: כמה מתוך Net Benefit R הגיע מטריידים שהפכו ל-Hard Stop בפועל וכמה מטריידים שהפכו ל-Trailing Winner בפועל — וגם השפעה משוערת על Profit Factor ו-Max Drawdown של כל התיק.</li>
             <li><strong>Candidate Trades</strong> — טבלת כל הטריידים שהכלל היה מסמן, לניתוח פרטני וייצוא.</li>
           </ul>
           <p class="small text-muted">
-            טריידים מסומנים שהפכו ל-End Of Day Winner/Loser או "אחר" אינם נכללים ב-Total Saved/Lost R
-            (רק Hard Stop ו-Trailing Winner) — מספרם מוצג בנפרד כדי שהסכומים לא ייראו כאילו הם מכסים
-            את כל הטריידים המסומנים.
+            <strong>לא ניתן להערכה (rule not applicable):</strong> טרייד שיצא בפועל <strong>לפני</strong>
+            נקודת ההערכה של הכלל (למשל טרייד שעשה Hard Stop אחרי 6 דקות, כשהכלל נבדק ב-10 דקות)
+            מוצא לגמרי מהחישוב — מ-Confusion Matrix, מ-Outcome Breakdown, מ-Net Benefit ומטבלת
+            Candidate Trades — כי לכלל לא היה בכלל מידע להחליט עליו באותו רגע. מספר הטריידים
+            שהוצאו כך מוצג בנפרד ("Excluded - rule not applicable"), לעולם לא בשקט.
+          </p>
+          <h6 class="fw-bold mt-3">ארבעת כללי Early Failure</h6>
+          <ul class="small">
+            <li><strong>Early Failure V1</strong> — הכלל המקורי: ב-10 דקות, Trailing עדיין לא הופעל, Current R &le; -0.40R, RSI Delta &le; -5, וגם (Returned Inside Opening Range <strong>או</strong> Lost EMA9).</li>
+            <li><strong>Early Failure V2</strong> — כמו V1 אבל דורש ששני תנאי המבנה יתקיימו <strong>יחד</strong> (Returned Inside Opening Range <strong>וגם</strong> Lost EMA9) — בודק אם דרישה מחמירה יותר משפרת את ה-Precision.</li>
+            <li><strong>Early Failure V3</strong> — גרסת "שבירת מבנה": כמו V1/V2 אבל דורש Returned Inside Opening Range בוודאות, וגם שבירה אמיתית של מבנה (Broke Retest Low <strong>או</strong> Broke Breakout Candle Low) במקום Lost EMA9.</li>
+            <li><strong>Early Failure V4</strong> — גרסת "אישור מושהה": שלב 1 (אזהרה) ב-10 דקות זהה לחלק מ-V1, ורק אם הוא מתקיים נבדק שלב 2 (אישור יציאה) ב-15 דקות עם תנאים מחמירים יותר (Current R &le; -0.75R, RSI Delta &le; -8, המחיר מתחת ל-EMA9, ואין שיא אינטרא-דיי חדש מאז הכניסה) — נותן לטריידים שמתאוששים עוד 5 דקות לפני שמסמנים אותם.
+              נקודת ההערכה של V4 היא +15m (לא +10m) — כלומר טרייד שיצא לפני 15 דקות "לא ניתן להערכה" עבור הכלל הזה.</li>
+          </ul>
+          <h6 class="fw-bold mt-3">טאב Rule Evaluation Matrix</h6>
+          <p>
+            מריץ את אותה הערכה בדיוק (evaluate_rule) על כמה כללים בבת אחת, ומציג אותם זה לצד זה
+            בטבלה אחת — Confusion Matrix, Precision/Recall/F1/Accuracy, כמה טריידים סומנו, ו-Net
+            Benefit R/$ ו-Profit Factor/Max Drawdown Impact לכל כלל בשורה משלו. מיועד להשוות במהירות
+            בין V1/V2/V3/V4 (או כל כלל עתידי שיתווסף) על אותו scope בדיוק, בלי לעבור בין הכללים
+            אחד־אחד בטאב Rule Evaluation. יש כפתור ייצוא ל-Excel נפרד (גיליון סיכום + גיליון
+            Candidate Trades לכל כלל שנבחר).
           </p>
         </div>
         <div class="modal-footer">
@@ -412,13 +460,17 @@ document.addEventListener("DOMContentLoaded", () => {
       btn.classList.add("active");
       document.getElementById("tel-mode-compare").classList.toggle("d-none", btn.dataset.mode !== "compare");
       document.getElementById("tel-mode-rule").classList.toggle("d-none", btn.dataset.mode !== "rule");
+      document.getElementById("tel-mode-matrix").classList.toggle("d-none", btn.dataset.mode !== "matrix");
     });
   });
+
+  document.getElementById("btn-evaluate-matrix").addEventListener("click", evaluateRuleMatrix);
 
   refreshBacktestPicker();
   refreshScopeStrategyPicker();
   refreshRunHistory();
   refreshRulePicker();
+  refreshMatrixRuleChecks();
 });
 
 async function refreshBacktestPicker() {
@@ -647,6 +699,9 @@ function onScopeChange() {
   document.getElementById("tel-rule-results").classList.add("d-none");
   document.getElementById("tel-export-rule-xlsx").classList.add("disabled");
   document.getElementById("tel-rule-error").textContent = "";
+  document.getElementById("tel-matrix-error").textContent = "";
+  document.getElementById("tel-export-matrix-xlsx").classList.add("disabled");
+  document.getElementById("tel-matrix-body").innerHTML = `<tr><td colspan="15" class="text-center text-muted">Pick rules above and click "Evaluate Selected Rules"</td></tr>`;
   if (picked) { loadTrades(); refreshAnalysis(); loadMetricColumns(); }
 }
 
@@ -847,6 +902,9 @@ async function evaluateRule() {
   exportLink.classList.remove("disabled");
   resultsEl.classList.remove("d-none");
 
+  document.getElementById("tel-rule-na-note").textContent = data.excluded_not_applicable
+    ? `${data.excluded_not_applicable} trade(s) excluded - the trade had already exited before this rule's own evaluation point (rule not applicable).`
+    : "";
   renderConfusionMatrix(data.confusion_matrix);
   renderRuleMetrics(data.metrics);
   renderRuleDashboardCard(data.net_benefit);
@@ -865,7 +923,7 @@ function renderConfusionMatrix(cm) {
       <tr><td>False Positive <span class="text-muted">(flagged &amp; not hard stop)</span></td><td>${cm.fp}</td></tr>
       <tr><td>False Negative <span class="text-muted">(not flagged &amp; hard stop)</span></td><td>${cm.fn}</td></tr>
       <tr><td>True Negative <span class="text-muted">(not flagged &amp; not hard stop)</span></td><td>${cm.tn}</td></tr>
-      <tr><td><strong>Total trades</strong></td><td><strong>${cm.total}</strong></td></tr>
+      <tr><td><strong>Total trades evaluated</strong></td><td><strong>${cm.total}</strong></td></tr>
     </tbody>`;
 }
 
@@ -888,8 +946,8 @@ function renderRuleDashboardCard(nb) {
     ["Hard Stops Captured", nb.hard_stops_captured],
     ["Hard Stops Missed", nb.hard_stops_missed],
     ["Trailing Winners Sacrificed", nb.trailing_winners_sacrificed],
-    ["Total R Saved", fmtNum(nb.total_saved_r, 2)],
-    ["Total R Lost", fmtNum(nb.total_lost_r, 2)],
+    ["Hard Stop Savings R", fmtNum(nb.hard_stop_savings_r, 2)],
+    ["Recovery Winner Cost R", fmtNum(nb.recovery_winner_cost_r, 2)],
     ["Net Benefit R", fmtNum(nb.net_benefit_r, 2)],
     ["Net Benefit $", fmtNum(nb.net_benefit_dollars, 2)],
     ["Profit Factor Impact", fmtNum(nb.profit_factor_impact, 3)],
@@ -901,8 +959,8 @@ function renderRuleDashboardCard(nb) {
         <div class="small text-muted">${label}</div>
         <div class="fw-bold">${value}</div>
       </div>
-    </div>`).join("") + (nb.excluded_from_r_accounting ? `
-    <div class="col-12"><div class="small text-muted mt-1">${nb.excluded_from_r_accounting} flagged trade(s) excluded from R/$ accounting (ended as End Of Day Winner/Loser/Other, not Hard Stop or Trailing Winner).</div></div>` : "");
+    </div>`).join("") + (nb.other_outcome_count ? `
+    <div class="col-12"><div class="small text-muted mt-1">${nb.other_outcome_count} flagged trade(s) ended as End Of Day Winner/Loser/Other (Delta R ${fmtNum(nb.other_outcome_delta_r, 2)}) - included in Net Benefit R/$ above, shown here separately from Hard Stop Savings/Recovery Winner Cost.</div></div>` : "");
 }
 
 function renderOutcomeBreakdown(rows) {
@@ -927,6 +985,58 @@ function renderCandidateTrades() {
       <td>${fmtNum(t.capture_pct, 1)}</td><td>${fmtNum(t.delta_r)}</td>
       <td><span class="badge ${t.classification === 'TP' ? 'bg-success' : 'bg-warning text-dark'}">${t.classification}</span></td>
     </tr>`).join("");
+}
+
+// --- Rule Evaluation Matrix tab ------------------------------------------
+let matrixRules = [];  // last /api/telemetry/rules result, reused by both the single-rule picker and this checkbox list
+
+async function refreshMatrixRuleChecks() {
+  const el = document.getElementById("tel-matrix-rule-checks");
+  let payload;
+  try { payload = await api("/api/telemetry/rules"); } catch (e) { el.innerHTML = `<span class="text-danger small">${e.message}</span>`; return; }
+  matrixRules = payload.rules || [];
+  el.innerHTML = matrixRules.map(r => `
+    <div class="form-check form-check-inline">
+      <input class="form-check-input" type="checkbox" value="${r.key}" id="tel-matrix-check-${r.key}" checked>
+      <label class="form-check-label small" for="tel-matrix-check-${r.key}" title="${r.description}">${r.label}</label>
+    </div>`).join("");
+}
+
+function selectedMatrixRuleKeys() {
+  return matrixRules.map(r => r.key).filter(key => document.getElementById(`tel-matrix-check-${key}`)?.checked);
+}
+
+async function evaluateRuleMatrix() {
+  const errorEl = document.getElementById("tel-matrix-error");
+  const exportLink = document.getElementById("tel-export-matrix-xlsx");
+  const tbody = document.getElementById("tel-matrix-body");
+  errorEl.textContent = "";
+  exportLink.classList.add("disabled");
+  if (!telemetryScope.backtest_id && !telemetryScope.strategy_id) { errorEl.textContent = "Pick a scope above first."; return; }
+  const ruleKeys = selectedMatrixRuleKeys();
+  if (!ruleKeys.length) { errorEl.textContent = "Pick at least one rule first."; return; }
+  const params = new URLSearchParams(scopeQuery());
+  params.set("rules", ruleKeys.join(","));
+  let data;
+  try { data = await api(`/api/telemetry/rule_evaluation_matrix?${params.toString()}`); } catch (e) { errorEl.textContent = e.message; return; }
+
+  exportLink.href = `/api/telemetry/rule_evaluation_matrix_export.xlsx?${params.toString()}`;
+  exportLink.classList.remove("disabled");
+
+  const results = data.results || [];
+  if (!results.length) { tbody.innerHTML = `<tr><td colspan="15" class="text-center text-muted">No results</td></tr>`; return; }
+  tbody.innerHTML = results.map(r => {
+    const cm = r.confusion_matrix, m = r.metrics, nb = r.net_benefit || {};
+    return `
+    <tr>
+      <td>${r.label}</td><td>${cm.tp}</td><td>${cm.fp}</td><td>${cm.fn}</td><td>${cm.tn}</td>
+      <td>${r.excluded_not_applicable || 0}</td>
+      <td>${fmtNum(m.precision)}</td><td>${fmtNum(m.recall)}</td><td>${fmtNum(m.f1_score)}</td><td>${fmtNum(m.accuracy)}</td>
+      <td>${nb.trades_flagged ?? 0}</td>
+      <td>${fmtNum(nb.net_benefit_r, 2)}</td><td>${fmtNum(nb.net_benefit_dollars, 2)}</td>
+      <td>${fmtNum(nb.profit_factor_impact, 3)}</td><td>${fmtNum(nb.max_drawdown_impact, 2)}</td>
+    </tr>`;
+  }).join("");
 }
 </script>
 </body>

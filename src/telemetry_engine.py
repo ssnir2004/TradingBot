@@ -48,6 +48,9 @@ from src import backtest_data, backtest_engine, db, es_filter, orb, perf, techni
 
 SNAPSHOT_OFFSETS = [("entry", 0), ("1m", 1), ("3m", 3), ("5m", 5), ("10m", 10), ("15m", 15)]
 _NON_ENTRY_LABELS = [label for label, _ in SNAPSHOT_OFFSETS if label != "entry"]
+_OFFSET_MINUTES = dict(SNAPSHOT_OFFSETS)  # "10m" -> 10, "15m" -> 15, ... - evaluate_rule's own
+# rule_evaluation_timestamp lookup (see _rule_applicable_mask) needs the nominal
+# offset in minutes for whichever offset a given rule evaluates at.
 
 # Same EWM-convergence reasoning as src/entry_metrics.py's own _EWM_WARMUP_
 # BARS (RSI(14)/EMA(9/20/50)/MACD/ADX all need enough trailing history to
@@ -118,6 +121,81 @@ def _early_failure_candidate(t, cfg) -> bool:
     return t.get("10m_returned_inside_opening_range") == 1 or t.get("10m_lost_ema9") == 1
 
 
+def _early_failure_v2(t, cfg) -> bool:
+    """Rule B - "Early Failure V2" (OR -> AND version): identical to
+    _early_failure_candidate (Rule A / "Early Failure V1") except the two
+    structural-failure conditions must BOTH hold rather than either -
+    tests whether requiring both increases Precision (see the "Add
+    Additional Early Failure Rule Evaluations" spec's own Rule B)."""
+    if t.get("10m_trail_activated_as_of") != 0:
+        return False
+    current_r = t.get("10m_current_r")
+    rsi_delta = t.get("10m_rsi_delta")
+    if current_r is None or not (current_r <= -0.40):
+        return False
+    if rsi_delta is None or not (rsi_delta <= -5):
+        return False
+    return t.get("10m_returned_inside_opening_range") == 1 and t.get("10m_lost_ema9") == 1
+
+
+def _early_failure_v3(t, cfg) -> bool:
+    """Rule C - "Early Failure V3" (structural failure version): same
+    momentum gate as V1/V2 (not yet trailing, Current R <= -0.40R, RSI
+    Delta <= -5), Returned Inside Opening Range REQUIRED (not just one of
+    two options), plus a real structure break (Broke Retest Low OR Broke
+    Breakout Candle Low) - tests whether stronger structure failure
+    improves results."""
+    if t.get("10m_trail_activated_as_of") != 0:
+        return False
+    current_r = t.get("10m_current_r")
+    rsi_delta = t.get("10m_rsi_delta")
+    if current_r is None or not (current_r <= -0.40):
+        return False
+    if rsi_delta is None or not (rsi_delta <= -5):
+        return False
+    if t.get("10m_returned_inside_opening_range") != 1:
+        return False
+    return t.get("10m_broke_retest_low") == 1 or t.get("10m_broke_breakout_candle_low") == 1
+
+
+def _early_failure_v4(t, cfg) -> bool:
+    """Rule D - "Early Failure V4" (delayed confirmation version): a
+    Stage 1 WARNING at +10m (not yet trailing, Current R <= -0.40R, RSI
+    Delta <= -5, Returned Inside Opening Range = True) must be followed by
+    a Stage 2 CONFIRMATION at +15m (still not yet trailing, Current R <=
+    -0.75R, RSI Delta <= -8, Price Below EMA9, no new intraday high since
+    entry) - gives a recovering trade an extra 5 minutes before flagging
+    it, rather than acting on the +10m warning alone. "Price Below EMA9"
+    reuses the already-stored above_ema9 snapshot field (== 0, i.e. NOT
+    above - same strict '>' comparison _indicator_snapshot already applies
+    everywhere else in this module) rather than a new stored field.
+    evaluation_offset is "15m" (see RULES) - the trade must have still
+    been open at +15m for this rule to even be evaluable at all, exactly
+    what Fix #2/_rule_applicable_mask is for."""
+    if t.get("10m_trail_activated_as_of") != 0:
+        return False
+    r10 = t.get("10m_current_r")
+    rsi10 = t.get("10m_rsi_delta")
+    if r10 is None or not (r10 <= -0.40):
+        return False
+    if rsi10 is None or not (rsi10 <= -5):
+        return False
+    if t.get("10m_returned_inside_opening_range") != 1:
+        return False
+
+    if t.get("15m_trail_activated_as_of") != 0:
+        return False
+    r15 = t.get("15m_current_r")
+    rsi15 = t.get("15m_rsi_delta")
+    if r15 is None or not (r15 <= -0.75):
+        return False
+    if rsi15 is None or not (rsi15 <= -8):
+        return False
+    if t.get("15m_above_ema9") != 0:  # "Price Below EMA9 = True"
+        return False
+    return t.get("15m_new_intraday_high_since_entry") == 0  # "New Intraday High Since Entry = False"
+
+
 DEFAULT_GROUPS = {
     "winners": lambda t, cfg: t["final_r"] is not None and t["final_r"] > 0,
     "losers": lambda t, cfg: t["final_r"] is not None and t["final_r"] < 0,
@@ -145,11 +223,46 @@ DEFAULT_GROUPS = {
 # in evaluate_rule itself, so a future rule can be defined against a
 # different offset (e.g. a 5-minute rule) by adding an entry here alone.
 RULES = {
-    "early_failure_candidate": {
-        "label": "Early Failure Candidate (10-minute rule)",
-        "description": "Trades that would have triggered the proposed 10-minute Early Failure rule.",
+    "early_failure_v1": {
+        "label": "Early Failure V1",
+        "description": (
+            "At 10 minutes: not yet trailing, Current R <= -0.40R, RSI Delta <= -5, "
+            "AND (Returned Inside Opening Range OR Lost EMA9)."
+        ),
         "predicate": _early_failure_candidate,
         "evaluation_offset": "10m",
+    },
+    "early_failure_v2": {
+        "label": "Early Failure V2",
+        "description": (
+            "OR -> AND version of V1: at 10 minutes, not yet trailing, Current R <= -0.40R, "
+            "RSI Delta <= -5, AND Returned Inside Opening Range = True AND Lost EMA9 = True. "
+            "Tests whether requiring BOTH structural failures increases Precision."
+        ),
+        "predicate": _early_failure_v2,
+        "evaluation_offset": "10m",
+    },
+    "early_failure_v3": {
+        "label": "Early Failure V3",
+        "description": (
+            "Structural failure version: at 10 minutes, not yet trailing, Current R <= -0.40R, "
+            "RSI Delta <= -5, Returned Inside Opening Range = True, AND (Broke Retest Low OR "
+            "Broke Breakout Candle Low). Tests whether stronger structure failure improves results."
+        ),
+        "predicate": _early_failure_v3,
+        "evaluation_offset": "10m",
+    },
+    "early_failure_v4": {
+        "label": "Early Failure V4",
+        "description": (
+            "Delayed confirmation version: a Stage 1 warning at 10 minutes (not yet trailing, "
+            "Current R <= -0.40R, RSI Delta <= -5, Returned Inside Opening Range = True) must be "
+            "followed by a Stage 2 exit confirmation at 15 minutes (still not yet trailing, "
+            "Current R <= -0.75R, RSI Delta <= -8, Price Below EMA9 = True, New Intraday High "
+            "Since Entry = False). Allows recovering trades more time before flagging."
+        ),
+        "predicate": _early_failure_v4,
+        "evaluation_offset": "15m",
     },
 }
 
@@ -982,6 +1095,29 @@ def _max_drawdown_from_pnls(items: list[tuple]) -> float:
     return max_dd
 
 
+def _rule_applicable_mask(df: pd.DataFrame, offset_minutes: int) -> pd.Series:
+    """Fix #2 ("Add Additional Early Failure Rule Evaluations"): a rule
+    evaluated at +N minutes can only ever have been evaluated on a trade
+    that was STILL OPEN at entry_time + N minutes - a trade that already
+    hard-stopped (or otherwise exited) before that point never reached the
+    bar the rule reads from (e.g. a 10-minute rule can't be scored against
+    a trade that stopped out after 6 minutes: the +10m snapshot data
+    didn't exist yet at the moment the trade needed a decision). Scoring
+    it anyway would silently credit or blame the rule for information it
+    could never have seen. Compares real entry/exit timestamps (not the
+    snapshot's own bar-snapped time) so this is exact regardless of the
+    module's own 5-minute bar resolution. `True` (applicable) whenever
+    entry_time/exit_time can't even be parsed, rather than silently
+    dropping a row this function can't otherwise account for - same
+    "never silently drop, only visibly exclude" convention as evaluate_
+    rule's own excluded_not_applicable count below."""
+    entry_ts = pd.to_datetime(df["entry_time"], utc=True, errors="coerce")
+    exit_ts = pd.to_datetime(df["exit_time"], utc=True, errors="coerce")
+    eval_ts = entry_ts + pd.Timedelta(minutes=offset_minutes)
+    not_applicable = entry_ts.notna() & exit_ts.notna() & (exit_ts < eval_ts)
+    return ~not_applicable
+
+
 def evaluate_rule(rows: list[dict], df: pd.DataFrame, rule_key: str) -> dict:
     """The Rule Evaluation tab's full computation - everything is purely
     RETROSPECTIVE/DESCRIPTIVE over already-closed, already-recorded trades
@@ -998,9 +1134,18 @@ def evaluate_rule(rows: list[dict], df: pd.DataFrame, rule_key: str) -> dict:
     alongside the flattened `df` only for each trade's own snapshots[...]
     ["bar_time"] (Max Drawdown Impact's own modified exit-time lookup;
     flatten_trades doesn't carry bar_time forward, on purpose - see its
-    own docstring)."""
+    own docstring).
+
+    Fix #2 ("Add Additional Early Failure Rule Evaluations"): a trade that
+    actually exited BEFORE this rule's own evaluation_offset (see _rule_
+    applicable_mask) is excluded from EVERY part of this computation -
+    confusion matrix, outcome breakdown, Net Benefit, candidate trades -
+    "total" in the confusion matrix is therefore the count of EVALUABLE
+    trades, not every trade in scope; `excluded_not_applicable` reports how
+    many were left out and why, so that exclusion is never silent."""
     rule = RULES[rule_key]
     offset = rule["evaluation_offset"]
+    offset_minutes = _OFFSET_MINUTES[offset]
     r_col, rsi_col = f"{offset}_current_r", f"{offset}_rsi_delta"
     or_col, ema9_col = f"{offset}_returned_inside_opening_range", f"{offset}_lost_ema9"
 
@@ -1008,18 +1153,27 @@ def evaluate_rule(rows: list[dict], df: pd.DataFrame, rule_key: str) -> dict:
         "rule": rule_key, "label": rule["label"], "description": rule["description"],
         "confusion_matrix": {"tp": 0, "fp": 0, "fn": 0, "tn": 0, "total": 0},
         "metrics": {"precision": None, "recall": None, "f1_score": None, "accuracy": None, "balanced_accuracy": None},
-        "outcome_breakdown": [], "net_benefit": None, "candidate_trades": [],
+        "outcome_breakdown": [], "net_benefit": None, "candidate_trades": [], "excluded_not_applicable": 0,
     }
     if df.empty:
         return empty
 
-    triggered = df.apply(lambda row: bool(rule["predicate"](row, {})), axis=1)
+    applicable = _rule_applicable_mask(df, offset_minutes)
+    excluded_not_applicable = int((~applicable).sum())
+
+    # `triggered` is forced False for every inapplicable trade regardless
+    # of what the predicate itself would have said (a predicate reading a
+    # missing/None offset column often already returns False on its own,
+    # but that's incidental to THIS column being missing, not a guarantee
+    # every future rule's predicate makes - forcing it here is the actual
+    # contract Fix #2 needs).
+    triggered = df.apply(lambda row: bool(rule["predicate"](row, {})), axis=1) & applicable
     actual_hard_stop = df["exit_reason"] == "hard_stop"
 
     tp = int((triggered & actual_hard_stop).sum())
     fp = int((triggered & ~actual_hard_stop).sum())
-    fn = int((~triggered & actual_hard_stop).sum())
-    tn = int((~triggered & ~actual_hard_stop).sum())
+    fn = int((~triggered & actual_hard_stop & applicable).sum())
+    tn = int((~triggered & ~actual_hard_stop & applicable).sum())
     total = tp + fp + fn + tn
     precision = (tp / (tp + fp)) if (tp + fp) else None
     recall = (tp / (tp + fn)) if (tp + fn) else None
@@ -1038,6 +1192,7 @@ def evaluate_rule(rows: list[dict], df: pd.DataFrame, rule_key: str) -> dict:
                 "precision": _round(precision, 3), "recall": _round(recall, 3), "f1_score": _round(f1, 3),
                 "accuracy": _round(accuracy, 3), "balanced_accuracy": _round(balanced_accuracy, 3),
             },
+            "excluded_not_applicable": excluded_not_applicable,
         }
     flagged["_category"] = flagged.apply(_rule_outcome_category, axis=1)
 
@@ -1053,28 +1208,35 @@ def evaluate_rule(rows: list[dict], df: pd.DataFrame, rule_key: str) -> dict:
     # --- Net Benefit Engine ---
     # Delta R = Early Exit R (this rule's own evaluation-offset current_r)
     # minus Actual Final R - positive means exiting early would have been
-    # BETTER than what actually happened, negative means WORSE. Total
-    # Saved R only sums it over flagged trades that actually became Hard
-    # Stops (where a positive Delta R is a real avoided loss); Total Lost
-    # R sums its negation over flagged trades that actually became
-    # Trailing Winners (where a positive Delta R there means upside was
-    # cut short). Flagged trades in neither category (End Of Day Winner/
-    # Loser/Other - see _rule_outcome_category) are NOT part of either sum
-    # - "excluded_from_r_accounting" below reports how many, so the R/$
-    # totals are never silently short of what "trades flagged" implies.
+    # BETTER than what actually happened, negative means WORSE.
+    #
+    # Fix #1 ("Add Additional Early Failure Rule Evaluations"): Net Benefit
+    # R/$ is the sum of Delta R/$ across EVERY flagged trade, not just the
+    # ones that became a Hard Stop or a Trailing Winner - excluding End Of
+    # Day Winners/Losers/Other from the total (the previous behavior)
+    # silently understated the rule's real cost/benefit whenever a
+    # meaningful share of flagged trades landed in one of those buckets.
+    # hard_stop_savings_r/recovery_winner_cost_r/other_outcome_delta_r
+    # below are still broken out by outcome category (same categories as
+    # the Outcome Breakdown table) purely for transparency into WHERE
+    # net_benefit_r's total came from - they are no longer what net_
+    # benefit_r itself is computed from.
     flagged["_early_exit_r"] = _numeric_col(flagged, r_col)
     flagged["_delta_r"] = flagged["_early_exit_r"] - pd.to_numeric(flagged["final_r"], errors="coerce")
     hard_stop_rows = flagged[flagged["_category"] == "hard_stop"]
     trailing_winner_rows = flagged[flagged["_category"] == "trailing_winner"]
+    other_outcome_rows = flagged[~flagged["_category"].isin(["hard_stop", "trailing_winner"])]
 
-    total_saved_r = _round(hard_stop_rows["_delta_r"].sum(), 3)
-    total_lost_r = _round(-trailing_winner_rows["_delta_r"].sum(), 3)
-    net_benefit_r = _round((total_saved_r or 0.0) - (total_lost_r or 0.0), 3)
+    hard_stop_savings_r = _round(hard_stop_rows["_delta_r"].sum(), 3)
+    recovery_winner_cost_r = _round(-trailing_winner_rows["_delta_r"].sum(), 3)
+    other_outcome_delta_r = _round(other_outcome_rows["_delta_r"].sum(), 3)
+    net_benefit_r = _round(flagged["_delta_r"].sum(), 3)
 
     flagged["_delta_dollars"] = flagged["_delta_r"] * _numeric_col(flagged, "risk_dollars")
-    total_saved_dollars = _round(flagged.loc[hard_stop_rows.index, "_delta_dollars"].sum(), 2)
-    total_lost_dollars = _round(-flagged.loc[trailing_winner_rows.index, "_delta_dollars"].sum(), 2)
-    net_benefit_dollars = _round((total_saved_dollars or 0.0) - (total_lost_dollars or 0.0), 2)
+    hard_stop_savings_dollars = _round(flagged.loc[hard_stop_rows.index, "_delta_dollars"].sum(), 2)
+    recovery_winner_cost_dollars = _round(-flagged.loc[trailing_winner_rows.index, "_delta_dollars"].sum(), 2)
+    other_outcome_delta_dollars = _round(flagged.loc[other_outcome_rows.index, "_delta_dollars"].sum(), 2)
+    net_benefit_dollars = _round(flagged["_delta_dollars"].sum(), 2)
 
     # --- Profit Factor / Max Drawdown impact, over the WHOLE scoped trade
     # set (not just flagged ones) - "if this rule had been live, what
@@ -1111,15 +1273,17 @@ def evaluate_rule(rows: list[dict], df: pd.DataFrame, rule_key: str) -> dict:
         "trades_flagged": flagged_count,
         "hard_stops_captured": tp, "hard_stops_missed": fn,
         "trailing_winners_sacrificed": len(trailing_winner_rows),
-        "total_saved_r": total_saved_r, "total_lost_r": total_lost_r, "net_benefit_r": net_benefit_r,
-        "total_saved_dollars": total_saved_dollars, "total_lost_dollars": total_lost_dollars,
+        "hard_stop_savings_r": hard_stop_savings_r, "recovery_winner_cost_r": recovery_winner_cost_r,
+        "other_outcome_count": len(other_outcome_rows), "other_outcome_delta_r": other_outcome_delta_r,
+        "net_benefit_r": net_benefit_r,
+        "hard_stop_savings_dollars": hard_stop_savings_dollars, "recovery_winner_cost_dollars": recovery_winner_cost_dollars,
+        "other_outcome_delta_dollars": other_outcome_delta_dollars,
         "net_benefit_dollars": net_benefit_dollars,
         "profit_factor_original": _round(original_pf, 3) if isinstance(original_pf, (int, float)) else original_pf,
         "profit_factor_modified": _round(modified_pf, 3) if isinstance(modified_pf, (int, float)) else modified_pf,
         "profit_factor_impact": profit_factor_impact,
         "max_drawdown_original": _round(original_dd, 2), "max_drawdown_modified": _round(modified_dd, 2),
         "max_drawdown_impact": max_drawdown_impact,
-        "excluded_from_r_accounting": flagged_count - len(hard_stop_rows) - len(trailing_winner_rows),
     }
 
     candidate_trades = []
@@ -1147,7 +1311,20 @@ def evaluate_rule(rows: list[dict], df: pd.DataFrame, rule_key: str) -> dict:
         "outcome_breakdown": outcome_breakdown,
         "net_benefit": net_benefit,
         "candidate_trades": candidate_trades,
+        "excluded_not_applicable": excluded_not_applicable,
     }
+
+
+def evaluate_rule_matrix(rows: list[dict], df: pd.DataFrame, rule_keys: list[str]) -> list[dict]:
+    """Rule Evaluation Matrix: the SAME evaluate_rule computation run for
+    several rules at once, so their confusion matrices / classification
+    metrics / Net Benefit numbers can be lined up side by side (see the
+    /telemetry page's own "Rule Evaluation Matrix" section) - no separate
+    computation path, just evaluate_rule called once per key, so a rule
+    can never behave differently in the matrix than it does in its own
+    single-rule "Rule Evaluation" tab. Unknown keys are silently skipped
+    (the web layer validates keys before calling this)."""
+    return [evaluate_rule(rows, df, key) for key in rule_keys if key in RULES]
 
 
 def export_dataframe(df: pd.DataFrame, fmt: str, path):
@@ -1294,7 +1471,8 @@ def export_rule_evaluation_xlsx(payload: dict, scope_label: str) -> bytes:
     summary_ws.append(["False Positive (flagged & not hard stop)", cm["fp"]])
     summary_ws.append(["False Negative (not flagged & hard stop)", cm["fn"]])
     summary_ws.append(["True Negative (not flagged & not hard stop)", cm["tn"]])
-    summary_ws.append(["Total trades", cm["total"]])
+    summary_ws.append(["Total trades evaluated", cm["total"]])
+    summary_ws.append(["Excluded - rule not applicable (trade exited before evaluation point)", payload.get("excluded_not_applicable", 0)])
     summary_ws.append([])
 
     m = payload["metrics"]
@@ -1313,19 +1491,96 @@ def export_rule_evaluation_xlsx(payload: dict, scope_label: str) -> bytes:
         for label, key in [
             ("Trades Flagged", "trades_flagged"), ("Hard Stops Captured", "hard_stops_captured"),
             ("Hard Stops Missed", "hard_stops_missed"), ("Trailing Winners Sacrificed", "trailing_winners_sacrificed"),
-            ("Total R Saved", "total_saved_r"), ("Total R Lost", "total_lost_r"), ("Net Benefit R", "net_benefit_r"),
-            ("Net Benefit $", "net_benefit_dollars"),
+            ("Net Benefit R (ALL flagged trades)", "net_benefit_r"), ("Net Benefit $ (ALL flagged trades)", "net_benefit_dollars"),
+            ("Hard Stop Savings R", "hard_stop_savings_r"), ("Recovery Winner Cost R", "recovery_winner_cost_r"),
+            ("Hard Stop Savings $", "hard_stop_savings_dollars"), ("Recovery Winner Cost $", "recovery_winner_cost_dollars"),
+            ("Other Outcome trades (EOD Winner/Loser/Other)", "other_outcome_count"),
+            ("Other Outcome Delta R", "other_outcome_delta_r"), ("Other Outcome Delta $", "other_outcome_delta_dollars"),
             ("Profit Factor (original)", "profit_factor_original"), ("Profit Factor (modified)", "profit_factor_modified"),
             ("Profit Factor Impact", "profit_factor_impact"),
             ("Max Drawdown $ (original)", "max_drawdown_original"), ("Max Drawdown $ (modified)", "max_drawdown_modified"),
             ("Max Drawdown Impact", "max_drawdown_impact"),
-            ("Flagged trades excluded from R accounting (not Hard Stop/Trailing Winner)", "excluded_from_r_accounting"),
         ]:
             summary_ws.append([label, nb[key]])
     autosize(summary_ws, 2)
 
     write_table(wb.create_sheet("Outcome Breakdown"), payload["outcome_breakdown"])
     write_table(wb.create_sheet("Candidate Trades"), payload["candidate_trades"])
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def export_rule_matrix_xlsx(results: list[dict], scope_label: str) -> bytes:
+    """Rule Evaluation Matrix as a downloadable multi-sheet .xlsx - one
+    "Matrix" summary sheet (one row per rule, the same headline numbers
+    the on-screen side-by-side comparison table shows) plus one Candidate
+    Trades sheet per rule (sheet name truncated to Excel's own 31-
+    character limit, de-duplicated if two rule labels collide after
+    truncation). Same styling convention as export_rule_evaluation_xlsx/
+    export_analysis_xlsx."""
+    from io import BytesIO
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    header_fill = PatternFill(start_color="EEF1F5", end_color="EEF1F5", fill_type="solid")
+    header_font = Font(bold=True)
+
+    def autosize(ws, ncols):
+        for col in range(1, ncols + 1):
+            letter = get_column_letter(col)
+            width = max((len(str(c.value)) for c in ws[letter] if c.value is not None), default=8)
+            ws.column_dimensions[letter].width = min(max(width + 2, 8), 40)
+
+    def write_table(ws, rows: list[dict], columns: list[str] | None = None):
+        if not rows:
+            ws.append(["No data"])
+            return
+        cols = columns or list(rows[0].keys())
+        ws.append(cols)
+        for cell in ws[ws.max_row]:
+            cell.font, cell.fill = header_font, header_fill
+        for row in rows:
+            ws.append([row.get(c) for c in cols])
+        ws.freeze_panes = "A2"
+        autosize(ws, len(cols))
+
+    wb = Workbook()
+    matrix_ws = wb.active
+    matrix_ws.title = "Matrix"
+    matrix_ws.append(["Rule Evaluation Matrix"])
+    matrix_ws["A1"].font = Font(bold=True, size=14)
+    matrix_ws.append([f"Scope: {scope_label} | Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}"])
+    matrix_ws.append([])
+
+    matrix_rows = []
+    for r in results:
+        cm, m, nb = r["confusion_matrix"], r["metrics"], r.get("net_benefit") or {}
+        matrix_rows.append({
+            "rule": r["label"], "tp": cm["tp"], "fp": cm["fp"], "fn": cm["fn"], "tn": cm["tn"],
+            "total_evaluated": cm["total"], "excluded_not_applicable": r.get("excluded_not_applicable", 0),
+            "precision": m["precision"], "recall": m["recall"], "f1_score": m["f1_score"],
+            "accuracy": m["accuracy"], "balanced_accuracy": m["balanced_accuracy"],
+            "trades_flagged": nb.get("trades_flagged"),
+            "net_benefit_r": nb.get("net_benefit_r"), "net_benefit_dollars": nb.get("net_benefit_dollars"),
+            "hard_stop_savings_r": nb.get("hard_stop_savings_r"), "recovery_winner_cost_r": nb.get("recovery_winner_cost_r"),
+            "profit_factor_impact": nb.get("profit_factor_impact"), "max_drawdown_impact": nb.get("max_drawdown_impact"),
+        })
+    write_table(matrix_ws, matrix_rows)
+
+    used_names = {"Matrix"}
+    for r in results:
+        base_name = f"{r['label']} Trades"[:31]
+        name, n = base_name, 2
+        while name in used_names:
+            suffix = f" ({n})"
+            name = f"{base_name[:31 - len(suffix)]}{suffix}"
+            n += 1
+        used_names.add(name)
+        write_table(wb.create_sheet(name), r["candidate_trades"])
 
     buf = BytesIO()
     wb.save(buf)
