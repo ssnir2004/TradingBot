@@ -74,6 +74,44 @@ MARKET_CONTEXT_SYMBOLS = {"es": es_filter.ES_SYMBOL, "spy": "SPY", "qqq": "QQQ"}
 # "Losers" examples already aren't exhaustive (e.g. a trade closing exactly
 # at breakeven falls in neither) - a dashboard can combine any of these
 # (e.g. "Hard Stop" AND "Losers") rather than being forced to pick one.
+def _early_failure_candidate(t, cfg) -> bool:
+    """Research-only DERIVED group - "Trades that would have triggered the
+    proposed 10-minute Early Failure rule." This is purely a retrospective
+    LABEL computed from already-recorded +10m telemetry (see SNAPSHOT_
+    OFFSETS/_indicator_snapshot/_structure_snapshot/_derive_since_entry_
+    fields) - it does NOT touch, gate, or feed back into any strategy's
+    own entry/exit logic, backtest run, or stored results in any way; a
+    trade already closed exactly the way its own backtest run decided,
+    long before this label is ever computed.
+
+    Membership requires ALL of, evaluated strictly at the +10m snapshot:
+      - trail_activated is False (the trade's own final outcome - same
+        field never_trailed already keys off, not a per-snapshot value,
+        since there's no "trailing activated as of this snapshot" fact to
+        read - only "did it ever activate, by the time the trade closed")
+      - 10m current_r <= -0.40R
+      - 10m RSI Delta <= -5
+      - EITHER 10m Returned Inside Opening Range OR 10m Lost EMA9
+
+    `t.get(...)` (not `t[...]`) throughout - a trade whose own +10m
+    snapshot came back None (see _snapshot_bar's own "no bar yet" case)
+    simply has no 10m_* columns to read at all for THAT row; missing
+    numeric values as NaN safely fail every "<=" comparison below (never
+    raise), and the two boolean checks use "== 1" rather than bool(...)
+    for the same reason - flatten_trades stores a bool snapshot field as
+    int 0/1, and bool(float('nan')) is True in Python, which would
+    otherwise silently treat "unknown" as "condition met"."""
+    if t.get("trail_activated") is not False:
+        return False
+    current_r = t.get("10m_current_r")
+    rsi_delta = t.get("10m_rsi_delta")
+    if current_r is None or not (current_r <= -0.40):
+        return False
+    if rsi_delta is None or not (rsi_delta <= -5):
+        return False
+    return t.get("10m_returned_inside_opening_range") == 1 or t.get("10m_lost_ema9") == 1
+
+
 DEFAULT_GROUPS = {
     "winners": lambda t, cfg: t["final_r"] is not None and t["final_r"] > 0,
     "losers": lambda t, cfg: t["final_r"] is not None and t["final_r"] < 0,
@@ -83,6 +121,7 @@ DEFAULT_GROUPS = {
     "capture_disaster": lambda t, cfg: (
         t["capture_pct"] is not None and t["capture_pct"] < cfg.get("capture_disaster_threshold", -1000)
     ),
+    "early_failure_candidate": _early_failure_candidate,
 }
 
 # Trade-level columns flatten_trades always carries alongside the per-

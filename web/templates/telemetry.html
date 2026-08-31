@@ -208,6 +208,23 @@
             מ-Trailing Winners". <strong>הצעה סטטיסטית בלבד</strong> — הקובץ לא משנה שום אסטרטגיה
             בעצמו, ההחלטה אם ליישם נשארת ידנית.
           </p>
+          <h6 class="fw-bold mt-3">קבוצת Early Failure Candidate</h6>
+          <p>
+            קבוצה נגזרת (מחקרית בלבד) שמסמנת אילו טריידים היו "מופעלים" על ידי כלל היפותטי
+            שנבדק: יציאה יזומה ב-10 דקות אחרי הכניסה. טרייד נכנס לקבוצה הזו כאשר, בדיוק בנקודת
+            +10m, מתקיימים <strong>כל</strong> התנאים הבאים יחד:
+          </p>
+          <ul class="small">
+            <li>Trailing מעולם לא הופעל בטרייד (Trail Activated = False)</li>
+            <li>Current R בנקודת +10m &le; -0.40R</li>
+            <li>RSI Delta בנקודת +10m &le; -5</li>
+            <li>וגם: Returned Inside Opening Range = True <strong>או</strong> Lost EMA9 = True (בנקודת +10m)</li>
+          </ul>
+          <p>
+            <strong>זה לא משנה שום אסטרטגיה, כניסה, יציאה או תוצאת בקטסט בפועל</strong> — זה רק
+            מתייג רטרואקטיבית אילו טריידים היו נחתכים לו הכלל הזה היה קיים, כדי לבדוק סטטיסטית
+            אם יש בו ערך לפני החלטה אם לממש אותו בפועל באסטרטגיה.
+          </p>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">סגור</button>
@@ -263,6 +280,7 @@ function fmtNum(v, digits) { return (v === null || v === undefined) ? "-" : Numb
 const GROUP_LABELS = {
   winners: "Winners (Final R > 0)", losers: "Losers (Final R < 0)", hard_stop: "Hard Stop trades",
   trailing_winners: "Trailing Winners", never_trailed: "Never reached trailing", capture_disaster: "Capture Disaster",
+  early_failure_candidate: "Early Failure Candidate (proposed 10m rule)",
 };
 
 let telemetryScope = {};  // {backtest_id: N} OR {strategy_id: N} - the single source of truth for every scoped fetch below
