@@ -4567,20 +4567,50 @@ def delete_trade_telemetry(account_id: int, backtest_id: int | None = None, stra
     bulk "Generate for all" button on its own would skip every backtest
     that already has (now-stale) telemetry. Narrowed to one backtest_id or
     strategy_id (mirrors list_trade_telemetry's own scoping) if given;
-    both None deletes EVERY telemetry row for this account. Never touches
-    telemetry_runs (the job history) - that stays as an audit trail of
-    when telemetry was generated, independent of whether its rows still
-    exist. Returns the number of rows actually deleted."""
-    query = "DELETE FROM trade_telemetry WHERE account_id = ?"
-    params: list = [account_id]
+    both None deletes EVERY telemetry row for this account.
+
+    Also clears the matching telemetry_runs rows (the Run History list) -
+    a "done" run whose own trade_telemetry rows no longer exist is a
+    stale, misleading entry to leave behind, not a real audit trail (the
+    user explicitly does not want to keep seeing it). Only ever removes
+    'done'/'failed' runs - a run still 'pending'/'running' has no trade_
+    telemetry rows to match yet anyway, and must never be touched here
+    regardless (deleting its own row out from under an in-flight
+    subprocess would break its own finish_telemetry_run write back).
+    strategy_id has no column on telemetry_runs (only backtest_id does),
+    so that scope is resolved via the backtest_ids trade_telemetry itself
+    names for that strategy, read BEFORE the delete below removes them.
+    Returns the number of trade_telemetry rows actually deleted."""
+    telemetry_where = "account_id = ?"
+    telemetry_params: list = [account_id]
     if backtest_id is not None:
-        query += " AND backtest_id = ?"
-        params.append(backtest_id)
+        telemetry_where += " AND backtest_id = ?"
+        telemetry_params.append(backtest_id)
     if strategy_id is not None:
-        query += " AND strategy_id = ?"
-        params.append(strategy_id)
+        telemetry_where += " AND strategy_id = ?"
+        telemetry_params.append(strategy_id)
+
     with get_conn() as conn:
-        cur = conn.execute(query, params)
+        if backtest_id is not None:
+            run_backtest_ids = [backtest_id]
+        elif strategy_id is not None:
+            run_backtest_ids = [
+                r["backtest_id"] for r in conn.execute(
+                    f"SELECT DISTINCT backtest_id FROM trade_telemetry WHERE {telemetry_where}", telemetry_params
+                ).fetchall()
+            ]
+        else:
+            run_backtest_ids = None  # every backtest for this account - no IN (...) needed
+
+        if run_backtest_ids is None:
+            conn.execute("DELETE FROM telemetry_runs WHERE account_id = ? AND status IN ('done', 'failed')", (account_id,))
+        elif run_backtest_ids:
+            placeholders = ",".join("?" * len(run_backtest_ids))
+            conn.execute(
+                f"DELETE FROM telemetry_runs WHERE account_id = ? AND status IN ('done', 'failed') AND backtest_id IN ({placeholders})",
+                [account_id, *run_backtest_ids],
+            )
+        cur = conn.execute(f"DELETE FROM trade_telemetry WHERE {telemetry_where}", telemetry_params)
         return cur.rowcount
 
 
