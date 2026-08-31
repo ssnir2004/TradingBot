@@ -16,6 +16,15 @@
   .heat-cell { text-align: center; font-size: .8em; padding: 4px 6px; white-space: nowrap; }
   .badge-has-telemetry { font-size: .65em; }
   .trade-row { cursor: pointer; }
+  /* Same small yellow "i" info badge as backtest.html's own - opens a
+     modal with an explanation, rather than a hover tooltip (the content
+     here is long enough that a tooltip would be awkward). */
+  .info-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; border-radius: 50%;
+    background: #fab219; color: #000; font-size: .7rem; font-weight: bold; font-style: italic;
+    cursor: pointer; user-select: none;
+  }
   .trade-row:hover { background: var(--bs-secondary-bg); }
 </style>
 </head>
@@ -116,6 +125,7 @@
         <div class="col-6 col-md-3">
           <button id="btn-refresh-analysis" class="btn btn-primary btn-sm">Refresh Analysis</button>
           <a id="tel-export-analysis-xlsx" class="btn btn-outline-secondary btn-sm disabled" href="#">Export Analysis (Excel)</a>
+          <button type="button" class="info-icon" style="border:none;" data-bs-toggle="modal" data-bs-target="#tel-analysis-export-help-modal" aria-label="הסבר">i</button>
         </div>
       </div>
       <div id="tel-analysis-error" class="text-danger small"></div>
@@ -144,6 +154,59 @@
             </div>
           </div>
           <div id="tel-heatmap-body"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="tel-analysis-export-help-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content" dir="rtl" style="text-align:right">
+        <div class="modal-header">
+          <h5 class="modal-title">מה מכיל קובץ "Export Analysis (Excel)"?</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="סגור"></button>
+        </div>
+        <div class="modal-body">
+          <p>
+            הקובץ מכיל את אותם המספרים בדיוק שמוצגים ב-4 הטאבים של Analysis / Comparison Engine
+            (Comparison, Predictive Ranking, Early Failure Analysis, Suggested Filters) — לפי ה-Scope,
+            Group A, Group B וה-Capture Disaster threshold שהיו פעילים בזמן שלחצתם "Refresh Analysis"
+            לאחרונה. חמישה גיליונות (sheets) בקובץ אחד:
+          </p>
+          <h6 class="fw-bold mt-3">Summary</h6>
+          <p>
+            טווח הניתוח (באקטסט בודד או אסטרטגיה מאוחדת), כמה טריידים סה"כ, וכמה נכנסים לכל אחת
+            מ-6 הקבוצות הקבועות (Winners, Losers, Hard Stop, Trailing Winners, Never Trailed,
+            Capture Disaster) — כדי לוודא שיש מספיק דגימות לפני שסומכים על שאר הניתוח.
+          </p>
+          <h6 class="fw-bold mt-3">Comparison</h6>
+          <p>
+            טבלה שמשווה, לכל אינדיקטור (RSI, MACD, ADX, מרחק מ-VWAP, EMA9/20/50, נפח, ATR ועוד —
+            בכל אחד מ-6 נקודות הזמן: entry / 1m / 3m / 5m / 10m / 15m) — ממוצע וחציון בקבוצה A
+            מול קבוצה B, עם מספר הטריידים שנכנס לכל חישוב.
+          </p>
+          <h6 class="fw-bold mt-3">Predictive Ranking</h6>
+          <p>
+            דירוג האינדיקטורים לפי היכולת שלהם להפריד בין קבוצה A לקבוצה B, באמצעות Mutual
+            Information ו-Random Forest Feature Importance. ככל שה-Feature Importance גבוה יותר,
+            המדד "יודע" יותר להבדיל בין הקבוצות. ריק אם אין מספיק טריידים (נדרשים בערך 6 ומעלה
+            בסך שתי הקבוצות).
+          </p>
+          <h6 class="fw-bold mt-3">Early Failure Analysis</h6>
+          <p>
+            אותו דירוג בדיוק כמו Predictive Ranking, אבל בנפרד לכל אחת מנקודות הזמן +5m / +10m /
+            +15m — עוזר לענות "באיזה שלב אחרי הכניסה כבר אפשר להבחין שהטרייד בצרות".
+          </p>
+          <h6 class="fw-bold mt-3">Suggested Filters</h6>
+          <p>
+            עבור האינדיקטורים הכי חזקים מ-Predictive Ranking, מוצע סף (חציון) ואחוז הטריידים מכל
+            קבוצה שנמצא מתחת לסף — למשל "ADX &lt; 18 מופיע ב-72% מטריידי Hard Stop אבל רק ב-21%
+            מ-Trailing Winners". <strong>הצעה סטטיסטית בלבד</strong> — הקובץ לא משנה שום אסטרטגיה
+            בעצמו, ההחלטה אם ליישם נשארת ידנית.
+          </p>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">סגור</button>
         </div>
       </div>
     </div>
