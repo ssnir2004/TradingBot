@@ -248,6 +248,67 @@ CREATE TABLE IF NOT EXISTS backtest_data_fetches (
     finished_at TEXT
 );
 
+-- One row per "Generate Telemetry" run (see run_telemetry.py, src/
+-- telemetry_engine.py, web/app.py's /api/telemetry routes) - the Trade
+-- Telemetry Dashboard's own job-tracking table, same isolated-subprocess/
+-- pending-running-done-failed lifecycle as backtests/optimizations above
+-- (a run replays every closed trade of one already-finished backtest
+-- against its own cached bars, computing ~30 indicators x 6 snapshots per
+-- trade - light per trade, but a backtest with hundreds of trades is
+-- still real pandas work, so it stays off the always-on dashboard
+-- process's own event loop the same reasoning as every other subprocess
+-- job in this file). summary_json is {"trades_processed",
+-- "trades_skipped", "skipped_reasons"} - see telemetry_engine.
+-- generate_telemetry_for_backtest's own return shape.
+CREATE TABLE IF NOT EXISTS telemetry_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    backtest_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    summary_json TEXT,
+    error TEXT,
+    pid INTEGER,
+    created_at TEXT NOT NULL,
+    finished_at TEXT
+);
+
+-- One row per CLOSED TRADE's own telemetry (see src/telemetry_engine.py's
+-- own module docstring - a PASSIVE observation record, never read by any
+-- strategy decision). Deliberately its own table, NOT folded into trades/
+-- backtests (per the spec's own "Do NOT mix telemetry into current trades
+-- table" instruction) - a backtest's trade pairs already live inside its
+-- own backtests.results_json, so every identifying/outcome field here
+-- (symbol/side/entry_time/exit_time/final_r/exit_reason/trail_activated/
+-- capture_pct) is intentionally DENORMALIZED off that same pair (see
+-- telemetry_engine.generate_telemetry_for_backtest) so the Trade Telemetry
+-- Dashboard's own comparison/ranking/heatmap queries never need to
+-- re-parse a backtest's full results_json just to filter/group trades.
+-- snapshots_json holds the {"entry": {...}, "1m": {...}, "3m": {...},
+-- "5m": {...}, "10m": {...}, "15m": {...}} shape telemetry_engine.
+-- build_trade_telemetry produces - a JSON blob (not ~30 metrics x 6
+-- snapshots as literal columns) for the same reason results_json/
+-- params_json elsewhere in this file are JSON blobs, not wide tables.
+-- Regenerating a backtest's telemetry (re-running "Generate Telemetry")
+-- deletes and replaces every row for that backtest_id (see db.delete_
+-- trade_telemetry_for_backtest) rather than accumulating duplicates.
+CREATE TABLE IF NOT EXISTS trade_telemetry (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    backtest_id INTEGER NOT NULL,
+    strategy_id INTEGER NOT NULL,
+    strategy_name TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    entry_time TEXT NOT NULL,
+    exit_time TEXT NOT NULL,
+    final_r REAL,
+    exit_reason TEXT,
+    trail_activated INTEGER NOT NULL DEFAULT 0,
+    capture_pct REAL,
+    snapshots_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 -- One row per remote backtest worker token (see docs/worker.md and
 -- backtest_worker.py). Only the SHA-256 hash is ever stored - the raw
 -- token is shown to the user exactly once, at creation, the same pattern
@@ -302,6 +363,9 @@ CREATE INDEX IF NOT EXISTS idx_trades_account_mode_timestamp ON trades(account_i
 CREATE INDEX IF NOT EXISTS idx_decision_log_account_mode_timestamp ON decision_log(account_id, mode, timestamp_iso);
 CREATE INDEX IF NOT EXISTS idx_backtests_account_created ON backtests(account_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_backtest_data_fetches_account_created ON backtest_data_fetches(account_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_telemetry_runs_account_created ON telemetry_runs(account_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_trade_telemetry_backtest ON trade_telemetry(backtest_id);
+CREATE INDEX IF NOT EXISTS idx_trade_telemetry_account_strategy ON trade_telemetry(account_id, strategy_id);
 -- Blank ('') is the "no key set yet" default and can repeat across many
 -- rows - only an actually-chosen key (e.g. "L1", "S1") needs to be unique.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_strategies_key ON strategies(key) WHERE key != '';
@@ -4358,6 +4422,197 @@ def get_latest_backtest_data_fetch(account_id: int) -> dict | None:
             (account_id,),
         ).fetchone()
     return _backtest_data_fetch_row_to_dict(row) if row else None
+
+
+# --------------------------------------------------------- telemetry runs ---
+# Mirrors the backtest_data_fetches lifecycle above exactly (same isolated-
+# subprocess/pending-running-done-failed reasoning) - see run_telemetry.py
+# and src/telemetry_engine.py's own module docstrings.
+def create_telemetry_run(account_id: int, backtest_id: int) -> int:
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO telemetry_runs (account_id, backtest_id, status, created_at) VALUES (?, ?, 'pending', ?)",
+            (account_id, backtest_id, now),
+        )
+        return cur.lastrowid
+
+
+def set_telemetry_run_pid(run_id: int, pid: int):
+    with get_conn() as conn:
+        conn.execute("UPDATE telemetry_runs SET pid = ? WHERE id = ?", (pid, run_id))
+
+
+def start_telemetry_run(run_id: int):
+    with get_conn() as conn:
+        conn.execute("UPDATE telemetry_runs SET status = 'running' WHERE id = ?", (run_id,))
+
+
+def finish_telemetry_run(run_id: int, summary: dict):
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE telemetry_runs SET status = 'done', summary_json = ?, finished_at = ? WHERE id = ?",
+            (json.dumps(summary), now, run_id),
+        )
+
+
+def fail_telemetry_run(run_id: int, error: str):
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE telemetry_runs SET status = 'failed', error = ?, finished_at = ? WHERE id = ?",
+            (error, now, run_id),
+        )
+
+
+def cancel_telemetry_run(run_id: int, account_id: int) -> bool:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT pid, status FROM telemetry_runs WHERE id = ? AND account_id = ?", (run_id, account_id)
+        ).fetchone()
+    if row is None or row["status"] not in ("pending", "running"):
+        return False
+    if row["pid"]:
+        try:
+            os.kill(row["pid"], signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    fail_telemetry_run(run_id, "Cancelled by user")
+    return True
+
+
+def fail_orphaned_telemetry_runs():
+    """Called once from web/app.py's startup handler, alongside fail_
+    orphaned_backtests/fail_orphaned_backtest_data_fetches - same os.kill
+    (pid, 0) reconciliation reasoning."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id, pid FROM telemetry_runs WHERE status IN ('pending', 'running')").fetchall()
+    for row in rows:
+        alive = False
+        if row["pid"]:
+            try:
+                os.kill(row["pid"], 0)
+                alive = True
+            except ProcessLookupError:
+                alive = False
+            except PermissionError:
+                alive = True
+        if not alive:
+            fail_telemetry_run(
+                row["id"],
+                "Orphaned - the dashboard restarted while this run was still going, which killed it. Re-run it.",
+            )
+
+
+def _telemetry_run_row_to_dict(row) -> dict:
+    result = dict(row)
+    raw = result.pop("summary_json")
+    result["summary"] = json.loads(raw) if raw else None
+    return result
+
+
+def get_telemetry_run(run_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM telemetry_runs WHERE id = ?", (run_id,)).fetchone()
+    return _telemetry_run_row_to_dict(row) if row else None
+
+
+def list_telemetry_runs(account_id: int, limit: int = 50) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM telemetry_runs WHERE account_id = ? ORDER BY created_at DESC LIMIT ?",
+            (account_id, limit),
+        ).fetchall()
+    return [_telemetry_run_row_to_dict(r) for r in rows]
+
+
+def get_latest_telemetry_run_for_backtest(account_id: int, backtest_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM telemetry_runs WHERE account_id = ? AND backtest_id = ? ORDER BY created_at DESC LIMIT 1",
+            (account_id, backtest_id),
+        ).fetchone()
+    return _telemetry_run_row_to_dict(row) if row else None
+
+
+# ------------------------------------------------------------ trade telemetry ---
+# See src/telemetry_engine.py's own module docstring - a PASSIVE, read-only
+# per-closed-trade indicator record, never read by any strategy decision.
+def delete_trade_telemetry_for_backtest(backtest_id: int):
+    """Called at the start of every "Generate Telemetry" run (see
+    telemetry_engine.generate_telemetry_for_backtest) so re-running it for
+    the same backtest_id replaces its prior rows rather than accumulating
+    duplicates alongside them."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM trade_telemetry WHERE backtest_id = ?", (backtest_id,))
+
+
+def insert_trade_telemetry_rows(rows: list[dict]):
+    """`rows`: [{"account_id", "backtest_id", "strategy_id", "strategy_name",
+    "symbol", "side", "entry_time", "exit_time", "final_r", "exit_reason",
+    "trail_activated", "capture_pct", "snapshots"}, ...] - see telemetry_
+    engine.generate_telemetry_for_backtest's own row shape. One bulk
+    executemany, not one INSERT per row - a backtest can carry hundreds of
+    trades."""
+    if not rows:
+        return
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        conn.executemany(
+            "INSERT INTO trade_telemetry "
+            "(account_id, backtest_id, strategy_id, strategy_name, symbol, side, entry_time, exit_time, "
+            "final_r, exit_reason, trail_activated, capture_pct, snapshots_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    r["account_id"], r["backtest_id"], r["strategy_id"], r["strategy_name"],
+                    r["symbol"], r["side"], r["entry_time"], r["exit_time"],
+                    r.get("final_r"), r.get("exit_reason"), int(bool(r.get("trail_activated"))), r.get("capture_pct"),
+                    json.dumps(r["snapshots"]), now,
+                )
+                for r in rows
+            ],
+        )
+
+
+def _trade_telemetry_row_to_dict(row) -> dict:
+    result = dict(row)
+    result["trail_activated"] = bool(result["trail_activated"])
+    result["snapshots"] = json.loads(result.pop("snapshots_json"))
+    return result
+
+
+def list_trade_telemetry(account_id: int, backtest_id: int | None = None, strategy_id: int | None = None) -> list[dict]:
+    """Every telemetry row visible to `account_id` (the Trade Telemetry
+    Dashboard's own primary read path) - optionally narrowed to one
+    backtest_id (a single run's own trades) or strategy_id (pooled across
+    every backtest that strategy has telemetry for, mirroring perf.
+    pooled_trades_for_strategy's own pooling idea but for telemetry rows)."""
+    query = "SELECT * FROM trade_telemetry WHERE account_id = ?"
+    params: list = [account_id]
+    if backtest_id is not None:
+        query += " AND backtest_id = ?"
+        params.append(backtest_id)
+    if strategy_id is not None:
+        query += " AND strategy_id = ?"
+        params.append(strategy_id)
+    query += " ORDER BY entry_time"
+    with get_conn() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [_trade_telemetry_row_to_dict(r) for r in rows]
+
+
+def list_telemetry_backtest_ids(account_id: int) -> list[int]:
+    """Distinct backtest_ids that already have telemetry generated for this
+    account - lets the dashboard mark which backtests in the picker already
+    have a telemetry run to show, without loading every row."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT backtest_id FROM trade_telemetry WHERE account_id = ? ORDER BY backtest_id DESC",
+            (account_id,),
+        ).fetchall()
+    return [r["backtest_id"] for r in rows]
 
 
 # --------------------------------------------------------- backtest worker ---

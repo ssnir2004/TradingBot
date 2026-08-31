@@ -16,3 +16,4 @@ cryptography
 reportlab
 python-bidi
 openpyxl
+scikit-learn

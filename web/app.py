@@ -6,6 +6,7 @@ SQLite DB the two trading services (run_service.py --mode paper/live) use;
 it never talks to IBKR directly, so it can safely run as a separate process.
 """
 import asyncio
+import io
 import json
 import re
 import subprocess
@@ -24,7 +25,7 @@ from fastapi.templating import Jinja2Templates
 import cycle
 import morning_prefilter
 import run_optimization
-from src import backtest_data, backtest_engine, db, gateway_provisioning, mode_config, perf, secrets_store, trade_diagnostics, trades_csv, trades_pdf, trades_xlsx
+from src import backtest_data, backtest_engine, db, gateway_provisioning, mode_config, perf, secrets_store, telemetry_engine, trade_diagnostics, trades_csv, trades_pdf, trades_xlsx
 from src.sp500_tickers import SP500_TICKERS
 from web import gateway_control
 from web.auth import COOKIE_NAME, make_session_cookie, read_session, require_user
@@ -88,6 +89,7 @@ async def on_startup():
     db.fail_orphaned_backtests()
     db.fail_orphaned_optimizations()  # same reconciliation as backtests above, same reason
     db.fail_orphaned_backtest_data_fetches()  # same reconciliation, same reason - see its own docstring
+    db.fail_orphaned_telemetry_runs()  # same reconciliation, same reason - see its own docstring
     asyncio.create_task(_requeue_abandoned_worker_backtests_loop())
     asyncio.create_task(_aggregate_optimizations_loop())
 
@@ -282,6 +284,28 @@ def optimization_page(request: Request):
         return RedirectResponse("/backtest", status_code=303)
     return templates.TemplateResponse(request, "optimization.html", {
         "active_page": "optimization",
+        "is_admin": bool(account and account.get("is_admin")),
+    })
+
+
+@app.get("/telemetry", response_class=HTMLResponse)
+def telemetry_page(request: Request):
+    """Trade Telemetry Dashboard - a passive, read-only research screen
+    (see src/telemetry_engine.py's own module docstring) deliberately
+    separate from /backtest and /optimization, same "own screen per
+    feature" precedent those two already established. A viewer account is
+    redirected to /backtest for the same "research/compute tool, not
+    something read-only has any use for" reasoning as /optimization."""
+    if not db.any_users_exist():
+        return RedirectResponse("/setup", status_code=303)
+    username = read_session(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    account = db.get_user_by_username(username)
+    if account and account.get("role") == "viewer":
+        return RedirectResponse("/backtest", status_code=303)
+    return templates.TemplateResponse(request, "telemetry.html", {
+        "active_page": "telemetry",
         "is_admin": bool(account and account.get("is_admin")),
     })
 
@@ -1722,7 +1746,10 @@ def api_backtest_data_fetch_status(
 def api_backtest_data_fetch_coverage(user: str = Depends(require_user)):
     return {
         "coverage": backtest_data.cache_coverage_summary(backtest_engine.BAR_SIZE),
-        "symbols_total_expected": len(SP500_TICKERS),
+        # +2 for SPY/QQQ, which ride along with the S&P 500 universe in
+        # every "Update backtest data" run (see run_backtest_data_fetch.
+        # py's own FETCH_UNIVERSE) but aren't themselves S&P 500 members.
+        "symbols_total_expected": len(SP500_TICKERS) + 2,
     }
 
 
@@ -2018,6 +2045,177 @@ def api_cancel_optimization(optimization_id: int, account_id: int = Depends(requ
         raise HTTPException(status_code=404, detail="Optimization not found, or already finished")
     _log_account_action(account_id, user, action="cancel_optimization", optimization_id=optimization_id)
     return {"ok": True}
+
+
+# ------------------------------------------------------------------ telemetry ---
+# Trade Telemetry Dashboard (see src/telemetry_engine.py's own module
+# docstring) - a passive, read-only research screen, its own /telemetry
+# page. "Generate Telemetry" always runs locally (run_telemetry.py, one
+# subprocess per run, same isolation reasoning as run_backtest.py/run_
+# optimization.py) - it only ever reads already-cached bars, never talks
+# to IBKR, so there's no remote-worker mode to offer here at all.
+@app.get("/api/telemetry/eligible_backtests")
+def api_telemetry_eligible_backtests(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    """Every 'done' backtest this account has, newest first, each carrying
+    its own strategy names/symbols/date range and whether telemetry has
+    already been generated for it - the /telemetry page's own backtest
+    picker."""
+    has_telemetry = set(db.list_telemetry_backtest_ids(account_id))
+    rows = []
+    for bt in db.list_backtests(account_id, limit=200):
+        if bt["status"] != "done":
+            continue
+        strategy_names = [
+            (db.get_strategy(sid) or {}).get("name", f"Strategy {sid}") for sid in bt["params"].get("strategy_ids", [])
+        ]
+        rows.append({
+            "id": bt["id"], "created_at": bt["created_at"],
+            "strategy_names": strategy_names, "symbols": bt["params"].get("symbols", []),
+            "start_date": bt["params"].get("start_date"), "end_date": bt["params"].get("end_date"),
+            "total_pnl_usd": bt["total_pnl_usd"], "has_telemetry": bt["id"] in has_telemetry,
+        })
+    return {"backtests": rows}
+
+
+@app.post("/api/telemetry")
+async def api_create_telemetry_run(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    body = await request.json() if await request.body() else {}
+    backtest_id = body.get("backtest_id")
+    if not isinstance(backtest_id, int):
+        raise HTTPException(status_code=400, detail="backtest_id is required")
+    backtest = db.get_backtest(backtest_id)
+    if not backtest or backtest["account_id"] != account_id:
+        raise HTTPException(status_code=404, detail="Backtest not found")
+    if backtest["status"] != "done":
+        raise HTTPException(status_code=400, detail=f"Backtest #{backtest_id} isn't done yet (status={backtest['status']}).")
+    latest = db.get_latest_telemetry_run_for_backtest(account_id, backtest_id)
+    if latest and latest["status"] in ("pending", "running"):
+        raise HTTPException(status_code=409, detail=f"A telemetry run (#{latest['id']}) for this backtest is already in progress.")
+    run_id = db.create_telemetry_run(account_id, backtest_id)
+    proc = subprocess.Popen([sys.executable, str(PROJECT_DIR / "run_telemetry.py"), "--run-id", str(run_id)])
+    db.set_telemetry_run_pid(run_id, proc.pid)
+    _log_account_action(account_id, user, action="telemetry_run_start", run_id=run_id, backtest_id=backtest_id)
+    return {"id": run_id}
+
+
+@app.get("/api/telemetry/runs")
+def api_list_telemetry_runs(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    return {"runs": db.list_telemetry_runs(account_id)}
+
+
+@app.get("/api/telemetry/runs/{run_id}")
+def api_get_telemetry_run(run_id: int, account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    record = db.get_telemetry_run(run_id)
+    if not record or record["account_id"] != account_id:
+        raise HTTPException(status_code=404, detail="Not found")
+    return record
+
+
+@app.post("/api/telemetry/runs/{run_id}/cancel")
+def api_cancel_telemetry_run(run_id: int, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    if not db.cancel_telemetry_run(run_id, account_id):
+        raise HTTPException(status_code=404, detail="Telemetry run not found, or already finished")
+    _log_account_action(account_id, user, action="cancel_telemetry_run", run_id=run_id)
+    return {"ok": True}
+
+
+def _telemetry_dataframe(account_id: int, backtest_id: int | None, strategy_id: int | None):
+    rows = db.list_trade_telemetry(account_id, backtest_id=backtest_id, strategy_id=strategy_id)
+    return rows, telemetry_engine.flatten_trades(rows)
+
+
+@app.get("/api/telemetry/trades")
+def api_telemetry_trades(
+    backtest_id: int | None = Query(None), strategy_id: int | None = Query(None),
+    account_id: int = Depends(require_account), user: str = Depends(require_user),
+):
+    """Raw per-trade telemetry rows (full snapshots dict included) - the
+    dashboard's own per-trade drill-down table."""
+    rows, _ = _telemetry_dataframe(account_id, backtest_id, strategy_id)
+    return {"trades": rows}
+
+
+@app.get("/api/telemetry/analysis")
+def api_telemetry_analysis(
+    backtest_id: int | None = Query(None), strategy_id: int | None = Query(None),
+    group_a: str = Query("hard_stop"), group_b: str = Query("trailing_winners"),
+    capture_disaster_threshold: float = Query(-1000.0),
+    account_id: int = Depends(require_account), user: str = Depends(require_user),
+):
+    """The Analysis/Comparison Engine + Statistical Ranking + Predictive
+    Power Ranking + Early Failure Analysis + Suggested Candidate Filters,
+    all in one response - group_a/group_b are keys into telemetry_engine.
+    DEFAULT_GROUPS (e.g. "hard_stop" vs "trailing_winners", "winners" vs
+    "losers")."""
+    if group_a not in telemetry_engine.DEFAULT_GROUPS or group_b not in telemetry_engine.DEFAULT_GROUPS:
+        raise HTTPException(status_code=400, detail=f"group_a/group_b must be one of {sorted(telemetry_engine.DEFAULT_GROUPS)}")
+    rows, df = _telemetry_dataframe(account_id, backtest_id, strategy_id)
+    if df.empty:
+        return {
+            "trade_count": 0, "group_a_count": 0, "group_b_count": 0,
+            "comparison": [], "predictive_ranking": [], "early_failure_analysis": {}, "suggested_filters": [],
+            "group_counts": {},
+        }
+    cfg = {"capture_disaster_threshold": capture_disaster_threshold}
+    mask_a = telemetry_engine.apply_group(df, group_a, cfg)
+    mask_b = telemetry_engine.apply_group(df, group_b, cfg)
+    return {
+        "trade_count": len(df),
+        "group_a_count": int(mask_a.sum()), "group_b_count": int(mask_b.sum()),
+        "group_counts": {key: int(telemetry_engine.apply_group(df, key, cfg).sum()) for key in telemetry_engine.DEFAULT_GROUPS},
+        "comparison": telemetry_engine.comparison_table(df, mask_a, mask_b),
+        "predictive_ranking": telemetry_engine.predictive_ranking(df, mask_a, mask_b)[:20],
+        "early_failure_analysis": telemetry_engine.early_failure_analysis(df, mask_a, mask_b),
+        "suggested_filters": telemetry_engine.suggested_candidate_filters(df, mask_a, mask_b, group_a, group_b),
+    }
+
+
+@app.get("/api/telemetry/heatmap")
+def api_telemetry_heatmap(
+    metric: str, backtest_id: int | None = Query(None), strategy_id: int | None = Query(None),
+    account_id: int = Depends(require_account), user: str = Depends(require_user),
+):
+    _, df = _telemetry_dataframe(account_id, backtest_id, strategy_id)
+    if df.empty or metric not in df.columns:
+        return {"metric": metric, "x_labels": [], "y_labels": [], "matrix": []}
+    return telemetry_engine.heatmap_data(df, metric)
+
+
+@app.get("/api/telemetry/metric_columns")
+def api_telemetry_metric_columns(
+    backtest_id: int | None = Query(None), strategy_id: int | None = Query(None),
+    account_id: int = Depends(require_account), user: str = Depends(require_user),
+):
+    """Every numeric "<snapshot>_<metric>" column currently available for
+    this trade set - populates the dashboard's own metric-picker dropdowns
+    (comparison columns, heatmap metric) without hardcoding the ~70-metric
+    list twice (once here in Python, once in the template's own JS)."""
+    _, df = _telemetry_dataframe(account_id, backtest_id, strategy_id)
+    return {"columns": telemetry_engine.feature_columns(df) if not df.empty else []}
+
+
+@app.get("/api/telemetry/export.{fmt}")
+def api_telemetry_export(
+    fmt: str, backtest_id: int | None = Query(None), strategy_id: int | None = Query(None),
+    account_id: int = Depends(require_account), user: str = Depends(require_user),
+):
+    if fmt not in ("csv", "xlsx"):
+        raise HTTPException(status_code=404, detail="Export format must be csv or xlsx")
+    _, df = _telemetry_dataframe(account_id, backtest_id, strategy_id)
+    if df.empty:
+        raise HTTPException(status_code=404, detail="No telemetry rows to export for this selection")
+    buffer = io.BytesIO()
+    if fmt == "csv":
+        df.to_csv(buffer, index=False)
+        media_type = "text/csv"
+    else:
+        df.to_excel(buffer, index=False, engine="openpyxl")
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    _log_account_action(account_id, user, action="telemetry_export", fmt=fmt, backtest_id=backtest_id, strategy_id=strategy_id)
+    return Response(
+        content=buffer.getvalue(), media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="trade_telemetry.{fmt}"'},
+    )
 
 
 # --------------------------------------------------------- backtest worker ---

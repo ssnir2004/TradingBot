@@ -22,6 +22,15 @@ from src.sp500_tickers import SP500_TICKERS
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
+# SPY/QQQ ride along with the regular S&P 500 universe here (same cache,
+# same incremental fetch_symbol/fetch_symbol_range - they're ordinary
+# Stock contracts, nothing ES-specific about them, unlike fetch_es_
+# backtest_data.py's own separate futures-contract fetch) - added for the
+# Trade Telemetry Dashboard's own Market Context snapshots (see src.
+# telemetry_engine.MARKET_CONTEXT_SYMBOLS), which read SPY/QQQ bars the
+# exact same way it reads any traded symbol's own cache.
+FETCH_UNIVERSE = list(SP500_TICKERS) + ["SPY", "QQQ"]
+
 
 def run(fetch_id: int, mode: str = "paper"):
     record = db.get_backtest_data_fetch(fetch_id)
@@ -36,12 +45,12 @@ def run(fetch_id: int, mode: str = "paper"):
         # sets them, so this stays the same top-up run it always was.
         if record["start_date"] and record["end_date"]:
             summary = fetch_backtest_data.run_fetch_range(
-                record["account_id"], list(SP500_TICKERS),
+                record["account_id"], FETCH_UNIVERSE,
                 date.fromisoformat(record["start_date"]), date.fromisoformat(record["end_date"]), mode,
             )
         else:
             summary = fetch_backtest_data.run_fetch(
-                record["account_id"], list(SP500_TICKERS), fetch_backtest_data.DEFAULT_INITIAL_DURATION, mode,
+                record["account_id"], FETCH_UNIVERSE, fetch_backtest_data.DEFAULT_INITIAL_DURATION, mode,
             )
         db.finish_backtest_data_fetch(fetch_id, summary)
         print(
