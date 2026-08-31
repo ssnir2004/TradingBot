@@ -2085,6 +2085,22 @@ def api_telemetry_strategies(account_id: int = Depends(require_account), user: s
     return {"strategies": db.list_telemetry_strategy_summary(account_id)}
 
 
+@app.post("/api/telemetry/delete")
+async def api_delete_telemetry(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    """Bulk-delete already-generated telemetry - e.g. to force a clean
+    regenerate after a snapshot field is added/changed, where the bulk
+    "Generate for all" button on its own would skip every backtest that
+    already has (now-stale) telemetry (see db.delete_trade_telemetry's
+    own docstring). body: {"strategy_id": N} deletes every backtest's
+    telemetry for that strategy, {"backtest_id": N} just one backtest,
+    {} deletes EVERY telemetry row for this account."""
+    body = await request.json() if await request.body() else {}
+    backtest_id, strategy_id = body.get("backtest_id"), body.get("strategy_id")
+    deleted = db.delete_trade_telemetry(account_id, backtest_id, strategy_id)
+    _log_account_action(account_id, user, action="telemetry_delete", backtest_id=backtest_id, strategy_id=strategy_id, deleted=deleted)
+    return {"deleted": deleted}
+
+
 @app.post("/api/telemetry")
 async def api_create_telemetry_run(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     body = await request.json() if await request.body() else {}

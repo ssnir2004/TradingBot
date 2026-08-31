@@ -4557,6 +4557,33 @@ def delete_trade_telemetry_for_backtest(backtest_id: int):
         conn.execute("DELETE FROM trade_telemetry WHERE backtest_id = ?", (backtest_id,))
 
 
+def delete_trade_telemetry(account_id: int, backtest_id: int | None = None, strategy_id: int | None = None) -> int:
+    """The /telemetry page's own user-triggered bulk delete (its "Delete
+    Telemetry" controls) - unlike delete_trade_telemetry_for_backtest
+    above (an internal step every "Generate Telemetry" run already does
+    automatically before replacing a backtest_id's own rows), this is for
+    clearing OUT already-generated telemetry on purpose - e.g. forcing a
+    clean regenerate after a snapshot field is added or changed, where the
+    bulk "Generate for all" button on its own would skip every backtest
+    that already has (now-stale) telemetry. Narrowed to one backtest_id or
+    strategy_id (mirrors list_trade_telemetry's own scoping) if given;
+    both None deletes EVERY telemetry row for this account. Never touches
+    telemetry_runs (the job history) - that stays as an audit trail of
+    when telemetry was generated, independent of whether its rows still
+    exist. Returns the number of rows actually deleted."""
+    query = "DELETE FROM trade_telemetry WHERE account_id = ?"
+    params: list = [account_id]
+    if backtest_id is not None:
+        query += " AND backtest_id = ?"
+        params.append(backtest_id)
+    if strategy_id is not None:
+        query += " AND strategy_id = ?"
+        params.append(strategy_id)
+    with get_conn() as conn:
+        cur = conn.execute(query, params)
+        return cur.rowcount
+
+
 def insert_trade_telemetry_rows(rows: list[dict]):
     """`rows`: [{"account_id", "backtest_id", "strategy_id", "strategy_name",
     "symbol", "side", "entry_time", "exit_time", "final_r", "exit_reason",

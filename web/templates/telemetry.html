@@ -64,6 +64,8 @@
       <div class="small text-muted mb-2">
         To analyze a strategy across ALL its backtest runs (not just one), telemetry needs to exist for each
         of those runs first - this fires "Generate Telemetry" once per backtest that doesn't have it yet.
+        "Generate for all" skips backtests that already have telemetry - use "Delete telemetry" first (e.g.
+        after a snapshot field changed) to force a clean regenerate of everything for a strategy.
       </div>
       <div class="row g-2 align-items-end mb-2">
         <div class="col-12 col-md-8">
@@ -72,6 +74,7 @@
         </div>
         <div class="col-12 col-md-4">
           <button id="btn-bulk-generate-telemetry" class="btn btn-outline-primary btn-sm">Generate for all</button>
+          <button id="btn-bulk-delete-telemetry" class="btn btn-outline-danger btn-sm">Delete telemetry</button>
         </div>
       </div>
       <div id="tel-bulk-generate-status" class="text-muted small"></div>
@@ -383,6 +386,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("btn-generate-telemetry").addEventListener("click", generateTelemetry);
   document.getElementById("btn-cancel-telemetry-run").addEventListener("click", cancelTelemetryRun);
   document.getElementById("btn-bulk-generate-telemetry").addEventListener("click", bulkGenerateTelemetry);
+  document.getElementById("btn-bulk-delete-telemetry").addEventListener("click", bulkDeleteTelemetry);
   document.getElementById("btn-refresh-analysis").addEventListener("click", refreshAnalysis);
   document.getElementById("btn-load-heatmap").addEventListener("click", loadHeatmap);
   document.getElementById("btn-evaluate-rule").addEventListener("click", evaluateRule);
@@ -507,6 +511,34 @@ async function bulkGenerateTelemetry() {
   refreshBacktestPicker();
   refreshScopeStrategyPicker();
   refreshRunHistory();
+}
+
+async function bulkDeleteTelemetry() {
+  const statusEl = document.getElementById("tel-bulk-generate-status");
+  const picker = document.getElementById("tel-bulk-strategy-picker");
+  const strategyId = Number(picker.value);
+  if (!strategyId) { statusEl.innerHTML = `<span class="text-danger">Pick a strategy first.</span>`; return; }
+  const strategyLabel = picker.options[picker.selectedIndex]?.textContent || `strategy #${strategyId}`;
+  if (!confirm(`Delete all generated telemetry for "${strategyLabel}"? This can't be undone - you can always regenerate it afterward with "Generate for all".`)) return;
+  const btn = document.getElementById("btn-bulk-delete-telemetry");
+  btn.disabled = true;
+  try {
+    const { deleted } = await api("/api/telemetry/delete", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ strategy_id: strategyId }),
+    });
+    statusEl.innerHTML = `<span class="text-success">Deleted ${deleted} telemetry row(s) for "${strategyLabel}".</span>`;
+  } catch (e) {
+    statusEl.innerHTML = `<span class="text-danger">Could not delete: ${e.message}</span>`;
+  }
+  btn.disabled = false;
+  refreshBacktestPicker();
+  refreshScopeStrategyPicker();
+  // The just-deleted scope may no longer exist (e.g. it was picked from
+  // tel-scope-strategy, now gone from that picker's own options) - clear
+  // it rather than risk fetching stale/empty results under a scope
+  // selector that no longer matches what's actually on screen.
+  telemetryScope = {};
+  document.getElementById("tel-scope-summary").textContent = "";
 }
 
 function waitForTelemetryRun(runId) {
