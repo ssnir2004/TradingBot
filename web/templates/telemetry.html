@@ -115,6 +115,7 @@
         </div>
         <div class="col-6 col-md-3">
           <button id="btn-refresh-analysis" class="btn btn-primary btn-sm">Refresh Analysis</button>
+          <a id="tel-export-analysis-xlsx" class="btn btn-outline-secondary btn-sm disabled" href="#">Export Analysis (Excel)</a>
         </div>
       </div>
       <div id="tel-analysis-error" class="text-danger small"></div>
@@ -487,7 +488,9 @@ function showTradeModal(telemetryId) {
 
 async function refreshAnalysis() {
   const errorEl = document.getElementById("tel-analysis-error");
+  const exportLink = document.getElementById("tel-export-analysis-xlsx");
   errorEl.textContent = "";
+  exportLink.classList.add("disabled");
   if (!telemetryScope.backtest_id && !telemetryScope.strategy_id) { errorEl.textContent = "Pick a scope above first."; return; }
   const groupA = document.getElementById("tel-group-a").value;
   const groupB = document.getElementById("tel-group-b").value;
@@ -496,6 +499,8 @@ async function refreshAnalysis() {
   params.set("group_a", groupA); params.set("group_b", groupB); params.set("capture_disaster_threshold", threshold);
   let data;
   try { data = await api(`/api/telemetry/analysis?${params.toString()}`); } catch (e) { errorEl.textContent = e.message; return; }
+  exportLink.href = `/api/telemetry/analysis_export.xlsx?${params.toString()}`;
+  exportLink.classList.remove("disabled");
 
   document.getElementById("tel-group-counts").innerHTML =
     `${data.trade_count} total trade(s) — Group A (${GROUP_LABELS[groupA]}): ${data.group_a_count} — Group B (${GROUP_LABELS[groupB]}): ${data.group_b_count}` +

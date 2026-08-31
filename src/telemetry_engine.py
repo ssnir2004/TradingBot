@@ -766,3 +766,81 @@ def export_dataframe(df: pd.DataFrame, fmt: str, path):
         df.to_excel(path, index=False, engine="openpyxl")
     else:
         raise ValueError(f"Unsupported export format: {fmt}")
+
+
+def export_analysis_xlsx(payload: dict, scope_label: str, group_a_label: str, group_b_label: str) -> bytes:
+    """The full Analysis / Comparison Engine result (see web/app.py's own
+    _build_analysis_payload, which computes exactly this dict for both the
+    GET /api/telemetry/analysis JSON endpoint and this export) as a
+    multi-sheet .xlsx workbook - one sheet per section, real numeric cells
+    (sortable/filterable in Excel), same styling convention as src.
+    trades_xlsx.build_trades_xlsx. Unlike export_dataframe (the raw
+    per-trade snapshot matrix), this is the COMPUTED analysis itself -
+    comparison table, predictive ranking, early failure analysis, and
+    suggested filters - exactly what the dashboard's own 4 analysis tabs
+    show, for offline reference or sharing outside the dashboard."""
+    from io import BytesIO
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    header_fill = PatternFill(start_color="EEF1F5", end_color="EEF1F5", fill_type="solid")
+    header_font = Font(bold=True)
+
+    def autosize(ws, ncols):
+        for col in range(1, ncols + 1):
+            letter = get_column_letter(col)
+            width = max((len(str(c.value)) for c in ws[letter] if c.value is not None), default=8)
+            ws.column_dimensions[letter].width = min(max(width + 2, 8), 40)
+
+    def write_table(ws, rows: list[dict], columns: list[str] | None = None):
+        if not rows:
+            ws.append(["No data"])
+            return
+        cols = columns or list(rows[0].keys())
+        ws.append(cols)
+        for cell in ws[ws.max_row]:
+            cell.font, cell.fill = header_font, header_fill
+        for row in rows:
+            ws.append([row.get(c) for c in cols])
+        ws.freeze_panes = "A2"
+        autosize(ws, len(cols))
+
+    wb = Workbook()
+
+    summary_ws = wb.active
+    summary_ws.title = "Summary"
+    summary_ws.append(["Trade Telemetry - Analysis / Comparison Engine"])
+    summary_ws["A1"].font = Font(bold=True, size=14)
+    summary_ws.append([f"Scope: {scope_label} | Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}"])
+    summary_ws.append([])
+    summary_ws.append(["Metric", "Value"])
+    for cell in summary_ws[summary_ws.max_row]:
+        cell.font, cell.fill = header_font, header_fill
+    summary_ws.append(["Total trades in scope", payload["trade_count"]])
+    summary_ws.append([f"Group A ({group_a_label})", payload["group_a_count"]])
+    summary_ws.append([f"Group B ({group_b_label})", payload["group_b_count"]])
+    summary_ws.append([])
+    summary_ws.append(["All group counts"])
+    summary_ws[summary_ws.max_row][0].font = Font(bold=True)
+    for key, count in payload["group_counts"].items():
+        summary_ws.append([key, count])
+    autosize(summary_ws, 2)
+
+    write_table(wb.create_sheet("Comparison"), payload["comparison"])
+    write_table(wb.create_sheet("Predictive Ranking"), payload["predictive_ranking"])
+
+    early_ws = wb.create_sheet("Early Failure Analysis")
+    early_rows = [
+        {"offset": offset, **row}
+        for offset, rows in payload["early_failure_analysis"].items()
+        for row in rows
+    ]
+    write_table(early_ws, early_rows, columns=["offset", "metric", "feature_importance", "mutual_information"] if early_rows else None)
+
+    write_table(wb.create_sheet("Suggested Filters"), payload["suggested_filters"])
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()

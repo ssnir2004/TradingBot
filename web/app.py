@@ -2143,21 +2143,11 @@ def api_telemetry_trades(
     return {"trades": rows}
 
 
-@app.get("/api/telemetry/analysis")
-def api_telemetry_analysis(
-    backtest_id: int | None = Query(None), strategy_id: int | None = Query(None),
-    group_a: str = Query("hard_stop"), group_b: str = Query("trailing_winners"),
-    capture_disaster_threshold: float = Query(-1000.0),
-    account_id: int = Depends(require_account), user: str = Depends(require_user),
-):
-    """The Analysis/Comparison Engine + Statistical Ranking + Predictive
-    Power Ranking + Early Failure Analysis + Suggested Candidate Filters,
-    all in one response - group_a/group_b are keys into telemetry_engine.
-    DEFAULT_GROUPS (e.g. "hard_stop" vs "trailing_winners", "winners" vs
-    "losers")."""
-    if group_a not in telemetry_engine.DEFAULT_GROUPS or group_b not in telemetry_engine.DEFAULT_GROUPS:
-        raise HTTPException(status_code=400, detail=f"group_a/group_b must be one of {sorted(telemetry_engine.DEFAULT_GROUPS)}")
-    rows, df = _telemetry_dataframe(account_id, backtest_id, strategy_id)
+def _build_telemetry_analysis_payload(df, group_a: str, group_b: str, capture_disaster_threshold: float) -> dict:
+    """Shared by GET /api/telemetry/analysis (JSON) and GET /api/telemetry/
+    analysis_export.xlsx (workbook) - computing this once here keeps the
+    two responses guaranteed to show the exact same numbers, never two
+    independently-drifting implementations of the same analysis."""
     if df.empty:
         return {
             "trade_count": 0, "group_a_count": 0, "group_b_count": 0,
@@ -2176,6 +2166,50 @@ def api_telemetry_analysis(
         "early_failure_analysis": telemetry_engine.early_failure_analysis(df, mask_a, mask_b),
         "suggested_filters": telemetry_engine.suggested_candidate_filters(df, mask_a, mask_b, group_a, group_b),
     }
+
+
+@app.get("/api/telemetry/analysis")
+def api_telemetry_analysis(
+    backtest_id: int | None = Query(None), strategy_id: int | None = Query(None),
+    group_a: str = Query("hard_stop"), group_b: str = Query("trailing_winners"),
+    capture_disaster_threshold: float = Query(-1000.0),
+    account_id: int = Depends(require_account), user: str = Depends(require_user),
+):
+    """The Analysis/Comparison Engine + Statistical Ranking + Predictive
+    Power Ranking + Early Failure Analysis + Suggested Candidate Filters,
+    all in one response - group_a/group_b are keys into telemetry_engine.
+    DEFAULT_GROUPS (e.g. "hard_stop" vs "trailing_winners", "winners" vs
+    "losers")."""
+    if group_a not in telemetry_engine.DEFAULT_GROUPS or group_b not in telemetry_engine.DEFAULT_GROUPS:
+        raise HTTPException(status_code=400, detail=f"group_a/group_b must be one of {sorted(telemetry_engine.DEFAULT_GROUPS)}")
+    _, df = _telemetry_dataframe(account_id, backtest_id, strategy_id)
+    return _build_telemetry_analysis_payload(df, group_a, group_b, capture_disaster_threshold)
+
+
+@app.get("/api/telemetry/analysis_export.xlsx")
+def api_telemetry_analysis_export(
+    backtest_id: int | None = Query(None), strategy_id: int | None = Query(None),
+    group_a: str = Query("hard_stop"), group_b: str = Query("trailing_winners"),
+    capture_disaster_threshold: float = Query(-1000.0),
+    account_id: int = Depends(require_account), user: str = Depends(require_user),
+):
+    """The full Analysis/Comparison Engine result (same computation as GET
+    /api/telemetry/analysis) as a downloadable multi-sheet .xlsx workbook -
+    Comparison/Predictive Ranking/Early Failure Analysis/Suggested Filters
+    each their own sheet, plus a Summary sheet with the group counts."""
+    if group_a not in telemetry_engine.DEFAULT_GROUPS or group_b not in telemetry_engine.DEFAULT_GROUPS:
+        raise HTTPException(status_code=400, detail=f"group_a/group_b must be one of {sorted(telemetry_engine.DEFAULT_GROUPS)}")
+    _, df = _telemetry_dataframe(account_id, backtest_id, strategy_id)
+    if df.empty:
+        raise HTTPException(status_code=404, detail="No telemetry rows to export for this selection")
+    payload = _build_telemetry_analysis_payload(df, group_a, group_b, capture_disaster_threshold)
+    scope_label = f"Backtest #{backtest_id}" if backtest_id else (f"Strategy #{strategy_id} (pooled)" if strategy_id else "All telemetry")
+    xlsx_bytes = telemetry_engine.export_analysis_xlsx(payload, scope_label, group_a, group_b)
+    _log_account_action(account_id, user, action="telemetry_analysis_export", backtest_id=backtest_id, strategy_id=strategy_id, group_a=group_a, group_b=group_b)
+    return Response(
+        content=xlsx_bytes, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="trade_telemetry_analysis.xlsx"'},
+    )
 
 
 @app.get("/api/telemetry/heatmap")
