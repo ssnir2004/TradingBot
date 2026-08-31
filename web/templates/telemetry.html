@@ -49,17 +49,42 @@
       </div>
       <div id="tel-generate-error" class="text-danger small"></div>
       <div id="tel-generate-status" class="text-muted small"></div>
-      <div class="mt-2" id="tel-run-history"></div>
+
+      <hr>
+      <div class="small fw-bold mb-1">Generate for every backtest of one strategy</div>
+      <div class="small text-muted mb-2">
+        To analyze a strategy across ALL its backtest runs (not just one), telemetry needs to exist for each
+        of those runs first - this fires "Generate Telemetry" once per backtest that doesn't have it yet.
+      </div>
+      <div class="row g-2 align-items-end mb-2">
+        <div class="col-12 col-md-8">
+          <label class="form-label small">Strategy</label>
+          <select id="tel-bulk-strategy-picker" class="form-select form-select-sm"><option>Loading…</option></select>
+        </div>
+        <div class="col-12 col-md-4">
+          <button id="btn-bulk-generate-telemetry" class="btn btn-outline-primary btn-sm">Generate for all</button>
+        </div>
+      </div>
+      <div id="tel-bulk-generate-status" class="text-muted small"></div>
+
+      <div class="mt-3" id="tel-run-history"></div>
     </div>
   </div>
 
   <div class="card mb-4">
     <div class="card-header">Scope</div>
     <div class="card-body">
+      <div class="btn-group btn-group-sm mb-2" role="group">
+        <input type="radio" class="btn-check" name="tel-scope-mode" id="tel-scope-mode-backtest" checked>
+        <label class="btn btn-outline-secondary" for="tel-scope-mode-backtest">Single backtest</label>
+        <input type="radio" class="btn-check" name="tel-scope-mode" id="tel-scope-mode-strategy">
+        <label class="btn btn-outline-secondary" for="tel-scope-mode-strategy">Strategy (all its backtests)</label>
+      </div>
       <div class="row g-2 align-items-end">
         <div class="col-12 col-md-6">
           <label class="form-label small">Analyze</label>
           <select id="tel-scope-backtest" class="form-select form-select-sm"><option value="">Pick a backtest with telemetry generated…</option></select>
+          <select id="tel-scope-strategy" class="form-select form-select-sm d-none"><option value="">Pick a strategy with telemetry generated…</option></select>
         </div>
         <div class="col-12 col-md-3">
           <a id="tel-export-csv" class="btn btn-outline-secondary btn-sm disabled" href="#">Export CSV</a>
@@ -172,11 +197,12 @@ const GROUP_LABELS = {
   trailing_winners: "Trailing Winners", never_trailed: "Never reached trailing", capture_disaster: "Capture Disaster",
 };
 
-let telemetryScope = {};  // {backtest_id: N} - the single source of truth for every scoped fetch below
+let telemetryScope = {};  // {backtest_id: N} OR {strategy_id: N} - the single source of truth for every scoped fetch below
 let telPollHandle = null;
 let telRunningId = null;
 let lastTrades = [];
 let tradesFilterQuery = "";
+let eligibleBacktests = [];  // last /api/telemetry/eligible_backtests result - reused to build the bulk-generate strategy picker client-side
 
 document.addEventListener("DOMContentLoaded", () => {
   for (const [key, label] of Object.entries(GROUP_LABELS)) {
@@ -186,9 +212,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("btn-generate-telemetry").addEventListener("click", generateTelemetry);
   document.getElementById("btn-cancel-telemetry-run").addEventListener("click", cancelTelemetryRun);
+  document.getElementById("btn-bulk-generate-telemetry").addEventListener("click", bulkGenerateTelemetry);
   document.getElementById("btn-refresh-analysis").addEventListener("click", refreshAnalysis);
   document.getElementById("btn-load-heatmap").addEventListener("click", loadHeatmap);
   document.getElementById("tel-scope-backtest").addEventListener("change", onScopeChange);
+  document.getElementById("tel-scope-strategy").addEventListener("change", onScopeChange);
+  document.getElementById("tel-scope-mode-backtest").addEventListener("change", onScopeModeChange);
+  document.getElementById("tel-scope-mode-strategy").addEventListener("change", onScopeModeChange);
   document.getElementById("tel-trades-filter").addEventListener("input", (e) => { tradesFilterQuery = e.target.value.trim().toLowerCase(); renderTrades(); });
 
   document.querySelectorAll("#tel-analysis-tabs .nav-link").forEach(btn => {
@@ -201,6 +231,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   refreshBacktestPicker();
+  refreshScopeStrategyPicker();
   refreshRunHistory();
 });
 
@@ -215,8 +246,10 @@ async function refreshBacktestPicker() {
   const picker = document.getElementById("tel-backtest-picker");
   const scopePicker = document.getElementById("tel-scope-backtest");
   const rows = payload.backtests || [];
+  eligibleBacktests = rows;
   if (!rows.length) {
     picker.innerHTML = `<option value="">No 'done' backtests yet - run one on the Backtest page first.</option>`;
+    document.getElementById("tel-bulk-strategy-picker").innerHTML = `<option value="">No 'done' backtests yet</option>`;
     return;
   }
   picker.innerHTML = rows.map(r => `<option value="${r.id}">#${r.id} — ${r.strategy_names.join(", ")} — ${r.symbols.length} symbol(s) — ${fmtDateOnly(r.start_date)} → ${fmtDateOnly(r.end_date)}${r.has_telemetry ? " ✓ telemetry" : ""}</option>`).join("");
@@ -224,6 +257,87 @@ async function refreshBacktestPicker() {
   const withTelemetry = rows.filter(r => r.has_telemetry);
   scopePicker.innerHTML = `<option value="">Pick a backtest with telemetry generated…</option>` +
     withTelemetry.map(r => `<option value="${r.id}">#${r.id} — ${r.strategy_names.join(", ")} — ${fmtDateOnly(r.start_date)} → ${fmtDateOnly(r.end_date)}</option>`).join("");
+
+  // Every distinct strategy_id appearing in ANY 'done' backtest (not just
+  // ones with telemetry already) - the bulk-generate picker's own job is
+  // finding backtests that DON'T have telemetry yet and generating it.
+  const byStrategy = new Map();  // strategy_id -> {name, total, pending}
+  rows.forEach(r => {
+    r.strategy_ids.forEach((sid, i) => {
+      const entry = byStrategy.get(sid) || { name: r.strategy_names[i], total: 0, pending: 0 };
+      entry.total += 1;
+      if (!r.has_telemetry) entry.pending += 1;
+      byStrategy.set(sid, entry);
+    });
+  });
+  const bulkPicker = document.getElementById("tel-bulk-strategy-picker");
+  bulkPicker.innerHTML = Array.from(byStrategy.entries())
+    .map(([sid, e]) => `<option value="${sid}">${e.name} — ${e.total} backtest(s)${e.pending ? `, ${e.pending} pending telemetry` : " (all done)"}</option>`)
+    .join("");
+}
+
+async function refreshScopeStrategyPicker() {
+  const select = document.getElementById("tel-scope-strategy");
+  let payload;
+  try { payload = await api("/api/telemetry/strategies"); } catch (e) {
+    select.innerHTML = `<option value="">Could not load: ${e.message}</option>`; return;
+  }
+  const rows = payload.strategies || [];
+  select.innerHTML = `<option value="">Pick a strategy with telemetry generated…</option>` +
+    rows.map(r => `<option value="${r.strategy_id}">${r.strategy_name} — ${r.backtest_count} backtest(s), ${r.trade_count} trade(s)</option>`).join("");
+}
+
+function onScopeModeChange() {
+  const strategyMode = document.getElementById("tel-scope-mode-strategy").checked;
+  document.getElementById("tel-scope-backtest").classList.toggle("d-none", strategyMode);
+  document.getElementById("tel-scope-strategy").classList.toggle("d-none", !strategyMode);
+  onScopeChange();
+}
+
+async function bulkGenerateTelemetry() {
+  const statusEl = document.getElementById("tel-bulk-generate-status");
+  const strategyId = Number(document.getElementById("tel-bulk-strategy-picker").value);
+  if (!strategyId) { statusEl.innerHTML = `<span class="text-danger">Pick a strategy first.</span>`; return; }
+  const targets = eligibleBacktests.filter(r => !r.has_telemetry && r.strategy_ids.includes(strategyId));
+  if (!targets.length) { statusEl.innerHTML = `<span class="text-muted">Every backtest for this strategy already has telemetry.</span>`; return; }
+  const btn = document.getElementById("btn-bulk-generate-telemetry");
+  btn.disabled = true;
+  let done = 0, failed = 0;
+  for (const bt of targets) {
+    statusEl.textContent = `Generating ${done + failed + 1}/${targets.length} (backtest #${bt.id})…`;
+    try {
+      const { id } = await api("/api/telemetry", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ backtest_id: bt.id }),
+      });
+      // Sequential and awaited-to-completion (not fire-and-forget) - each
+      // "Generate Telemetry" is its own subprocess reading a symbol
+      // universe's worth of cached bars, so running many at once would
+      // pile up the same way concurrent backtests already do elsewhere
+      // in this dashboard.
+      await waitForTelemetryRun(id);
+      done += 1;
+    } catch (e) {
+      failed += 1;
+    }
+  }
+  btn.disabled = false;
+  statusEl.innerHTML = `<span class="${failed ? 'text-warning' : 'text-success'}">Done: ${done} generated${failed ? `, ${failed} failed` : ""}.</span>`;
+  refreshBacktestPicker();
+  refreshScopeStrategyPicker();
+  refreshRunHistory();
+}
+
+function waitForTelemetryRun(runId) {
+  return new Promise((resolve, reject) => {
+    const tick = async () => {
+      let record;
+      try { record = await api(`/api/telemetry/runs/${runId}`); } catch (e) { reject(e); return; }
+      if (record.status === "done") resolve(record);
+      else if (record.status === "failed") reject(new Error(record.error || "failed"));
+      else setTimeout(tick, 2000);
+    };
+    tick();
+  });
 }
 
 async function generateTelemetry() {
@@ -302,22 +416,27 @@ async function refreshRunHistory() {
 }
 
 function onScopeChange() {
+  const strategyMode = document.getElementById("tel-scope-mode-strategy").checked;
   const backtestId = document.getElementById("tel-scope-backtest").value;
-  telemetryScope = backtestId ? { backtest_id: Number(backtestId) } : {};
+  const strategyId = document.getElementById("tel-scope-strategy").value;
+  const picked = strategyMode ? strategyId : backtestId;
+  telemetryScope = !picked ? {} : (strategyMode ? { strategy_id: Number(picked) } : { backtest_id: Number(picked) });
+
   const csvLink = document.getElementById("tel-export-csv");
   const xlsxLink = document.getElementById("tel-export-xlsx");
-  const qs = backtestId ? `?backtest_id=${backtestId}` : "";
+  const qs = picked ? `?${scopeQuery()}` : "";
   csvLink.href = `/api/telemetry/export.csv${qs}`;
   xlsxLink.href = `/api/telemetry/export.xlsx${qs}`;
-  csvLink.classList.toggle("disabled", !backtestId);
-  xlsxLink.classList.toggle("disabled", !backtestId);
+  csvLink.classList.toggle("disabled", !picked);
+  xlsxLink.classList.toggle("disabled", !picked);
   document.getElementById("tel-scope-summary").textContent = "";
-  if (backtestId) { loadTrades(); refreshAnalysis(); loadMetricColumns(); }
+  if (picked) { loadTrades(); refreshAnalysis(); loadMetricColumns(); }
 }
 
 function scopeQuery() {
   const params = new URLSearchParams();
   if (telemetryScope.backtest_id) params.set("backtest_id", telemetryScope.backtest_id);
+  if (telemetryScope.strategy_id) params.set("strategy_id", telemetryScope.strategy_id);
   return params.toString();
 }
 

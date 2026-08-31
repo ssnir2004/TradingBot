@@ -2065,16 +2065,24 @@ def api_telemetry_eligible_backtests(account_id: int = Depends(require_account),
     for bt in db.list_backtests(account_id, limit=200):
         if bt["status"] != "done":
             continue
-        strategy_names = [
-            (db.get_strategy(sid) or {}).get("name", f"Strategy {sid}") for sid in bt["params"].get("strategy_ids", [])
-        ]
+        strategy_ids = bt["params"].get("strategy_ids", [])
+        strategy_names = [(db.get_strategy(sid) or {}).get("name", f"Strategy {sid}") for sid in strategy_ids]
         rows.append({
             "id": bt["id"], "created_at": bt["created_at"],
-            "strategy_names": strategy_names, "symbols": bt["params"].get("symbols", []),
+            "strategy_ids": strategy_ids, "strategy_names": strategy_names, "symbols": bt["params"].get("symbols", []),
             "start_date": bt["params"].get("start_date"), "end_date": bt["params"].get("end_date"),
             "total_pnl_usd": bt["total_pnl_usd"], "has_telemetry": bt["id"] in has_telemetry,
         })
     return {"backtests": rows}
+
+
+@app.get("/api/telemetry/strategies")
+def api_telemetry_strategies(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    """Every strategy that has SOME telemetry generated for this account,
+    with how many backtests/trades are pooled under it - powers the
+    /telemetry page's "analyze this strategy across every backtest I've
+    run" scope option (see db.list_telemetry_strategy_summary)."""
+    return {"strategies": db.list_telemetry_strategy_summary(account_id)}
 
 
 @app.post("/api/telemetry")

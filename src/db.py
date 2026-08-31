@@ -4615,6 +4615,24 @@ def list_telemetry_backtest_ids(account_id: int) -> list[int]:
     return [r["backtest_id"] for r in rows]
 
 
+def list_telemetry_strategy_summary(account_id: int) -> list[dict]:
+    """One row per strategy_id that has ANY telemetry generated for this
+    account, with how many backtests/trades are pooled under it - the
+    Trade Telemetry Dashboard's own "analyze this strategy across every
+    backtest I've run" picker (mirrors perf.pooled_trades_for_strategy's
+    own pooling idea, but for telemetry rows via list_trade_telemetry's
+    own strategy_id filter - this is just the summary a picker needs,
+    without loading every row's full snapshots_json). Busiest (most
+    pooled trades) first."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT strategy_id, strategy_name, COUNT(DISTINCT backtest_id) AS backtest_count, COUNT(*) AS trade_count "
+            "FROM trade_telemetry WHERE account_id = ? GROUP BY strategy_id, strategy_name ORDER BY trade_count DESC",
+            (account_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 # --------------------------------------------------------- backtest worker ---
 # A remote backtest worker (see docs/worker.md, backtest_worker.py) is a
 # script running on the user's OWN machine, polling this dashboard over
