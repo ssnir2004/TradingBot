@@ -488,7 +488,7 @@ function showTradeModal(telemetryId) {
 async function refreshAnalysis() {
   const errorEl = document.getElementById("tel-analysis-error");
   errorEl.textContent = "";
-  if (!telemetryScope.backtest_id) { errorEl.textContent = "Pick a scope above first."; return; }
+  if (!telemetryScope.backtest_id && !telemetryScope.strategy_id) { errorEl.textContent = "Pick a scope above first."; return; }
   const groupA = document.getElementById("tel-group-a").value;
   const groupB = document.getElementById("tel-group-b").value;
   const threshold = document.getElementById("tel-capture-threshold").value;
