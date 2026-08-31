@@ -42,7 +42,7 @@ would produce.
 import argparse
 import copy
 import json
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from analyze_v5_ablation import _stats
@@ -60,6 +60,53 @@ OBJECTIVE_KEYS = {
     "avg_r": "avg_r",
     "win_rate": "win_rate_pct",
 }
+
+# Same value/reasoning as the New Backtest page's own BT_MAX_CHUNK_
+# TRADING_DAYS (web/templates/backtest.html): each combination's own
+# work is split into consecutive groups of at most this many trading
+# days, not run as one call over the whole picked range - bounds peak
+# memory per backtest_runner.run_one_strategy call (loading months of
+# intraday bars for the full symbol universe in one go, per combination,
+# is the same memory-pressure shape that motivated chunking there) and,
+# in remote mode, keeps each dispatched worker job small. See chunk_
+# trading_days's own docstring for why concatenating chunk results back
+# together is exact, not an approximation, for every strategy in this
+# codebase.
+MAX_CHUNK_TRADING_DAYS = 5
+
+
+def chunk_trading_days(start_date: date, end_date: date, max_chunk_days: int = MAX_CHUNK_TRADING_DAYS) -> list[tuple[date, date]]:
+    """Splits [start_date, end_date] into consecutive chunks of at most
+    max_chunk_days WEEKDAYS each (Mon-Fri; a weekend never counts toward
+    the limit, same as backtest_engine.py's own _trading_days already
+    skips them) - returns [(chunk_start, chunk_end), ...], each pair
+    already the first/last weekday of that chunk. A range with no
+    weekdays at all (e.g. a weekend-only pick) returns [].
+
+    Concatenating the trade pairs from every chunk of the SAME parameter
+    combination, in any order, before computing _stats() once produces
+    IDENTICAL aggregate stats to one continuous run over the whole
+    range - not an approximation - because every ORB strategy in this
+    codebase closes every position by its own end of day (force_close_
+    et/eod_close; see backtest_engine.py's Step-1 loops) and position
+    sizing here is never compounded off a running equity curve (every
+    trade sizes off the SAME portfolio_value passed in, not one that
+    grows/shrinks with prior trades - see simulate_orb_strategy's own
+    risk_dollars calc), so there is no cross-chunk state a continuous
+    run would have that independent per-chunk runs don't already
+    reproduce exactly. perf.compute_max_drawdown/aggregate both sort/
+    fold by each pair's own exit time anyway, so chunk order here
+    doesn't matter either."""
+    weekdays = []
+    cur = start_date
+    while cur <= end_date:
+        if cur.weekday() < 5:  # Mon=0 ... Fri=4, same convention as Python's own date.weekday()
+            weekdays.append(cur)
+        cur += timedelta(days=1)
+    return [
+        (group[0], group[-1])
+        for group in (weekdays[i:i + max_chunk_days] for i in range(0, len(weekdays), max_chunk_days))
+    ]
 
 
 def _objective_value(stats: dict, objective: str) -> float:
@@ -111,23 +158,35 @@ def aggregate_from_children(optimization_id: int) -> bool:
     if not children or any(c["status"] not in ("done", "failed") for c in children):
         return False  # still waiting on at least one combination (or none dispatched yet)
 
+    # A remote-mode sweep dispatches one child per (combo, date chunk) -
+    # see web/app.py's own _start_optimization remote branch and chunk_
+    # trading_days's own docstring for why concatenating a combo's own
+    # chunks' pairs, across however many children carry the SAME
+    # hard_stop_r/trailing_activation_r, is exact rather than an
+    # approximation. Grouped here by that (hard_stop_r, trailing_
+    # activation_r) key rather than assuming a fixed chunk count per
+    # combo, so a chunk that itself failed just contributes nothing
+    # (not a whole combo lost) as long as at least one sibling chunk of
+    # the same combo succeeded.
     base_strategy_key = str(record["params"]["base_strategy_id"])
-    combos = []
-    failed_count = 0
+    groups: dict[tuple, list[dict]] = {}
+    failed_chunk_count = 0
     for child in children:
         combo_params = child["params"]
-        hard_stop_r = combo_params.get("hard_stop_r")
-        trailing_activation_r = combo_params.get("trailing_activation_r")
+        key = (combo_params.get("hard_stop_r"), combo_params.get("trailing_activation_r"))
         strategy_result = (child["results"] or {}).get(base_strategy_key) if child["status"] == "done" else None
         if not strategy_result or "pairs" not in strategy_result:
-            failed_count += 1
+            failed_chunk_count += 1
             continue
-        combos.append({
-            "hard_stop_r": hard_stop_r,
-            "trailing_activation_r": trailing_activation_r,
-            "stats": _stats(strategy_result["pairs"]),
-        })
-    note = f"{failed_count} of {len(children)} combination(s) failed and none of the rest succeeded" if failed_count else None
+        groups.setdefault(key, []).extend(strategy_result["pairs"])
+    combos = [
+        {"hard_stop_r": key[0], "trailing_activation_r": key[1], "stats": _stats(pairs)}
+        for key, pairs in groups.items()
+    ]
+    note = (
+        f"{failed_chunk_count} of {len(children)} date-chunk job(s) failed and no chunk of any combination succeeded"
+        if failed_chunk_count else None
+    )
     _finalize(optimization_id, combos, record["params"].get("objective", "net_pnl"), failed_note=note)
     return True
 
@@ -150,6 +209,7 @@ def run_optimization(optimization_id: int):
         end_date = date.fromisoformat(params["end_date"])
         objective = params.get("objective", "net_pnl")
 
+        date_chunks = chunk_trading_days(start_date, end_date)
         combos = []
         for hard_stop_r in params["hard_stop_values"]:
             for trailing_activation_r in params["trailing_activation_values"]:
@@ -157,18 +217,28 @@ def run_optimization(optimization_id: int):
                 rules["exit"]["hard_stop_R"] = hard_stop_r
                 rules["exit"]["trailing_trigger_R"] = trailing_activation_r
                 label = f"ORB Long v4.3 (hard_stop={hard_stop_r}R, trailing={trailing_activation_r}R)"
-                result = backtest_runner.run_one_strategy(
-                    label, direction, rules, symbols, start_date, end_date,
-                    params["portfolio_value"], params["max_risk_pct"],
-                    params["max_trades_per_day"], params["commission_per_trade"],
-                )
+                # One run_one_strategy call per date chunk (see chunk_
+                # trading_days's own docstring for why concatenating
+                # their pairs is exact, not an approximation) - bounds
+                # peak memory per call the same way the New Backtest
+                # page's own chunking bounds it per subprocess, without
+                # spawning any extra subprocess here (still just this
+                # ONE, for the whole sweep).
+                combo_pairs = []
+                for chunk_start, chunk_end in date_chunks:
+                    result = backtest_runner.run_one_strategy(
+                        label, direction, rules, symbols, chunk_start, chunk_end,
+                        params["portfolio_value"], params["max_risk_pct"],
+                        params["max_trades_per_day"], params["commission_per_trade"],
+                    )
+                    combo_pairs.extend(result["pairs"])
                 combos.append({
                     "hard_stop_r": hard_stop_r,
                     "trailing_activation_r": trailing_activation_r,
-                    "stats": _stats(result["pairs"]),
+                    "stats": _stats(combo_pairs),
                 })
                 print(f"optimization {optimization_id}: {label} -> "
-                      f"{combos[-1]['stats']['total_trades']} trade(s)")
+                      f"{combos[-1]['stats']['total_trades']} trade(s) across {len(date_chunks)} date chunk(s)")
 
         _finalize(optimization_id, combos, objective)
     except Exception as exc:  # noqa: BLE001 - a bad run must record failure, not crash silently

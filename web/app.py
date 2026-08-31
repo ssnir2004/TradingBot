@@ -1882,27 +1882,33 @@ def _start_optimization(account_id: int, user: str, params: dict, execution_mode
         db.set_optimization_pid(optimization_id, proc.pid)
         return optimization_id
 
-    # execution_mode == "remote": dispatch every combination as its own
-    # ordinary remote-mode backtest (reusing the EXISTING worker claim/
-    # result protocol unchanged - see this section's own top comment) -
-    # no subprocess of run_optimization.py at all in this path;
-    # _aggregate_optimizations_loop finishes the optimization row once
-    # every one of these reaches a terminal state.
+    # execution_mode == "remote": dispatch every (combination, date chunk)
+    # pair as its own ordinary remote-mode backtest (reusing the
+    # EXISTING worker claim/result protocol unchanged - see this
+    # section's own top comment) - no subprocess of run_optimization.py
+    # at all in this path; _aggregate_optimizations_loop finishes the
+    # optimization row once every one of these reaches a terminal state,
+    # concatenating each combo's own chunk results back together (see
+    # run_optimization.chunk_trading_days's own docstring for why that's
+    # exact, not an approximation) rather than assuming one child per
+    # combo.
+    date_chunks = run_optimization.chunk_trading_days(date.fromisoformat(params["start_date"]), date.fromisoformat(params["end_date"]))
     for hard_stop_r in params["hard_stop_values"]:
         for trailing_activation_r in params["trailing_activation_values"]:
-            child_params = {
-                "strategy_ids": [params["base_strategy_id"]],
-                "start_date": params["start_date"], "end_date": params["end_date"],
-                "symbols": params["symbols"],
-                "portfolio_value": params["portfolio_value"], "max_risk_pct": params["max_risk_pct"],
-                "max_trades_per_day": params["max_trades_per_day"], "commission_per_trade": params["commission_per_trade"],
-                "rules_override": {"exit": {"hard_stop_R": hard_stop_r, "trailing_trigger_R": trailing_activation_r}},
-                # Redundant with rules_override above, but a plain top-
-                # level read is simpler for aggregate_from_children than
-                # re-parsing the override's own nested shape back out.
-                "hard_stop_r": hard_stop_r, "trailing_activation_r": trailing_activation_r,
-            }
-            db.create_backtest(account_id, child_params, execution_mode="remote", optimization_id=optimization_id)
+            for chunk_start, chunk_end in date_chunks:
+                child_params = {
+                    "strategy_ids": [params["base_strategy_id"]],
+                    "start_date": chunk_start.isoformat(), "end_date": chunk_end.isoformat(),
+                    "symbols": params["symbols"],
+                    "portfolio_value": params["portfolio_value"], "max_risk_pct": params["max_risk_pct"],
+                    "max_trades_per_day": params["max_trades_per_day"], "commission_per_trade": params["commission_per_trade"],
+                    "rules_override": {"exit": {"hard_stop_R": hard_stop_r, "trailing_trigger_R": trailing_activation_r}},
+                    # Redundant with rules_override above, but a plain top-
+                    # level read is simpler for aggregate_from_children than
+                    # re-parsing the override's own nested shape back out.
+                    "hard_stop_r": hard_stop_r, "trailing_activation_r": trailing_activation_r,
+                }
+                db.create_backtest(account_id, child_params, execution_mode="remote", optimization_id=optimization_id)
     db.start_optimization(optimization_id)
     return optimization_id
 

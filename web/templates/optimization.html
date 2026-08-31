@@ -134,6 +134,28 @@ function parseRValuesPreview(raw) {
   return (raw || "").split(",").map(s => s.trim()).filter(s => s.length && !isNaN(Number(s)));
 }
 
+// Same value as run_optimization.py's own MAX_CHUNK_TRADING_DAYS - kept
+// in sync by hand (both sides are small, rarely-changed constants); this
+// copy is display-only (see updateComboPreview below), the server is
+// the one actually deciding how a sweep gets chunked.
+const OPT_MAX_CHUNK_TRADING_DAYS = 5;
+
+// Same weekday-counting logic as web/templates/backtest.html's own
+// weekdaysInRange (duplicated rather than shared - these are two
+// separate, independently-loaded pages) - Mon-Fri only, used here just
+// to size the "N trading days -> M chunks" preview text.
+function weekdaysInRange(startDate, endDate) {
+  const days = [];
+  const cur = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate());
+  const last = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate());
+  while (cur <= last) {
+    const dow = cur.getDay();
+    if (dow !== 0 && dow !== 6) days.push(new Date(cur));
+    cur.setDate(cur.getDate() + 1);
+  }
+  return days;
+}
+
 const OBJECTIVE_LABELS = {
   net_pnl: "Net P&L", profit_factor: "Profit Factor", expectancy: "Expectancy",
   avg_r: "Average R", win_rate: "Win Rate",
@@ -144,7 +166,10 @@ let optPollHandle = null;
 let currentOptimizationId = null;
 
 document.addEventListener("DOMContentLoaded", () => {
-  dateRangePicker = flatpickr("#opt-date-range", { mode: "range", dateFormat: "d/m/Y", allowInput: false });
+  dateRangePicker = flatpickr("#opt-date-range", {
+    mode: "range", dateFormat: "d/m/Y", allowInput: false,
+    onChange: () => updateComboPreview(),
+  });
 
   api("/api/backtest_universe").then(({ count }) => {
     document.getElementById("opt-universe-info").textContent =
@@ -156,9 +181,22 @@ document.addEventListener("DOMContentLoaded", () => {
     const ta = parseRValuesPreview(document.getElementById("opt-trailing-values").value);
     const el = document.getElementById("opt-combo-preview");
     if (!hs.length || !ta.length) { el.textContent = ""; return; }
-    const n = hs.length * ta.length;
+    const comboCount = hs.length * ta.length;
     const remote = document.getElementById("opt-run-remote").checked;
-    el.textContent = `${hs.length} Hard Stop value(s) × ${ta.length} Trailing Activation value(s) = ${n} combination(s) will run` +
+
+    const selected = dateRangePicker ? dateRangePicker.selectedDates : [];
+    let chunkText = "";
+    if (selected.length >= 2) {
+      // Same MAX_CHUNK_TRADING_DAYS=5 grouping run_optimization.
+      // chunk_trading_days actually applies server-side - mirrored here
+      // purely for this preview number, not a separate decision.
+      const days = weekdaysInRange(selected[0], selected[1]).length;
+      const chunks = Math.max(1, Math.ceil(days / OPT_MAX_CHUNK_TRADING_DAYS));
+      const jobCount = comboCount * chunks;
+      chunkText = ` over ${days} trading day(s) (split into ${chunks} date chunk(s) of up to ${OPT_MAX_CHUNK_TRADING_DAYS} each) = ${jobCount} total job(s)`;
+    }
+
+    el.textContent = `${hs.length} Hard Stop value(s) × ${ta.length} Trailing Activation value(s) = ${comboCount} combination(s)${chunkText} will run` +
       (remote ? `, one at a time, on your remote worker.` : `, sequentially, in one background job on this server.`);
   }
   document.getElementById("opt-hard-stop-values").addEventListener("input", updateComboPreview);
