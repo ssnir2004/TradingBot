@@ -94,6 +94,33 @@ NON_FEATURE_COLUMNS = {
     "entry_time", "exit_time", "final_r", "exit_reason", "trail_activated", "capture_pct",
 }
 
+# "1m"/"3m" are excluded from every STATISTICAL computation (Comparison,
+# Predictive Ranking/Feature Importance/Mutual Information, Suggested
+# Filters, and the heatmap metric picker - see feature_columns below) -
+# NOT from storage or the per-trade drill-down view, which still show all
+# 6 snapshots. Reason: at this module's own 5-minute bar resolution (see
+# the module docstring's own "Snapshot resolution" section), a +1m or +3m
+# target very often resolves to the SAME bar as the entry snapshot itself
+# - sometimes it's a real, later bar (an entry near the end of its own
+# 5-minute window), sometimes it's an exact duplicate of the entry row,
+# and there is no way to tell which case a given row is in without
+# checking its own minutes_elapsed by hand. Feeding that inconsistent mix
+# into a Random Forest/Mutual Information comparison risks (a) implying a
+# real measurement was taken 1/3 minutes after entry when it frequently
+# wasn't, and (b) padding the feature set with near-duplicates of the
+# entry columns, diluting the entry columns' own measured importance
+# rather than adding real signal. +5m/+10m/+15m don't have this problem -
+# a 5-minute bar has always fully closed by then.
+EXCLUDED_SNAPSHOT_PREFIXES = ("1m_", "3m_")
+
+# Same wording shown on the /telemetry page (next to the analysis tabs)
+# and written into the Analysis Excel export's own Summary sheet - one
+# string, so the explanation can never drift between the two surfaces.
+EXCLUDED_SNAPSHOT_NOTE = (
+    "1m and 3m telemetry snapshots are unavailable because the backtest data resolution "
+    "does not support these offsets. They are excluded from all statistical analysis."
+)
+
 
 def _round(value, digits=4):
     if value is None:
@@ -616,9 +643,16 @@ def flatten_trades(rows: list[dict]) -> pd.DataFrame:
 
 
 def feature_columns(df: pd.DataFrame, explicit: list[str] | None = None) -> list[str]:
-    if explicit:
-        return [c for c in explicit if c in df.columns]
-    return [c for c in df.columns if c not in NON_FEATURE_COLUMNS and pd.api.types.is_numeric_dtype(df[c])]
+    """Every column comparison_table/predictive_ranking/suggested_
+    candidate_filters/the heatmap metric picker treat as a usable
+    indicator feature - always excludes EXCLUDED_SNAPSHOT_PREFIXES (1m/3m,
+    see its own docstring) regardless of whether `explicit` was passed, so
+    no caller (present or future) has to remember to leave them out
+    itself."""
+    candidates = [c for c in explicit if c in df.columns] if explicit else [
+        c for c in df.columns if c not in NON_FEATURE_COLUMNS and pd.api.types.is_numeric_dtype(df[c])
+    ]
+    return [c for c in candidates if not c.startswith(EXCLUDED_SNAPSHOT_PREFIXES)]
 
 
 def apply_group(df: pd.DataFrame, group_key: str, cfg: dict | None = None) -> pd.Series:
@@ -814,6 +848,10 @@ def export_analysis_xlsx(payload: dict, scope_label: str, group_a_label: str, gr
     summary_ws.append(["Trade Telemetry - Analysis / Comparison Engine"])
     summary_ws["A1"].font = Font(bold=True, size=14)
     summary_ws.append([f"Scope: {scope_label} | Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}"])
+    summary_ws.append([])
+    summary_ws.append([EXCLUDED_SNAPSHOT_NOTE])
+    summary_ws[summary_ws.max_row][0].font = Font(italic=True)
+    summary_ws[summary_ws.max_row][0].alignment = Alignment(wrap_text=True)
     summary_ws.append([])
     summary_ws.append(["Metric", "Value"])
     for cell in summary_ws[summary_ws.max_row]:
