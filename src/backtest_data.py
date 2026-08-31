@@ -85,6 +85,26 @@ def cache_coverage(symbol: str, bar_size: str) -> dict | None:
     return {"from": bars.index.min(), "to": bars.index.max(), "bar_count": len(bars)}
 
 
+def cache_coverage_report(bar_size: str) -> list[dict]:
+    """Per-symbol coverage across every currently-cached symbol at this bar
+    size - the Backtest Data Report the dashboard shows (which symbols are
+    cached, what date range each one covers, how many bars), unlike
+    cache_coverage_summary's aggregate-only rollup. Sorted by symbol for a
+    stable, scannable table. Empty list if nothing is cached yet."""
+    report = []
+    for symbol in cached_symbols(bar_size):
+        coverage = cache_coverage(symbol, bar_size)
+        if coverage is None:
+            continue
+        report.append({
+            "symbol": symbol,
+            "from": coverage["from"].isoformat(),
+            "to": coverage["to"].isoformat(),
+            "bar_count": coverage["bar_count"],
+        })
+    return report
+
+
 def cache_coverage_summary(bar_size: str) -> dict | None:
     """Aggregate date-range coverage across every currently-cached symbol at
     this bar size, for the Backtest page's "Backtest Data" card - answers

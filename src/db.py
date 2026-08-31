@@ -2622,6 +2622,13 @@ def init_db(seed_rules_path: Path | None = None):
         # belonging to sweep N" back again once they've all finished.
         _migrate_add_column(conn, "backtests", "optimization_id", "INTEGER")
         _migrate_add_column(conn, "backtest_data_fetches", "mode", "TEXT NOT NULL DEFAULT 'paper'")
+        # NULL for every ordinary "top up from now" fetch (including every
+        # row that predates this feature) - only set for an explicit "Add
+        # Backtest Data" date-range fetch (see fetch_backtest_data.
+        # fetch_symbol_range/run_fetch_range), which run_backtest_data_
+        # fetch.py's own run() branches on to pick which of the two it runs.
+        _migrate_add_column(conn, "backtest_data_fetches", "start_date", "TEXT")
+        _migrate_add_column(conn, "backtest_data_fetches", "end_date", "TEXT")
         # The shipped default strategy predates risk_rating and got the
         # generic 'moderate' default from the ALTER TABLE above — it's
         # actually the conservative baseline every preset above is loosened
@@ -4238,12 +4245,20 @@ def cancel_optimization(optimization_id: int, account_id: int) -> bool:
 # isolated subprocess (run_backtest_data_fetch.py) that the always-on
 # dashboard process spawns and tracks rather than running fetch_backtest_
 # data.py's long, IBKR-connected fetch in-process.
-def create_backtest_data_fetch(account_id: int, mode: str = "paper") -> int:
+def create_backtest_data_fetch(
+    account_id: int, mode: str = "paper", start_date: str | None = None, end_date: str | None = None
+) -> int:
+    """start_date/end_date (ISO date strings) are only set for an explicit
+    "Add Backtest Data" date-range fetch (see this table's own start_date/
+    end_date column comment) - both None (the default) is the ordinary
+    "top up from now" fetch, unchanged from before this pair of params
+    existed."""
     now = datetime.now(ET).isoformat(timespec="seconds")
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO backtest_data_fetches (account_id, status, mode, created_at) VALUES (?, 'pending', ?, ?)",
-            (account_id, mode, now),
+            "INSERT INTO backtest_data_fetches (account_id, status, mode, start_date, end_date, created_at) "
+            "VALUES (?, 'pending', ?, ?, ?, ?)",
+            (account_id, mode, start_date, end_date, now),
         )
         return cur.lastrowid
 

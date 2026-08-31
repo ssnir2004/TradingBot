@@ -42,7 +42,7 @@ DEPLOY.md for the one-time initial backfill command.
 import argparse
 import sys
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -185,6 +185,33 @@ def _warm_up_connection(ib):
 DEPTH_SHORTFALL_SLACK_DAYS = 5  # weekends/holidays mean a full initial_duration is never hit exactly
 
 
+def fetch_symbol_range(ib, symbol: str, start_date: date, end_date: date) -> dict:
+    """Explicit [start_date, end_date] fetch, for the dashboard's "Add
+    Backtest Data" control - unlike fetch_symbol's own "duration back from
+    now" model, this covers a specific past window the user named directly
+    (e.g. deepening a symbol's history further back than DEFAULT_INITIAL_
+    DURATION ever reached, or backfilling a known gap). Always fetches the
+    WHOLE requested span in one _fetch_span call (paged the same CHUNK_DAYS
+    way as every other fetch here) and merges it in - merge_bars dedups
+    against whatever's already cached, so re-covering an already-cached
+    part of the range costs a little redundant IBKR bandwidth, not
+    correctness - rather than trying to compute just the missing sliver."""
+    contract = Stock(symbol, "SMART", "USD")
+    (qualified,) = ib.qualifyContracts(contract)
+    if qualified is None:
+        return {"symbol": symbol, "status": "no_security_definition", "new_bars": 0}
+    existing = load_cached_bars(symbol, BAR_SIZE)
+    total_days = (end_date - start_date).days + 1
+    end_before = datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=ET)
+    df = _fetch_span(ib, qualified, total_days, end_before=end_before)
+    if df.empty:
+        return {"symbol": symbol, "status": "no_data", "new_bars": 0}
+    merged = merge_bars(existing, df)
+    save_cached_bars(symbol, BAR_SIZE, merged)
+    new_count = len(merged) - (len(existing) if existing is not None else 0)
+    return {"symbol": symbol, "status": "ok", "new_bars": new_count, "total_bars": len(merged)}
+
+
 def fetch_symbol(ib, symbol: str, initial_duration: str) -> dict:
     contract = Stock(symbol, "SMART", "USD")
     (qualified,) = ib.qualifyContracts(contract)
@@ -239,16 +266,11 @@ def fetch_symbol(ib, symbol: str, initial_duration: str) -> dict:
     return {"symbol": symbol, "status": "ok", "new_bars": new_count, "total_bars": len(merged)}
 
 
-def run_fetch(
-    account_id: int, symbols: list[str], duration: str = DEFAULT_INITIAL_DURATION, mode: str = "paper"
-) -> dict:
-    """The actual fetch-everything routine, connecting to IBKR with its own
+def _connect_ibkr(account_id: int, mode: str) -> IBKRClient:
+    """Shared by run_fetch/run_fetch_range - connects to IBKR with its own
     dedicated client ID (never collides with the cycle's own connection or
-    trade.py's) and disconnecting when done — importable so
-    run_service.py's scheduler can call it directly on a weekly cadence,
-    same pattern as morning_prefilter.run_scan/build_custom_universe.build_universe.
-    `mode` defaults to "paper" (this is backtest/historical data, not real
-    trading) but can be set to "live" - this only ever calls
+    trade.py's). `mode` defaults to "paper" (this is backtest/historical
+    data, not real trading) but can be set to "live" - this only ever calls
     qualifyContracts/reqHistoricalData, never places an order, so pointing
     it at the live Gateway is safe; useful when paper's data farms are
     degraded (confirmed via live A/B testing: paper timed out while live
@@ -274,6 +296,15 @@ def run_fetch(
     # entitlements: confirmed by isolated testing that the exact same
     # request succeeds without it.
     ibkr.ib.RequestTimeout = REQUEST_TIMEOUT_SECONDS + 20
+    return ibkr
+
+
+def _run_fetch_loop(ibkr: IBKRClient, symbols: list[str], fetch_fn) -> dict:
+    """Shared by run_fetch/run_fetch_range - the actual per-symbol loop
+    (retry/backoff, live progress printing, disconnect-on-exit), the only
+    difference between the two callers being which per-symbol fetch_fn
+    (fetch_symbol bound to a duration, or fetch_symbol_range bound to a
+    date range) gets called each iteration."""
     _warm_up_connection(ibkr.ib)
     results = []
     try:
@@ -286,7 +317,7 @@ def run_fetch(
             print(f"[{i}/{len(symbols)}] {symbol} ...", end=" ", flush=True)
             for attempt in range(RETRY_ATTEMPTS):
                 try:
-                    result = fetch_symbol(ibkr.ib, symbol, duration)
+                    result = fetch_fn(ibkr.ib, symbol)
                 except Exception as exc:  # noqa: BLE001 - one bad symbol must not kill the run
                     result = {"symbol": symbol, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
                 if result["status"] not in ("error", "no_data", "no_security_definition") or attempt == RETRY_ATTEMPTS - 1:
@@ -305,10 +336,41 @@ def run_fetch(
     ok = sum(1 for r in results if r["status"] == "ok")
     up_to_date = sum(1 for r in results if r["status"] == "up_to_date")
     errors = [r for r in results if r["status"] in ("error", "no_security_definition")]
-    summary = {"total": len(results), "ok": ok, "up_to_date": up_to_date, "errors": len(errors), "results": results}
+    return {"total": len(results), "ok": ok, "up_to_date": up_to_date, "errors": len(errors), "results": results}
+
+
+def run_fetch(
+    account_id: int, symbols: list[str], duration: str = DEFAULT_INITIAL_DURATION, mode: str = "paper"
+) -> dict:
+    """The actual fetch-everything routine — importable so run_service.py's
+    scheduler can call it directly on a weekly cadence, same pattern as
+    morning_prefilter.run_scan/build_custom_universe.build_universe."""
+    ibkr = _connect_ibkr(account_id, mode)
+    summary = _run_fetch_loop(ibkr, symbols, lambda ib, symbol: fetch_symbol(ib, symbol, duration))
     notify(
         "Backtest data fetch",
-        f"{ok} updated, {up_to_date} already current, {len(errors)} errors, {len(results)} total",
+        f"{summary['ok']} updated, {summary['up_to_date']} already current, "
+        f"{summary['errors']} errors, {summary['total']} total",
+        "default",
+    )
+    return summary
+
+
+def run_fetch_range(
+    account_id: int, symbols: list[str], start_date: date, end_date: date, mode: str = "paper"
+) -> dict:
+    """The "Add Backtest Data" routine (dashboard's Backtest Data card) -
+    same connect/loop/disconnect shape as run_fetch, but every symbol is
+    fetched for the SAME explicit [start_date, end_date] window (see
+    fetch_symbol_range) instead of "duration back from now". Importable so
+    run_backtest_data_fetch.py's own run() can call it directly when a
+    backtest_data_fetches row carries a start_date/end_date."""
+    ibkr = _connect_ibkr(account_id, mode)
+    summary = _run_fetch_loop(ibkr, symbols, lambda ib, symbol: fetch_symbol_range(ib, symbol, start_date, end_date))
+    notify(
+        "Backtest data fetch (date range)",
+        f"{start_date} → {end_date}: {summary['ok']} updated, {summary['up_to_date']} already current, "
+        f"{summary['errors']} errors, {summary['total']} total",
         "default",
     )
     return summary
@@ -335,6 +397,11 @@ def main():
                          help="Which IBKR Gateway to connect through for this read-only historical-data "
                               "fetch (never places an order either way) - 'live' if paper's data farms "
                               "are degraded and live's aren't.")
+    parser.add_argument("--start-date", type=str, default=None,
+                         help="ISO date (YYYY-MM-DD) - with --end-date, fetches this explicit "
+                              "[start_date, end_date] window instead of --duration back from now "
+                              "(see fetch_symbol_range/run_fetch_range).")
+    parser.add_argument("--end-date", type=str, default=None, help="ISO date (YYYY-MM-DD), paired with --start-date")
     args = parser.parse_args()
     account_id = args.account_id if args.account_id is not None else db.get_default_account_id()
     if args.symbols_file:
@@ -345,7 +412,12 @@ def main():
     if args.limit:
         symbols = symbols[: args.limit]
 
-    summary = run_fetch(account_id, symbols, args.duration, args.mode)
+    if args.start_date and args.end_date:
+        summary = run_fetch_range(
+            account_id, symbols, date.fromisoformat(args.start_date), date.fromisoformat(args.end_date), args.mode
+        )
+    else:
+        summary = run_fetch(account_id, symbols, args.duration, args.mode)
     print({k: v for k, v in summary.items() if k != "results"})
     if summary["errors"]:
         print("errors (first 10):", [r for r in summary["results"] if r["status"] == "error"][:10])

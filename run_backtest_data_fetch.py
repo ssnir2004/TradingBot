@@ -13,6 +13,7 @@ gets its recent gap topped up), so this is cheap to re-run on demand between
 scheduled runs, not a second full backfill.
 """
 import argparse
+from datetime import date
 from pathlib import Path
 
 import fetch_backtest_data
@@ -29,9 +30,19 @@ def run(fetch_id: int, mode: str = "paper"):
         return
     db.start_backtest_data_fetch(fetch_id)
     try:
-        summary = fetch_backtest_data.run_fetch(
-            record["account_id"], list(SP500_TICKERS), fetch_backtest_data.DEFAULT_INITIAL_DURATION, mode,
-        )
+        # start_date/end_date only set for an explicit "Add Backtest Data"
+        # date-range request (see db.create_backtest_data_fetch's own
+        # docstring) - the ordinary "Update backtest data" button never
+        # sets them, so this stays the same top-up run it always was.
+        if record["start_date"] and record["end_date"]:
+            summary = fetch_backtest_data.run_fetch_range(
+                record["account_id"], list(SP500_TICKERS),
+                date.fromisoformat(record["start_date"]), date.fromisoformat(record["end_date"]), mode,
+            )
+        else:
+            summary = fetch_backtest_data.run_fetch(
+                record["account_id"], list(SP500_TICKERS), fetch_backtest_data.DEFAULT_INITIAL_DURATION, mode,
+            )
         db.finish_backtest_data_fetch(fetch_id, summary)
         print(
             f"backtest data fetch {fetch_id}: done "

@@ -1726,12 +1726,37 @@ def api_backtest_data_fetch_coverage(user: str = Depends(require_user)):
     }
 
 
+# Per-symbol breakdown of the same cache api_backtest_data_fetch_coverage
+# summarizes - the "Backtest Data Report" (which symbols are cached, what
+# date range each covers, how many bars) - meant for the report modal's own
+# on-open fetch, same "not a tight poll" cost reasoning as coverage above.
+@app.get("/api/backtest_data_fetch/report")
+def api_backtest_data_fetch_report(user: str = Depends(require_user)):
+    return {"report": backtest_data.cache_coverage_report(backtest_engine.BAR_SIZE)}
+
+
 @app.post("/api/backtest_data_fetch")
 async def api_create_backtest_data_fetch(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     body = await request.json() if await request.body() else {}
     mode = body.get("mode", "paper")
     if mode not in ("paper", "live"):
         raise HTTPException(status_code=400, detail="mode must be 'paper' or 'live'.")
+    # start_date/end_date (both or neither) request the "Add Backtest Data"
+    # explicit date-range fetch instead of the default "top up from now"
+    # one - see fetch_backtest_data.run_fetch_range/db.create_backtest_data_
+    # fetch's own docstrings.
+    start_date_raw, end_date_raw = body.get("start_date"), body.get("end_date")
+    if bool(start_date_raw) != bool(end_date_raw):
+        raise HTTPException(status_code=400, detail="start_date and end_date must be given together.")
+    if start_date_raw:
+        try:
+            start_date, end_date = date.fromisoformat(start_date_raw), date.fromisoformat(end_date_raw)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="start_date/end_date must be ISO dates (YYYY-MM-DD).")
+        if start_date > end_date:
+            raise HTTPException(status_code=400, detail="start_date must not be after end_date.")
+        if end_date > date.today():
+            raise HTTPException(status_code=400, detail="end_date can't be in the future.")
     gw = gateway_control.status(mode, _env())
     if not (gw["gateway_active"] and gw["port_listening"]):
         raise HTTPException(
@@ -1741,10 +1766,14 @@ async def api_create_backtest_data_fetch(request: Request, account_id: int = Dep
     latest = db.get_latest_backtest_data_fetch(account_id)
     if latest and latest["status"] in ("pending", "running"):
         raise HTTPException(status_code=409, detail=f"An update (#{latest['id']}) is already running.")
-    fetch_id = db.create_backtest_data_fetch(account_id, mode)
-    proc = subprocess.Popen([sys.executable, str(PROJECT_DIR / "run_backtest_data_fetch.py"), "--fetch-id", str(fetch_id), "--mode", mode])
+    fetch_id = db.create_backtest_data_fetch(account_id, mode, start_date_raw, end_date_raw)
+    cmd = [sys.executable, str(PROJECT_DIR / "run_backtest_data_fetch.py"), "--fetch-id", str(fetch_id), "--mode", mode]
+    proc = subprocess.Popen(cmd)
     db.set_backtest_data_fetch_pid(fetch_id, proc.pid)
-    _log_account_action(account_id, user, action="backtest_data_fetch_start", fetch_id=fetch_id, fetch_mode=mode)
+    _log_account_action(
+        account_id, user, action="backtest_data_fetch_start", fetch_id=fetch_id, fetch_mode=mode,
+        start_date=start_date_raw, end_date=end_date_raw,
+    )
     return {"id": fetch_id}
 
 

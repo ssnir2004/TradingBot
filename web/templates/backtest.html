@@ -99,8 +99,38 @@
       </select>
       <button id="btn-cancel-backtest-data" class="btn btn-outline-warning btn-sm ms-2 d-none">Cancel</button>
       <button type="button" class="info-icon" style="border:none;" data-bs-toggle="modal" data-bs-target="#backtest-data-help-modal" aria-label="הסבר">i</button>
+      <button type="button" id="btn-backtest-data-report" class="btn btn-outline-secondary btn-sm ms-2" data-bs-toggle="modal" data-bs-target="#backtest-data-report-modal">Data Report</button>
       <span id="backtest-data-fetch-status" class="small ms-2"></span>
       <div id="backtest-data-coverage" class="small text-muted mt-2"></div>
+
+      <hr>
+      <div class="small fw-bold mb-1">Add backtest data for a date range</div>
+      <div class="small text-muted mb-2">
+        Extends the cache to cover a specific past window you name directly — e.g. deepen a symbol's
+        history further back than the default update ever reached, or backfill a known gap. Fetches
+        the whole requested range for every S&amp;P 500 symbol and merges it into what's already
+        cached (safe to overlap — duplicate bars are deduplicated, not re-added).
+      </div>
+      <input type="text" id="bdf-date-range" class="form-control form-control-sm d-inline-block" style="width:220px" placeholder="Pick date range" readonly>
+      <button id="btn-add-backtest-data-range" class="btn btn-outline-primary btn-sm ms-2">Fetch range</button>
+    </div>
+  </div>
+
+  <div class="modal fade" id="backtest-data-report-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Backtest Data Report</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <input type="text" id="backtest-data-report-search" class="form-control form-control-sm mb-2" placeholder="Filter by symbol…">
+          <table class="table table-sm table-hover mb-0">
+            <thead><tr><th>Symbol</th><th>From</th><th>To</th><th>Bars</th></tr></thead>
+            <tbody id="backtest-data-report-body"><tr><td colspan="4" class="text-center text-muted">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -445,6 +475,12 @@ async function refreshBacktestDataFetchStatus() {
   }
   const { gateway, latest } = payload;
   const running = latest && (latest.status === "pending" || latest.status === "running");
+  // latest.start_date/end_date are only set for an "Add Backtest Data"
+  // date-range fetch (see db.create_backtest_data_fetch's own docstring) -
+  // absent for the ordinary top-up fetch, same as before this note existed.
+  const rangeNote = latest && latest.start_date
+    ? ` for ${fmtDateOnly(latest.start_date)} → ${fmtDateOnly(latest.end_date)}`
+    : "";
 
   if (running) {
     btn.disabled = true;
@@ -452,7 +488,7 @@ async function refreshBacktestDataFetchStatus() {
     bdfRunningFetchId = latest.id;
     cancelBtn.classList.remove("d-none");
     cancelBtn.disabled = false;
-    statusEl.innerHTML = `<span class="text-muted">Updating via ${latest.mode || "paper"} Gateway… this can take a while for a large gap or the full S&amp;P 500 - feel free to leave this page.</span>`;
+    statusEl.innerHTML = `<span class="text-muted">Updating via ${latest.mode || "paper"} Gateway${rangeNote}… this can take a while for a large gap or the full S&amp;P 500 - feel free to leave this page.</span>`;
     if (!bdfPollHandle) bdfPollHandle = setInterval(refreshBacktestDataFetchStatus, 5000);
     return;
   }
@@ -470,13 +506,13 @@ async function refreshBacktestDataFetchStatus() {
   if (!latest) { statusEl.innerHTML = ""; return; }
   if (latest.status === "done") {
     const s = latest.summary;
-    const modeNote = ` <span class="text-muted">(via ${latest.mode || "paper"})</span>`;
+    const modeNote = ` <span class="text-muted">(via ${latest.mode || "paper"}${rangeNote})</span>`;
     statusEl.innerHTML = s
       ? `<span class="text-success">Last update ${fmtDateTimeET(latest.finished_at)}: ${s.ok} updated, ${s.up_to_date} already current` +
         (s.errors ? `, <span class="text-danger">${s.errors} error(s)</span>` : "") + `.</span>${modeNote}`
       : `<span class="text-success">Last update done ${fmtDateTimeET(latest.finished_at)}.</span>${modeNote}`;
   } else if (latest.status === "failed") {
-    statusEl.innerHTML = `<span class="text-danger">Last update failed (via ${latest.mode || "paper"}): ${latest.error || "unknown error"}</span>`;
+    statusEl.innerHTML = `<span class="text-danger">Last update failed (via ${latest.mode || "paper"}${rangeNote}): ${latest.error || "unknown error"}</span>`;
   } else {
     statusEl.innerHTML = "";
   }
@@ -541,6 +577,58 @@ document.getElementById("btn-cancel-backtest-data")?.addEventListener("click", a
   }
   refreshBacktestDataFetchStatus();
 });
+
+let bdfRangePicker = null;
+let bdfReportRows = [];  // last-loaded /api/backtest_data_fetch/report rows, filtered client-side on search input
+
+document.getElementById("btn-add-backtest-data-range")?.addEventListener("click", async () => {
+  const btn = document.getElementById("btn-add-backtest-data-range");
+  const modeSel = document.getElementById("bdf-mode");
+  const statusEl = document.getElementById("backtest-data-fetch-status");
+  const dates = bdfRangePicker?.selectedDates || [];
+  if (dates.length !== 2) {
+    statusEl.innerHTML = `<span class="text-danger">Pick a start and end date first.</span>`;
+    return;
+  }
+  btn.disabled = true;
+  try {
+    await api("/api/backtest_data_fetch", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: modeSel.value, start_date: toISODate(dates[0]), end_date: toISODate(dates[1]) }),
+    });
+  } catch (e) {
+    statusEl.innerHTML = `<span class="text-danger">Could not start fetch: ${e.message}</span>`;
+    btn.disabled = false;
+    return;
+  }
+  refreshBacktestDataFetchStatus();
+});
+
+function renderBacktestDataReport() {
+  const body = document.getElementById("backtest-data-report-body");
+  if (!body) return;
+  const q = (document.getElementById("backtest-data-report-search")?.value || "").trim().toUpperCase();
+  const rows = q ? bdfReportRows.filter(r => r.symbol.includes(q)) : bdfReportRows;
+  body.innerHTML = rows.length
+    ? rows.map(r => `<tr><td>${r.symbol}</td><td>${fmtDateOnly(r.from.slice(0, 10))}</td><td>${fmtDateOnly(r.to.slice(0, 10))}</td><td>${r.bar_count.toLocaleString()}</td></tr>`).join("")
+    : `<tr><td colspan="4" class="text-center text-muted">${bdfReportRows.length ? "No matching symbols." : "No cached backtest data yet."}</td></tr>`;
+}
+
+async function refreshBacktestDataReport() {
+  const body = document.getElementById("backtest-data-report-body");
+  if (!body) return;
+  body.innerHTML = `<tr><td colspan="4" class="text-center text-muted">Loading…</td></tr>`;
+  try {
+    bdfReportRows = (await api("/api/backtest_data_fetch/report")).report || [];
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="4" class="text-danger">Could not load report: ${e.message}</td></tr>`;
+    return;
+  }
+  renderBacktestDataReport();
+}
+
+document.getElementById("backtest-data-report-modal")?.addEventListener("show.bs.modal", refreshBacktestDataReport);
+document.getElementById("backtest-data-report-search")?.addEventListener("input", renderBacktestDataReport);
 
 // A single flatpickr range picker (click-to-select on a calendar) rather
 // than two typed fields - explicit d/m/Y display format (not <input
@@ -2098,6 +2186,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       // lands on one) - weekdaysInRange below is what actually strips
       // them back out when the range gets expanded into one backtest per
       // trading day, so nothing is ever run for a weekend either way.
+    });
+  }
+  if (document.getElementById("bdf-date-range")) {  // viewer - the Backtest Data card isn't rendered at all
+    bdfRangePicker = flatpickr("#bdf-date-range", {
+      mode: "range", dateFormat: "d/m/Y", allowInput: false, maxDate: "today",
     });
   }
   document.getElementById("bt-history-search")?.addEventListener("input", (e) => {
