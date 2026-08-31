@@ -261,7 +261,9 @@ async function pollTelemetryRun(id) {
     cancelBtn.classList.toggle("d-none", !running);
     if (record.status === "done") {
       const s = record.summary || {};
-      statusEl.innerHTML = `<span class="text-success">Run #${id} done: ${s.trades_processed} trade(s) processed, ${s.trades_skipped} skipped.</span>`;
+      const reasons = Object.entries(s.skipped_reasons || {}).map(([k, v]) => `${k}: ${v}`).join(", ");
+      const errNote = (s.sample_errors && s.sample_errors.length) ? `<div class="text-muted mono" style="font-size:.8em">${s.sample_errors.join("<br>")}</div>` : "";
+      statusEl.innerHTML = `<span class="text-success">Run #${id} done: ${s.trades_processed} trade(s) processed${s.trades_skipped ? `, ${s.trades_skipped} skipped (${reasons})` : ""}.</span>${errNote}`;
     } else if (record.status === "failed") {
       statusEl.innerHTML = `<span class="text-danger">Run #${id} failed: ${record.error || "unknown error"}</span>`;
     } else {

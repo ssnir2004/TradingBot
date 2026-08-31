@@ -113,12 +113,48 @@ def _bool_or_none(value) -> bool | None:
     return bool(value)
 
 
+def _normalize_bars(bars: pd.DataFrame) -> pd.DataFrame:
+    """Defensive read-time normalization for a cached bars file this
+    module doesn't itself own - dedupes by timestamp (keep last, same
+    convention src.backtest_data.save_cached_bars already applies on
+    WRITE, but an older cache file can predate that logic, or a bug
+    elsewhere could still write one) and coerces OHLCV to numeric
+    (coercing an unparseable value to NaN rather than leaving a column
+    object-dtype). Both a duplicate-timestamp index and an object-dtype
+    OHLCV column make pandas' own EWM/rolling series calls (RSI/EMA/MACD/
+    ADX/ATR/OBV) raise a hard-to-diagnose "DataError: No numeric types to
+    aggregate" - confirmed by direct testing, not a guess. Every other
+    reader of this same cache (backtest_engine.py) only ever replays
+    narrow, single-day-sliced windows and is far less likely to ever
+    surface either issue than this module, which is the first to compute
+    indicator series across a symbol's ENTIRE cached history in one call."""
+    bars = bars[~bars.index.duplicated(keep="last")].sort_index()
+    for col in ("Open", "High", "Low", "Close", "Volume"):
+        bars[col] = pd.to_numeric(bars[col], errors="coerce")
+    return bars
+
+
 def _session_vwap(bars: pd.DataFrame) -> pd.Series:
     """Session VWAP over `bars`' full multi-day span, reset every trading
     day - reuses orb._compute_vwap_series (session-scoped) per calendar
     day and concatenates, the same convention backtest_engine.py's own
     per-day VWAP use already establishes."""
     return pd.concat([orb._compute_vwap_series(day_bars) for _, day_bars in bars.groupby(bars.index.date)])
+
+
+def _coerce_numeric_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Final defensive pass over an assembled indicator frame - coerces
+    every column to numeric (pd.to_numeric, errors="coerce"), converting
+    any lingering pd.NA/object-dtype column back to clean float64 NaN.
+    Needed because orb._compute_vwap_series (reused here, not owned by
+    this module) divides by cum_vol.replace(0, pd.NA) - which itself
+    degrades that column to object dtype in current pandas (same
+    DataError: No numeric types to aggregate technicals.py's own
+    replace(0, np.nan) fix was for) - a plain float64 column is a no-op
+    here, so this is always safe to apply."""
+    for col in frame.columns:
+        frame[col] = pd.to_numeric(frame[col], errors="coerce")
+    return frame
 
 
 def _indicator_frame(bars: pd.DataFrame) -> pd.DataFrame:
@@ -142,7 +178,7 @@ def _indicator_frame(bars: pd.DataFrame) -> pd.DataFrame:
     frame["atr"] = technicals.atr_series(highs, lows, closes)
     frame["obv"] = technicals.obv_series(closes, volumes)
     frame["vwap"] = _session_vwap(bars)
-    return frame
+    return _coerce_numeric_frame(frame)
 
 
 def _market_context_frame(bars: pd.DataFrame, include_adx: bool) -> pd.DataFrame:
@@ -157,7 +193,7 @@ def _market_context_frame(bars: pd.DataFrame, include_adx: bool) -> pd.DataFrame
     frame["vwap"] = _session_vwap(bars)
     if include_adx:
         frame["adx"] = technicals.adx_series(bars["High"], bars["Low"], closes)["adx"]
-    return frame
+    return _coerce_numeric_frame(frame)
 
 
 def _snapshot_bar(frame: pd.DataFrame, entry_ts, offset_minutes: int):
@@ -444,17 +480,20 @@ def generate_telemetry_for_backtest(account_id: int, backtest_id: int) -> dict:
     market_frame_cache: dict[str, pd.DataFrame | None] = {}
     for key, mkt_symbol in MARKET_CONTEXT_SYMBOLS.items():
         mkt_bars = backtest_data.load_cached_bars(mkt_symbol, backtest_engine.BAR_SIZE)
-        market_frame_cache[key] = _market_context_frame(mkt_bars, include_adx=(key == "es")) if mkt_bars is not None else None
+        try:
+            market_frame_cache[key] = _market_context_frame(_normalize_bars(mkt_bars), include_adx=(key == "es")) if mkt_bars is not None else None
+        except Exception:  # noqa: BLE001 - a bad ES/SPY/QQQ cache must not block generation for every trade
+            market_frame_cache[key] = None
 
     trades_processed = 0
     skipped_reasons: dict[str, int] = {}
+    sample_errors: list[str] = []  # first few "reason: ExceptionType: message" strings, for diagnosing WHY without reproducing
     rows_to_insert = []
 
     for strategy_id, result in (backtest["results"] or {}).items():
         if not isinstance(result, dict) or "pairs" not in result:
             continue
         strategy = db.get_strategy(int(strategy_id))
-        is_orb = bool(strategy and "opening_range" in json.loads(strategy["rules_json"]))
         strategy_name = result.get("strategy_name") or (strategy["name"] if strategy else f"Strategy {strategy_id}")
 
         for pair in result["pairs"]:
@@ -466,18 +505,24 @@ def generate_telemetry_for_backtest(account_id: int, backtest_id: int) -> dict:
             risk = perf.initial_risk_per_share(pair)
 
             if symbol not in symbol_cache:
-                bars = backtest_data.load_cached_bars(symbol, backtest_engine.BAR_SIZE)
-                if bars is None or bars.empty:
-                    symbol_cache[symbol] = None
-                else:
-                    symbol_cache[symbol] = {
+                try:
+                    bars = backtest_data.load_cached_bars(symbol, backtest_engine.BAR_SIZE)
+                    if bars is not None and not bars.empty:
+                        bars = _normalize_bars(bars)
+                    symbol_cache[symbol] = None if bars is None or bars.empty else {
                         "frame": _indicator_frame(bars),
-                        "raw": bars,
                         "prior_day_bars": dict(tuple(bars.groupby(bars.index.date))),
                     }
+                except Exception as exc:  # noqa: BLE001 - one symbol's own bad/pathological cache must not fail the whole run
+                    symbol_cache[symbol] = "error"
+                    if len(sample_errors) < 5:
+                        sample_errors.append(f"{symbol}: {type(exc).__name__}: {exc}")
             cached = symbol_cache[symbol]
             if cached is None:
                 skipped_reasons["no_cached_bars"] = skipped_reasons.get("no_cached_bars", 0) + 1
+                continue
+            if cached == "error":
+                skipped_reasons["symbol_processing_error"] = skipped_reasons.get("symbol_processing_error", 0) + 1
                 continue
 
             entry_ts = pd.Timestamp(entry_iso)
@@ -494,10 +539,21 @@ def generate_telemetry_for_backtest(account_id: int, backtest_id: int) -> dict:
                 skipped_reasons["no_bars_for_entry_day"] = skipped_reasons.get("no_bars_for_entry_day", 0) + 1
                 continue
 
-            snapshots = build_trade_telemetry(
-                cached["frame"], today_bars, market_frame_cache, cached["prior_day_bars"],
-                entry_ts, entry_price, side, risk, pair.get("model"),
-            )
+            # A single trade hitting a pandas edge case (e.g. a symbol's
+            # cache carrying a pathological bar shape) must not crash an
+            # entire multi-hundred-trade run - same per-item isolation
+            # reasoning as fetch_backtest_data.run_fetch's own per-symbol
+            # try/except and run_optimization's per-chunk isolation.
+            try:
+                snapshots = build_trade_telemetry(
+                    cached["frame"], today_bars, market_frame_cache, cached["prior_day_bars"],
+                    entry_ts, entry_price, side, risk, pair.get("model"),
+                )
+            except Exception as exc:  # noqa: BLE001 - see comment above
+                skipped_reasons["trade_processing_error"] = skipped_reasons.get("trade_processing_error", 0) + 1
+                if len(sample_errors) < 5:
+                    sample_errors.append(f"{symbol} @ {entry_iso}: {type(exc).__name__}: {exc}")
+                continue
             rows_to_insert.append({
                 "account_id": account_id, "backtest_id": backtest_id,
                 "strategy_id": int(strategy_id), "strategy_name": strategy_name,
@@ -514,6 +570,7 @@ def generate_telemetry_for_backtest(account_id: int, backtest_id: int) -> dict:
         "trades_processed": trades_processed,
         "trades_skipped": sum(skipped_reasons.values()),
         "skipped_reasons": skipped_reasons,
+        "sample_errors": sample_errors,
     }
 
 

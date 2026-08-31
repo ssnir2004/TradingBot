@@ -11,6 +11,7 @@ plain, well-known formulas (Wilder's ADX/ATR, standard MACD/Stochastic/OBV) -
 "use standard industry indicators only" per the Trade Telemetry Dashboard spec,
 not a bespoke variant tuned for any one strategy.
 """
+import numpy as np
 import pandas as pd
 
 
@@ -34,7 +35,12 @@ def stochastic_series(high: pd.Series, low: pd.Series, close: pd.Series, k_perio
     convention every other series function in this codebase already uses."""
     lowest_low = low.rolling(k_period, min_periods=k_period).min()
     highest_high = high.rolling(k_period, min_periods=k_period).max()
-    denom = (highest_high - lowest_low).replace(0, pd.NA)
+    # np.nan, not pd.NA - replacing with pd.NA silently degrades a
+    # float64 Series to object dtype in current pandas (confirmed by
+    # direct testing), which then makes a later .ewm()/.rolling() call
+    # elsewhere in this codebase raise "DataError: No numeric types to
+    # aggregate" - np.nan keeps the dtype float64 throughout.
+    denom = (highest_high - lowest_low).replace(0, np.nan)
     percent_k = 100 * (close - lowest_low) / denom
     percent_d = percent_k.rolling(d_period, min_periods=d_period).mean()
     return pd.DataFrame({"percent_k": percent_k, "percent_d": percent_d})
@@ -66,9 +72,10 @@ def adx_series(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 
     prev_close = close.shift(1)
     true_range = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
     smoothed_tr = true_range.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    plus_di = 100 * plus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / smoothed_tr.replace(0, pd.NA)
-    minus_di = 100 * minus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / smoothed_tr.replace(0, pd.NA)
-    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, pd.NA)
+    # np.nan, not pd.NA - see stochastic_series's own comment on why.
+    plus_di = 100 * plus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / smoothed_tr.replace(0, np.nan)
+    minus_di = 100 * minus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / smoothed_tr.replace(0, np.nan)
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
     adx = dx.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
     return pd.DataFrame({"adx": adx, "plus_di": plus_di, "minus_di": minus_di})
 
