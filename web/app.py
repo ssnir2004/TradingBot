@@ -1321,6 +1321,80 @@ def api_strategy_compare(strategy_id_a: int, strategy_id_b: int, account_id: int
     return {"a": a, "b": b}
 
 
+_V42_STRATEGY_PATTERN = r"v4\.2"
+_V10_STRATEGY_PATTERN = r"\bv10\b"
+
+
+def _find_strategy_id_by_name(account_id: int, pattern: str) -> int | None:
+    """First strategy id (db.list_strategies' own direction, id order)
+    whose name matches `pattern`, case-insensitive - same whole-word
+    convention audit_v10_recovery.py's own _find_strategy_id_in_results /
+    backtest.html's own _findStrategyIdByPattern already use, just
+    resolved against every strategy this account can see rather than one
+    backtest's own results dict."""
+    needle = re.compile(pattern, re.IGNORECASE)
+    for s in db.list_strategies(account_id):
+        if needle.search(s["name"] or ""):
+            return s["id"]
+    return None
+
+
+def _pooled_v10_recovery_context(account_id: int):
+    """Account-wide equivalent of _risk_reduction_context for the Strategy
+    Report card's own "Dynamic Recovery Report" button - pools ORB Long
+    v4.2's and ORB Long V10's own trade pairs EACH independently across
+    every 'done' backtest this account has ever run (perf.pooled_trades_
+    for_strategy's own exact-(strategy_id, start_date, end_date) dedup,
+    the same mechanism the rest of the Strategy Report card already relies
+    on), rather than requiring both strategies to have been run together
+    in the same single backtest the way the per-backtest card above does.
+    Raises 404 if either strategy doesn't exist or has no 'done' backtest
+    yet."""
+    v42_id = _find_strategy_id_by_name(account_id, _V42_STRATEGY_PATTERN)
+    v10_id = _find_strategy_id_by_name(account_id, _V10_STRATEGY_PATTERN)
+    if v42_id is None or v10_id is None:
+        raise HTTPException(status_code=404, detail="ORB Long v4.2 and/or ORB Long V10 strategy not found")
+    done = db.list_done_backtest_results(account_id)
+    v42_pooled = perf.pooled_trades_for_strategy(done, v42_id)
+    v10_pooled = perf.pooled_trades_for_strategy(done, v10_id)
+    if not v42_pooled or not v10_pooled:
+        raise HTTPException(status_code=404, detail="No completed backtests yet for ORB Long v4.2 and/or ORB Long V10")
+    return v42_id, v10_id, v42_pooled, v10_pooled
+
+
+# Registered ahead of /api/strategies/{strategy_id} below for the same
+# registration-order reason as trades_pdf_all.zip/compare above it.
+@app.get("/api/strategies/dynamic_recovery_report")
+def api_pooled_v10_recovery_report(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    """The Strategy Report card's own "Dynamic Recovery Report" button -
+    unlike GET /api/backtests/{backtest_id}/v10_recovery_report (one
+    single already-finished multi-strategy backtest), this pools v4.2's
+    and V10's own results EACH across every 'done' backtest this account
+    has ever run for that strategy - see _pooled_v10_recovery_context."""
+    v42_id, v10_id, v42_pooled, v10_pooled = _pooled_v10_recovery_context(account_id)
+    return v10_recovery_report.build_v10_recovery_report_from_pairs(
+        v42_pooled["pairs"], v10_pooled["pairs"], v42_pooled["strategy_name"], v10_pooled["strategy_name"],
+        str(v42_id), str(v10_id),
+    )
+
+
+@app.get("/api/strategies/dynamic_recovery_report_export.xlsx")
+def api_pooled_v10_recovery_report_export(account_id: int = Depends(require_account), user: str = Depends(require_user)):
+    v42_id, v10_id, v42_pooled, v10_pooled = _pooled_v10_recovery_context(account_id)
+    report = v10_recovery_report.build_v10_recovery_report_from_pairs(
+        v42_pooled["pairs"], v10_pooled["pairs"], v42_pooled["strategy_name"], v10_pooled["strategy_name"],
+        str(v42_id), str(v10_id),
+    )
+    scope_label = (f"{v10_pooled['strategy_name']} vs {v42_pooled['strategy_name']} | pooled across "
+                   f"{v42_pooled['backtests_included']} + {v10_pooled['backtests_included']} backtest(s)")
+    xlsx_bytes = v10_recovery_report.export_v10_recovery_report_xlsx(report, scope_label)
+    _log_account_action(account_id, user, action="pooled_v10_recovery_report_export", v42_strategy_id=v42_id, v10_strategy_id=v10_id)
+    return Response(
+        content=xlsx_bytes, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="orb_v10_recovery_report_pooled.xlsx"'},
+    )
+
+
 @app.get("/api/strategies/{strategy_id}")
 def api_get_strategy(strategy_id: int, user: str = Depends(require_user)):
     strategy = db.get_strategy(strategy_id)

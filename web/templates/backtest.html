@@ -1309,6 +1309,47 @@ async function toggleStrategyDiagnostics(strategyId, btn) {
 
 let lastStrategyReportRows = [];
 
+// ORB Long V10's own "Dynamic Recovery" report (see src/v10_recovery_
+// report.py), pooled across EVERY completed backtest this account has
+// ever run for ORB Long v4.2 and V10 EACH INDEPENDENTLY (see GET /api/
+// strategies/dynamic_recovery_report) - unlike renderV10RecoverySection
+// below (one single backtest that ran both strategies together), this
+// works even when v4.2's own history and V10's own history come from
+// separate backtest runs, which is why it lives in the Strategy Report
+// card (pooled per strategy across ALL backtests) rather than the
+// per-backtest results view. Same name-matched gating convention as
+// renderV10RecoverySection, just sourced from the Strategy Report's own
+// pooled rows instead of one backtest's own results dict.
+function renderPooledV10RecoverySection(rows) {
+  const hasV42 = rows.some(r => /v4\.2/i.test(r.strategy_name || ""));
+  const hasV10 = rows.some(r => /\bv10\b/i.test(r.strategy_name || ""));
+  if (!hasV42 || !hasV10) return "";
+  return `
+    <div class="mt-2">
+      <div class="card">
+        <div class="card-header">Dynamic Recovery Report (V10 vs v4.2) <span class="text-muted small">— pooled across every completed backtest</span></div>
+        <div class="card-body">
+          <button type="button" class="btn btn-outline-primary btn-sm" onclick='loadPooledV10RecoveryReport("pooled-v10-recovery")'>Load Report</button>
+          <a class="btn btn-outline-secondary btn-sm ms-2" href="/api/strategies/dynamic_recovery_report_export.xlsx">Export Excel (12 sheets)</a>
+          <div id="pooled-v10-recovery" class="mt-3"></div>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function loadPooledV10RecoveryReport(containerId) {
+  const el = document.getElementById(containerId);
+  el.innerHTML = '<div class="text-muted small">Loading…</div>';
+  let report;
+  try {
+    report = await api("/api/strategies/dynamic_recovery_report");
+  } catch (e) {
+    el.innerHTML = `<div class="text-danger small">${e.message}</div>`;
+    return;
+  }
+  el.innerHTML = renderV10RecoveryReportHtml(report);
+}
+
 // Shares the Calendar's own checkbox filter (calHiddenStrategyIds) - the
 // same "which strategies am I looking at" selection drives both views, so
 // checking off a strategy in the Calendar legend hides it here too rather
@@ -1319,7 +1360,7 @@ function renderStrategyReport() {
   const rows = lastStrategyReportRows.filter(r => !calHiddenStrategyIds.has(String(r.strategy_id)));
   if (!lastStrategyReportRows.length) { body.innerHTML = '<p class="small text-muted mb-0">No completed backtests yet.</p>'; return; }
   if (!rows.length) { body.innerHTML = '<p class="small text-muted mb-0">Every strategy is hidden — check at least one in the Calendar above.</p>'; return; }
-  body.innerHTML = `<div class="row">${rows.map(renderStrategyReportEntry).join("")}</div>`;
+  body.innerHTML = `<div class="row">${rows.map(renderStrategyReportEntry).join("")}</div>${renderPooledV10RecoverySection(rows)}`;
 }
 
 async function refreshStrategyReport() {
