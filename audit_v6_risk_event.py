@@ -23,15 +23,37 @@ What this script does and does NOT do:
     itself already decided, so this can't disagree with the actual
     simulation by construction.
 
-Read-only: never modifies the DB, never writes rules_json. Run on the
-server (needs the real cached data), not this dev sandbox.
+Read-only: never modifies the DB, never writes rules_json.
+
+Two ways to run it:
+  1. --backtest-id <id> (RECOMMENDED on the production server - cheap,
+     read-only): points at an ALREADY-FINISHED multi-strategy backtest
+     that included ORB Long V8 (created via the dashboard's "New
+     Backtest" form with the "Run on remote worker" box checked - see
+     docs/worker.md) and just reads its already-computed pairs/v6_audit
+     straight out of the DB. No simulation runs here at all in this mode
+     - the actual heavy computation already happened on the WORKER
+     machine (your own laptop/desktop), not the small always-on server.
+  2. --start-date/--end-date (no --backtest-id): runs the V8 simulation
+     ITSELF, right here, right now. Fine on your own machine or a worker
+     box - do NOT run this on the small production server (see docs/
+     worker.md's own "very little memory headroom" note): a full-universe,
+     multi-month run with V6's own per-bar RSI/EMA recomputation is
+     exactly the kind of CPU/memory-heavy job that setup warns about, and
+     can make the whole box (including the live trading engine/Gateway)
+     unresponsive.
 
 Usage:
+    # Recommended - read an already-finished remote-worker backtest:
+    python3 audit_v6_risk_event.py --backtest-id 42
+
+    # Runs the simulation locally right now - NOT on the production server:
     python3 audit_v6_risk_event.py --start-date 2024-01-01 --end-date 2024-06-30
     python3 audit_v6_risk_event.py --start-date 2024-01-01 --end-date 2024-06-30 --account-id 1 --output v6_audit.xlsx
 """
 import argparse
 import json
+import re
 from datetime import date, datetime
 from pathlib import Path
 
@@ -48,6 +70,21 @@ DEFAULT_COMMISSION_PER_TRADE = 1.5
 DEFAULT_OUTPUT = "v6_audit_report.xlsx"
 
 V8_STRATEGY_NEEDLE = "ORB Long V8"
+
+
+def _find_strategy_id_in_results(results: dict, pattern: str) -> str | None:
+    """strategy_id (str) of the first result in one multi-strategy
+    backtest's own `results` dict whose strategy_name matches `pattern` -
+    same whole-word, case-insensitive convention backtest.html's own
+    _findStrategyIdByPattern already uses (so a whole-word "v8" pattern
+    never accidentally matches "v4.2"), reimplemented here in Python
+    since this script has no access to that JS. None if no result
+    matches (or errored)."""
+    needle = re.compile(pattern, re.IGNORECASE)
+    for sid, r in results.items():
+        if isinstance(r, dict) and not r.get("error") and needle.search(r.get("strategy_name") or ""):
+            return sid
+    return None
 
 
 def _v6a(pair: dict) -> dict:
@@ -255,10 +292,41 @@ def export_xlsx(rows: list[dict], summary: dict, orig_r: float, adjusted_r: floa
     wb.save(output_path)
 
 
+def _load_pairs_from_backtest(backtest_id: int) -> tuple[list[dict], str]:
+    """(pairs, scope_label) off an ALREADY-FINISHED backtest row - zero
+    simulation here, just reads what a remote worker (or the server
+    itself, if it was run locally) already computed and stored (see
+    src/db.get_backtest). This is the cheap, read-only path meant for the
+    small production server - see the module's own docstring."""
+    backtest = db.get_backtest(backtest_id)
+    if backtest is None:
+        raise SystemExit(f"No backtest with id {backtest_id}.")
+    if backtest["status"] != "done":
+        raise SystemExit(f"Backtest {backtest_id} is not done yet (status={backtest['status']}).")
+    results = backtest["results"] or {}
+    v8_sid = _find_strategy_id_in_results(results, r"\bv8\b")
+    if v8_sid is None:
+        available = [r.get("strategy_name") for r in results.values() if isinstance(r, dict)]
+        raise SystemExit(f"Backtest {backtest_id} has no ORB Long V8 result. Strategies in this backtest: {available}")
+    v8_result = results[v8_sid]
+    pairs = v8_result.get("pairs") or []
+    params = backtest["params"] or {}
+    symbol_count = len(params.get("symbols") or [])
+    scope_label = (
+        f"{v8_result.get('strategy_name', 'ORB Long V8')} | backtest #{backtest_id} "
+        f"({params.get('start_date')} to {params.get('end_date')}) | {symbol_count} symbol(s)"
+    )
+    return pairs, scope_label
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--start-date", required=True, help="YYYY-MM-DD")
-    parser.add_argument("--end-date", required=True, help="YYYY-MM-DD")
+    parser.add_argument("--backtest-id", type=int, default=None,
+                         help="Read an already-finished backtest's own V8 result (recommended on the production "
+                              "server - see docs/worker.md). Mutually exclusive with --start-date/--end-date, "
+                              "which run the simulation right here instead.")
+    parser.add_argument("--start-date", help="YYYY-MM-DD (ignored with --backtest-id)")
+    parser.add_argument("--end-date", help="YYYY-MM-DD (ignored with --backtest-id)")
     parser.add_argument("--account-id", type=int, default=None)
     parser.add_argument("--portfolio-value", type=float, default=DEFAULT_PORTFOLIO_VALUE)
     parser.add_argument("--max-risk-pct", type=float, default=DEFAULT_MAX_RISK_PCT)
@@ -267,32 +335,45 @@ def main():
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="Path to write the .xlsx report to")
     args = parser.parse_args()
 
-    start_date = date.fromisoformat(args.start_date)
-    end_date = date.fromisoformat(args.end_date)
+    if args.backtest_id is None and not (args.start_date and args.end_date):
+        raise SystemExit("Either --backtest-id, or both --start-date and --end-date, are required.")
 
     db.init_db(seed_rules_path=PROJECT_DIR / "rules.json")
     account_id = args.account_id if args.account_id is not None else db.get_default_account_id()
 
+    # hard_stop_R/new_hard_stop_R come straight off V8's own rules_json
+    # regardless of which path below is taken - read-only, never modified,
+    # and the SAME preset a remote-worker backtest would have used too
+    # (rules_json is never overridden per-run for a plain multi-strategy
+    # backtest, only for an Optimization Lab sweep - not this script).
     v8_strategy = find_strategy(account_id, V8_STRATEGY_NEEDLE)
-    v8_rules = json.loads(db.get_strategy(v8_strategy["id"])["rules_json"])  # read-only - never modified
-    direction = v8_strategy["direction"]
-
+    v8_rules = json.loads(db.get_strategy(v8_strategy["id"])["rules_json"])
     drr_cfg = v8_rules.get("exit", {}).get("dynamic_risk_reduction") or {}
     orig_r = -float(v8_rules["exit"]["hard_stop_R"])
     adjusted_r = -float(drr_cfg["new_hard_stop_R"])
 
-    symbols = backtest_data.cached_symbols(backtest_engine.BAR_SIZE)
-    if not symbols:
-        raise SystemExit("No symbols have cached historical bars yet - run fetch_backtest_data.py on the server first.")
+    if args.backtest_id is not None:
+        section(f"V6 Risk Event Audit — reading backtest #{args.backtest_id} (no simulation runs here)")
+        pairs, scope_label = _load_pairs_from_backtest(args.backtest_id)
+    else:
+        start_date = date.fromisoformat(args.start_date)
+        end_date = date.fromisoformat(args.end_date)
+        direction = v8_strategy["direction"]
+        symbols = backtest_data.cached_symbols(backtest_engine.BAR_SIZE)
+        if not symbols:
+            raise SystemExit("No symbols have cached historical bars yet - run fetch_backtest_data.py first.")
 
-    scope_label = f"{v8_strategy['name']} | {start_date} to {end_date} | {len(symbols)} symbol(s)"
-    section(f"V6 Risk Event Audit — {scope_label}")
-    print(f"Running {v8_strategy['name']} (unmodified, as already configured)...")
-    result = _run(
-        v8_strategy["name"], direction, v8_rules, symbols, start_date, end_date,
-        args.portfolio_value, args.max_risk_pct, args.max_trades_per_day, args.commission_per_trade,
-    )
-    pairs = result["pairs"]
+        scope_label = f"{v8_strategy['name']} | {start_date} to {end_date} | {len(symbols)} symbol(s)"
+        section(f"V6 Risk Event Audit — {scope_label}")
+        print("WARNING: this runs V8's full simulation LOCALLY, right now - do NOT do this on the small "
+              "production server (see docs/worker.md). Use --backtest-id with a remote-worker result instead.")
+        print(f"Running {v8_strategy['name']} (unmodified, as already configured)...")
+        result = _run(
+            v8_strategy["name"], direction, v8_rules, symbols, start_date, end_date,
+            args.portfolio_value, args.max_risk_pct, args.max_trades_per_day, args.commission_per_trade,
+        )
+        pairs = result["pairs"]
+
     print(f"{len(pairs)} V8 trade(s) in this scope.")
 
     rows = build_audit_rows(pairs)
