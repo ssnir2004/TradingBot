@@ -319,8 +319,39 @@ def _load_pairs_from_backtest(backtest_id: int) -> tuple[list[dict], str]:
     return pairs, scope_label
 
 
+def list_v8_backtests(account_id: int) -> None:
+    """--list: prints every 'done' backtest (newest first) that carries an
+    ORB Long V8 result, so you don't need raw SQL/sqlite3 on the server
+    just to find a backtest_id - reuses db.list_backtests/db.get_backtest,
+    the exact same functions the dashboard's own History page uses, so
+    there's no separate query logic to keep in sync."""
+    summaries = [b for b in db.list_backtests(account_id, limit=200) if b["status"] == "done"]
+    if not summaries:
+        print("No 'done' backtests found for this account.")
+        return
+    print(f"{'ID':>6}  {'Date range':<23}  {'Symbols':>7}  {'V8 trades':>9}  Created")
+    found_any = False
+    for summary in summaries:
+        backtest = db.get_backtest(summary["id"])
+        results = backtest["results"] or {}
+        v8_sid = _find_strategy_id_in_results(results, r"\bv8\b")
+        if v8_sid is None:
+            continue
+        found_any = True
+        params = backtest["params"] or {}
+        symbol_count = len(params.get("symbols") or [])
+        trade_count = len(results[v8_sid].get("pairs") or [])
+        date_range = f"{params.get('start_date')} to {params.get('end_date')}"
+        print(f"{summary['id']:>6}  {date_range:<23}  {symbol_count:>7}  {trade_count:>9}  {summary['created_at']}")
+    if not found_any:
+        print("No 'done' backtest in this account's history carries an ORB Long V8 result yet.")
+
+
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--list", action="store_true",
+                         help="List every 'done' backtest that carries an ORB Long V8 result (with its id, date "
+                              "range, symbol/trade counts) and exit - no raw SQL needed to find a --backtest-id.")
     parser.add_argument("--backtest-id", type=int, default=None,
                          help="Read an already-finished backtest's own V8 result (recommended on the production "
                               "server - see docs/worker.md). Mutually exclusive with --start-date/--end-date, "
@@ -335,11 +366,15 @@ def main():
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="Path to write the .xlsx report to")
     args = parser.parse_args()
 
-    if args.backtest_id is None and not (args.start_date and args.end_date):
-        raise SystemExit("Either --backtest-id, or both --start-date and --end-date, are required.")
-
     db.init_db(seed_rules_path=PROJECT_DIR / "rules.json")
     account_id = args.account_id if args.account_id is not None else db.get_default_account_id()
+
+    if args.list:
+        list_v8_backtests(account_id)
+        return
+
+    if args.backtest_id is None and not (args.start_date and args.end_date):
+        raise SystemExit("Either --backtest-id, --list, or both --start-date and --end-date, are required.")
 
     # hard_stop_R/new_hard_stop_R come straight off V8's own rules_json
     # regardless of which path below is taken - read-only, never modified,
