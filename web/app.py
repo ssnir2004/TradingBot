@@ -25,7 +25,7 @@ from fastapi.templating import Jinja2Templates
 import cycle
 import morning_prefilter
 import run_optimization
-from src import backtest_data, backtest_engine, db, gateway_provisioning, mode_config, perf, risk_reduction_report, secrets_store, telemetry_engine, trade_diagnostics, trades_csv, trades_pdf, trades_xlsx
+from src import backtest_data, backtest_engine, db, gateway_provisioning, mode_config, perf, risk_reduction_report, secrets_store, telemetry_engine, trade_diagnostics, trades_csv, trades_pdf, trades_xlsx, v10_recovery_report
 from src.sp500_tickers import SP500_TICKERS
 from web import gateway_control
 from web.auth import COOKIE_NAME, make_session_cookie, read_session, require_user
@@ -1954,6 +1954,41 @@ def api_risk_reduction_report_export(
     return Response(
         content=xlsx_bytes, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="orb_v8_v9_risk_reduction_report.xlsx"'},
+    )
+
+
+@app.get("/api/backtests/{backtest_id}/v10_recovery_report")
+def api_v10_recovery_report(
+    backtest_id: int, baseline_strategy_id: int, v10_strategy_id: int,
+    account_id: int = Depends(require_account), user: str = Depends(require_user),
+):
+    """ORB Long V10's own "Dynamic Recovery" report (see src/v10_
+    recovery_report.py) - a read-only view over ONE already-finished
+    multi-strategy backtest that included the baseline (ORB Long v4.2)
+    and V10 together, matched by (symbol, entry timestamp). Reuses
+    _risk_reduction_context's own validation (baseline+one variant is
+    exactly its own shape) rather than duplicating it."""
+    _backtest, results, labels, baseline_id, variant_ids = _risk_reduction_context(
+        backtest_id, account_id, baseline_strategy_id, str(v10_strategy_id),
+    )
+    return v10_recovery_report.build_v10_recovery_report(results, labels, baseline_id, variant_ids[0])
+
+
+@app.get("/api/backtests/{backtest_id}/v10_recovery_report_export.xlsx")
+def api_v10_recovery_report_export(
+    backtest_id: int, baseline_strategy_id: int, v10_strategy_id: int,
+    account_id: int = Depends(require_account), user: str = Depends(require_user),
+):
+    backtest, results, labels, baseline_id, variant_ids = _risk_reduction_context(
+        backtest_id, account_id, baseline_strategy_id, str(v10_strategy_id),
+    )
+    report = v10_recovery_report.build_v10_recovery_report(results, labels, baseline_id, variant_ids[0])
+    scope_label = f"Backtest #{backtest_id} ({backtest['params'].get('start_date')} → {backtest['params'].get('end_date')})"
+    xlsx_bytes = v10_recovery_report.export_v10_recovery_report_xlsx(report, scope_label)
+    _log_account_action(account_id, user, action="v10_recovery_report_export", backtest_id=backtest_id, baseline_strategy_id=baseline_strategy_id, v10_strategy_id=v10_strategy_id)
+    return Response(
+        content=xlsx_bytes, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="orb_v10_recovery_report.xlsx"'},
     )
 
 

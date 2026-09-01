@@ -1465,7 +1465,7 @@ function renderResultsBody(detail) {
   }
   return `<div class="row">${
     Object.entries(detail.results).map(([sid, result]) => renderStrategyResult(sid, result)).join("")
-  }${renderRiskReductionSection(detail)}</div>`;
+  }${renderRiskReductionSection(detail)}${renderV10RecoverySection(detail)}</div>`;
 }
 
 // ORB Long V8/V9's own "Dynamic Risk Reduction" comparison report (see
@@ -1498,6 +1498,101 @@ function renderRiskReductionSection(detail) {
           <div id="${containerId}" class="mt-3"></div>
         </div>
       </div>
+    </div>`;
+}
+
+// ORB Long V10's own "Dynamic Recovery" report (see src/v10_recovery_
+// report.py) - same "only when the backtest actually included both
+// strategies together" gating as renderRiskReductionSection above, one
+// baseline (v4.2) + exactly one variant (V10, not a list) since V10 has
+// no sibling like V8/V9 do.
+function renderV10RecoverySection(detail) {
+  if (detail.status !== "done") return "";
+  const results = detail.results || {};
+  const baselineId = _findStrategyIdByPattern(results, "v4\\.2");
+  const v10Id = _findStrategyIdByPattern(results, "\\bv10\\b");
+  if (!baselineId || !v10Id) return "";
+  const containerId = `bt-v10-${detail.id}`;
+  return `
+    <div class="col-12 mt-2 mb-3">
+      <div class="card">
+        <div class="card-header">Dynamic Recovery Report (V10 vs v4.2)</div>
+        <div class="card-body">
+          <button type="button" class="btn btn-outline-primary btn-sm" onclick='loadV10RecoveryReport(${detail.id}, "${baselineId}", "${v10Id}", "${containerId}")'>Load Report</button>
+          <a id="${containerId}-export" class="btn btn-outline-secondary btn-sm disabled ms-2" href="#">Export Excel (12 sheets)</a>
+          <div id="${containerId}" class="mt-3"></div>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function loadV10RecoveryReport(backtestId, baselineId, v10Id, containerId) {
+  const el = document.getElementById(containerId);
+  el.innerHTML = '<div class="text-muted small">Loading…</div>';
+  const params = new URLSearchParams({ baseline_strategy_id: baselineId, v10_strategy_id: v10Id });
+  let report;
+  try {
+    report = await api(`/api/backtests/${backtestId}/v10_recovery_report?${params.toString()}`);
+  } catch (e) {
+    el.innerHTML = `<div class="text-danger small">${e.message}</div>`;
+    return;
+  }
+  const exportLink = document.getElementById(`${containerId}-export`);
+  exportLink.href = `/api/backtests/${backtestId}/v10_recovery_report_export.xlsx?${params.toString()}`;
+  exportLink.classList.remove("disabled");
+  el.innerHTML = renderV10RecoveryReportHtml(report);
+}
+
+function renderV10RecoveryReportHtml(report) {
+  const fmt2 = (v) => (v === null || v === undefined) ? "-" : Number(v).toFixed(2);
+  const fmt3 = (v) => (v === null || v === undefined) ? "-" : Number(v).toFixed(3);
+  const bool = (v) => v === null || v === undefined ? "-" : (v ? "✓" : "✗");
+  const rows = [report.baseline, report.variant];
+  const coreTable = `
+    <div class="table-responsive">
+      <table class="table table-sm mono mb-3">
+        <thead><tr><th>Strategy</th><th>Trades</th><th>Win %</th><th>Net P&amp;L</th><th>Avg Final R</th><th>Expectancy R</th><th>Profit Factor</th><th>Max Drawdown $</th><th>Max Drawdown R</th></tr></thead>
+        <tbody>
+          ${rows.map(r => {
+            const cm = r.core_metrics;
+            return `<tr><td>${r.label}</td><td>${cm.total_trades}</td><td>${cm.win_rate_pct}%</td><td>$${fmt2(cm.net_pnl_usd)}</td><td>${fmt3(cm.avg_final_r)}</td><td>${fmt3(cm.expectancy_r)}</td><td>${cm.profit_factor}</td><td>$${fmt2(cm.max_drawdown_usd)}</td><td>${fmt3(cm.max_drawdown_r)}</td></tr>`;
+          }).join("")}
+        </tbody>
+      </table>
+    </div>`;
+
+  const ep = report.entry_parity;
+  const parityBadge = ep.parity_ok
+    ? `<span class="badge bg-success">Parity OK</span>`
+    : `<span class="badge bg-danger">Parity FAILED — comparison not conclusive</span>`;
+  const recon = report.reconciliation;
+  const reconBadge = recon.all_checks_passed
+    ? `<span class="badge bg-success">Reconciliation checks passed</span>`
+    : `<span class="badge bg-danger">Reconciliation checks FAILED</span>`;
+  const s = report.state_summary;
+  const d = report.summary_deltas;
+
+  return coreTable + `
+    <div class="small text-muted mb-1">
+      Entry Parity — ${parityBadge} · V4.2: ${ep.v4_2_total_trades} · V10: ${ep.variant_total_trades} · Matched: ${ep.matched_trades}
+    </div>
+    <div class="small text-muted mb-1">
+      V10 State Summary — Total: ${s.total_trades} · V6 Warnings: ${s.v6_warnings} (${s.pct_receiving_warning ?? "-"}%) ·
+      Recovered (20/30/45m): ${s.recovered_at_20m}/${s.recovered_at_30m}/${s.recovered_at_45m} ·
+      Trailing During Monitoring: ${s.trailing_activated_during_monitoring} ·
+      Candidates@20m: ${s.persistent_failure_candidates_at_20m} · Confirmed Failures (30/45m): ${s.confirmed_persistent_failures_at_30m}/${s.confirmed_persistent_failures_at_45m} ·
+      Stops Tightened: ${s.stops_tightened} · Adjusted Stop Hit: ${s.adjusted_stops_hit} ·
+      Saved Loss: ${s.saved_loss_trades} · Prevented Recovery: ${s.prevented_recovery_trades}
+    </div>
+    <div class="small text-muted mb-1">
+      V10 vs V4.2 — Net P&amp;L Δ: $${fmt2(d.net_pnl_delta_usd)} · Total Δ R: ${fmt3(d.total_delta_r)} ·
+      Profit Factor Δ: ${d.profit_factor_delta === null ? "-" : fmt3(d.profit_factor_delta)} · Max Drawdown Δ: $${fmt2(d.max_drawdown_delta_usd)}
+    </div>
+    <div class="small mb-2">${reconBadge}</div>
+    <div class="small text-muted">
+      ${report.warning_trades_rows.length} warning trade(s) · ${report.recovered_trades_rows.length} recovered ·
+      ${report.persistent_failure_rows.length} confirmed persistent failure(s) · ${report.changed_outcomes_rows.length} changed outcome(s) —
+      full per-trade and per-checkpoint detail (12 sheets) in the Excel export above.
     </div>`;
 }
 
