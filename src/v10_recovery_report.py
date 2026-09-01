@@ -355,12 +355,20 @@ def _checkpoint_analysis(variant_pairs: list[dict]) -> list[dict]:
     return out
 
 
-def build_v10_recovery_report(results_by_strategy: dict, strategy_labels: dict, baseline_id: str, v10_id: str) -> dict:
-    """The full V10 Phase-2 report. Same shape/handling conventions as
-    src.risk_reduction_report.build_risk_reduction_report - an empty
-    pairs list is a valid, reportable outcome, never an error."""
-    baseline_pairs = (results_by_strategy.get(baseline_id) or {}).get("pairs") or []
-    variant_pairs = (results_by_strategy.get(v10_id) or {}).get("pairs") or []
+def build_v10_recovery_report_from_pairs(
+    baseline_pairs: list[dict], variant_pairs: list[dict], baseline_label: str, variant_label: str,
+    baseline_id: str | None = None, v10_id: str | None = None,
+) -> dict:
+    """The full V10 Phase-2 report, built directly off two already-
+    resolved pairs lists - the shared core behind build_v10_recovery_
+    report below (one backtest's own two strategies) AND
+    audit_v10_recovery.py's own --list/pooling path (v4.2 and V10 pairs
+    POOLED across many separate weekly-chunked backtests, matching
+    audit_v6_risk_event.py's own --backtest-id pooling for V8/V9 - real
+    deployments produce one backtest row per week, so a full multi-month
+    audit needs many ids pooled together, not just one pair of strategy
+    ids from a single backtest). An empty pairs list is a valid,
+    reportable outcome, never an error."""
     baseline_by_key = _pairs_by_key(baseline_pairs)
     baseline_ordered = sorted(baseline_pairs, key=lambda p: p.get("buy_time") or "")
     baseline_id_by_key = {(p["symbol"], p["buy_time"]): i for i, p in enumerate(baseline_ordered, start=1)}
@@ -385,9 +393,9 @@ def build_v10_recovery_report(results_by_strategy: dict, strategy_labels: dict, 
     checkpoint_analysis_rows = _checkpoint_analysis(variant_pairs)
 
     return {
-        "baseline": {"strategy_id": baseline_id, "label": strategy_labels.get(baseline_id, f"Strategy #{baseline_id}"),
+        "baseline": {"strategy_id": baseline_id, "label": baseline_label,
                      "core_metrics": baseline_core, "trade_count": len(baseline_pairs)},
-        "variant": {"strategy_id": v10_id, "label": strategy_labels.get(v10_id, f"Strategy #{v10_id}"),
+        "variant": {"strategy_id": v10_id, "label": variant_label,
                     "core_metrics": variant_core, "trade_count": len(variant_pairs)},
         "entry_parity": entry_parity, "delta_analysis": delta_analysis, "summary_deltas": summary_deltas,
         "state_summary": state_summary, "reconciliation": reconciliation,
@@ -396,6 +404,18 @@ def build_v10_recovery_report(results_by_strategy: dict, strategy_labels: dict, 
         "changed_outcomes_rows": changed_outcome_rows, "errors_exclusions_rows": errors_rows,
         "checkpoint_log_rows": checkpoint_log_rows, "checkpoint_analysis_rows": checkpoint_analysis_rows,
     }
+
+
+def build_v10_recovery_report(results_by_strategy: dict, strategy_labels: dict, baseline_id: str, v10_id: str) -> dict:
+    """Single-backtest entry point (used by web/app.py's own routes) -
+    both strategies' pairs come from the SAME already-finished multi-
+    strategy backtest's own results dict. See build_v10_recovery_report_
+    from_pairs for the shared implementation."""
+    baseline_pairs = (results_by_strategy.get(baseline_id) or {}).get("pairs") or []
+    variant_pairs = (results_by_strategy.get(v10_id) or {}).get("pairs") or []
+    baseline_label = strategy_labels.get(baseline_id, f"Strategy #{baseline_id}")
+    variant_label = strategy_labels.get(v10_id, f"Strategy #{v10_id}")
+    return build_v10_recovery_report_from_pairs(baseline_pairs, variant_pairs, baseline_label, variant_label, baseline_id, v10_id)
 
 
 def export_v10_recovery_report_xlsx(report: dict, scope_label: str) -> bytes:
