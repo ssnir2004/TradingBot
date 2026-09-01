@@ -292,12 +292,10 @@ def export_xlsx(rows: list[dict], summary: dict, orig_r: float, adjusted_r: floa
     wb.save(output_path)
 
 
-def _load_pairs_from_backtest(backtest_id: int) -> tuple[list[dict], str]:
-    """(pairs, scope_label) off an ALREADY-FINISHED backtest row - zero
-    simulation here, just reads what a remote worker (or the server
-    itself, if it was run locally) already computed and stored (see
-    src/db.get_backtest). This is the cheap, read-only path meant for the
-    small production server - see the module's own docstring."""
+def _v8_pairs_from_one_backtest(backtest_id: int) -> tuple[dict, dict]:
+    """(backtest, v8_result) for one already-finished backtest - shared by
+    both the single-id and pooled-multi-id paths below, so a bad id/
+    status/missing-V8 error is reported identically either way."""
     backtest = db.get_backtest(backtest_id)
     if backtest is None:
         raise SystemExit(f"No backtest with id {backtest_id}.")
@@ -308,15 +306,51 @@ def _load_pairs_from_backtest(backtest_id: int) -> tuple[list[dict], str]:
     if v8_sid is None:
         available = [r.get("strategy_name") for r in results.values() if isinstance(r, dict)]
         raise SystemExit(f"Backtest {backtest_id} has no ORB Long V8 result. Strategies in this backtest: {available}")
-    v8_result = results[v8_sid]
-    pairs = v8_result.get("pairs") or []
-    params = backtest["params"] or {}
-    symbol_count = len(params.get("symbols") or [])
-    scope_label = (
-        f"{v8_result.get('strategy_name', 'ORB Long V8')} | backtest #{backtest_id} "
-        f"({params.get('start_date')} to {params.get('end_date')}) | {symbol_count} symbol(s)"
-    )
-    return pairs, scope_label
+    return backtest, results[v8_sid]
+
+
+def _load_pairs_from_backtests(backtest_ids: list[int]) -> tuple[list[dict], str]:
+    """(pooled pairs, scope_label) off one or more ALREADY-FINISHED
+    backtest rows - zero simulation here, just reads what a remote worker
+    (or the server itself, if it was run locally) already computed and
+    stored (see src/db.get_backtest). This is the cheap, read-only path
+    meant for the small production server - see the module's own
+    docstring.
+
+    Pools every given id's own V8 pairs together (e.g. a run of weekly-
+    chunked backtests covering a full multi-month range, exactly what
+    the dashboard's own remote-worker history tends to look like), with
+    the SAME "exact (start_date, end_date) dedup, newest created_at wins"
+    rule analyze_strategy.pool_strategy_pairs already uses - so auditing
+    the same week's backtest twice by accident (e.g. a retry that got a
+    new id) never double-counts that week's trades."""
+    latest_by_range = {}
+    v8_label = None
+    for bid in backtest_ids:
+        backtest, v8_result = _v8_pairs_from_one_backtest(bid)
+        v8_label = v8_label or v8_result.get("strategy_name", "ORB Long V8")
+        params = backtest["params"] or {}
+        date_key = (params.get("start_date"), params.get("end_date"))
+        existing = latest_by_range.get(date_key)
+        if existing is None or backtest["created_at"] > existing["created_at"]:
+            latest_by_range[date_key] = {
+                "created_at": backtest["created_at"],
+                "pairs": v8_result.get("pairs") or [],
+                "symbol_count": len(params.get("symbols") or []),
+            }
+
+    pooled_pairs, symbol_counts = [], []
+    for date_key, entry in sorted(latest_by_range.items()):
+        pooled_pairs.extend(entry["pairs"])
+        symbol_counts.append(entry["symbol_count"])
+
+    starts = [d[0] for d in latest_by_range if d[0]]
+    ends = [d[1] for d in latest_by_range if d[1]]
+    date_range = f"{min(starts)} to {max(ends)}" if starts and ends else "unknown range"
+    max_symbols = max(symbol_counts) if symbol_counts else 0
+    id_desc = f"backtest #{backtest_ids[0]}" if len(backtest_ids) == 1 else f"{len(backtest_ids)} backtests pooled ({backtest_ids[0]}-{backtest_ids[-1]})"
+    scope_label = f"{v8_label} | {id_desc} | {date_range} | up to {max_symbols} symbol(s)"
+    return pooled_pairs, scope_label
 
 
 def list_v8_backtests(account_id: int) -> None:
@@ -352,10 +386,11 @@ def main():
     parser.add_argument("--list", action="store_true",
                          help="List every 'done' backtest that carries an ORB Long V8 result (with its id, date "
                               "range, symbol/trade counts) and exit - no raw SQL needed to find a --backtest-id.")
-    parser.add_argument("--backtest-id", type=int, default=None,
-                         help="Read an already-finished backtest's own V8 result (recommended on the production "
-                              "server - see docs/worker.md). Mutually exclusive with --start-date/--end-date, "
-                              "which run the simulation right here instead.")
+    parser.add_argument("--backtest-id", default=None,
+                         help="One id, or a comma-separated list of ids (e.g. 870,871,872), of already-finished "
+                              "backtest(s) whose own V8 result to read and pool together (recommended on the "
+                              "production server - see docs/worker.md). Mutually exclusive with --start-date/"
+                              "--end-date, which run the simulation right here instead.")
     parser.add_argument("--start-date", help="YYYY-MM-DD (ignored with --backtest-id)")
     parser.add_argument("--end-date", help="YYYY-MM-DD (ignored with --backtest-id)")
     parser.add_argument("--account-id", type=int, default=None)
@@ -388,8 +423,9 @@ def main():
     adjusted_r = -float(drr_cfg["new_hard_stop_R"])
 
     if args.backtest_id is not None:
-        section(f"V6 Risk Event Audit — reading backtest #{args.backtest_id} (no simulation runs here)")
-        pairs, scope_label = _load_pairs_from_backtest(args.backtest_id)
+        backtest_ids = [int(x) for x in str(args.backtest_id).split(",") if x.strip()]
+        section(f"V6 Risk Event Audit — reading {len(backtest_ids)} backtest(s) (no simulation runs here)")
+        pairs, scope_label = _load_pairs_from_backtests(backtest_ids)
     else:
         start_date = date.fromisoformat(args.start_date)
         end_date = date.fromisoformat(args.end_date)
