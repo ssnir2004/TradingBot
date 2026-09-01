@@ -41,5 +41,20 @@ def reconnect_gateway(mode: str):
     systemd_util.run_privileged("start", GATEWAY_UNIT[mode])
 
 
+def reinitialize(mode: str):
+    """disconnect() immediately followed by reconnect_gateway() as ONE
+    action - unlike reconnect_gateway() alone (which only ever starts an
+    already-stopped Gateway), this works even while systemd still reports
+    the Gateway "active" but its actual IBKR session is stuck/stale, since
+    it stops the engine and Gateway first (same order as disconnect(), so
+    the engine never sees the Gateway vanish out from under it mid-cycle)
+    before starting the Gateway back up. Never restarts the engine itself
+    - same reasoning as reconnect_gateway(): IBKR may need a fresh 2FA
+    approval before the Gateway actually logs back in, so resume_engine()
+    stays a separate, explicit step once status() shows port_listening."""
+    disconnect(mode)
+    reconnect_gateway(mode)
+
+
 def resume_engine(mode: str):
     systemd_util.run_privileged("start", ENGINE_UNIT[mode])

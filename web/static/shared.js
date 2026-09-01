@@ -217,6 +217,35 @@ document.getElementById("btn-gw-resume").addEventListener("click", async () => {
   }
 });
 
+// Always available (unlike btn-gw-reconnect, never hidden by the current
+// gateway_active state) - stops the engine + Gateway and starts the
+// Gateway back up in one click, for when the Gateway is stuck rather than
+// cleanly stopped. Same safety gates as Disconnect (blocked on an open
+// position, LIVE needs the typed confirmation) since it stops the engine too.
+document.getElementById("btn-gw-reinit").addEventListener("click", async () => {
+  const errorEl = document.getElementById("gw-error");
+  errorEl.textContent = "";
+  const payload = {};
+  if (currentMode === "live") {
+    const typed = prompt(
+      'This fully reinitializes the LIVE Gateway: stops the engine + Gateway, then starts the Gateway back up.\n' +
+      'Blocked while any LIVE position is open. Type "ok" to confirm:'
+    );
+    if (typed !== "ok") { errorEl.textContent = "Not confirmed — nothing was reinitialized."; return; }
+    payload.confirm = typed;
+  } else if (!confirm("Fully reinitialize the PAPER Gateway (stop engine + Gateway, then start the Gateway back up)?")) {
+    return;
+  }
+  try {
+    await modeApi("/api/gateway/reinitialize", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    refreshGatewayStatus();
+  } catch (e) {
+    errorEl.textContent = "Reinitialize failed: " + e.message;
+  }
+});
+
 // --------------------------------------------------------- my gateway ---
 async function refreshMe() {
   const me = await api("/api/me");

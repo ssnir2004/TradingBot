@@ -556,6 +556,38 @@ def api_gateway_reconnect(mode: str = Depends(require_mode), account_id: int = D
     return {"ok": True}
 
 
+@app.post("/api/gateway/reinitialize")
+async def api_gateway_reinitialize(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    """One-click Disconnect+Reconnect (see gateway_control.reinitialize) -
+    unlike /reconnect above, this works even when the Gateway looks
+    "active" but its actual IBKR session is stuck. Same safety gates as
+    /disconnect (blocked while a position is open in this mode; LIVE
+    requires the same typed confirmation), since it stops the engine too."""
+    positions = db.get_open_positions(account_id, mode)
+    if positions:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot reinitialize: {len(positions)} open {mode} position(s) would be left "
+                "completely unmanaged (no stop monitoring, no end-of-day close) while the "
+                "Gateway is restarting. Flatten them first."
+            ),
+        )
+    if mode == "live":
+        body = await request.json()
+        if body.get("confirm") != DISCONNECT_LIVE_CONFIRM_PHRASE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Type '{DISCONNECT_LIVE_CONFIRM_PHRASE}' to confirm reinitializing LIVE.",
+            )
+    try:
+        gateway_control.reinitialize(mode)
+    except gateway_control.GatewayControlError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    db.log_decision(account_id, mode, "dashboard_control", user=user, action="gateway_reinitialize")
+    return {"ok": True}
+
+
 @app.post("/api/gateway/resume_engine")
 def api_gateway_resume_engine(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     try:
