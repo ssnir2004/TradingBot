@@ -721,7 +721,12 @@ def _evaluate_v10_recovery(pos: dict, intraday: pd.DataFrame, bar_ts: pd.Timesta
         and feats["mfe_r"] is not None and dr.get("or_high") is not None and dr.get("or_low") is not None
     )
     log_row = {
-        "checkpoint_minutes": checkpoint_minutes, "scheduled_ts": scheduled_ts, "actual_ts": bar_ts,
+        # .isoformat() strings, not raw pd.Timestamp objects - this whole
+        # checkpoint_log list is embedded in the trade record a remote
+        # worker JSON-serializes to send back to the server (see
+        # backtest_worker.py's own submit_result) - a raw Timestamp isn't
+        # JSON-serializable and crashes that submission outright.
+        "checkpoint_minutes": checkpoint_minutes, "scheduled_ts": scheduled_ts.isoformat(), "actual_ts": bar_ts.isoformat(),
         "delay_seconds": (bar_ts - scheduled_ts).total_seconds(),
     }
     if not required_ok:
