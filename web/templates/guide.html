@@ -278,13 +278,18 @@
         <strong>Full Reinitialize</strong> - כפתור נפרד, זמין תמיד (גם אם
         התג למעלה מראה "Connected") - עושה Disconnect ואז Reconnect
         Gateway במכה אחת. שימושי כשה-Gateway "תקוע": ה-systemd service
-        עדיין רץ אבל החיבור בפועל ל-IBKR לא בריא, כך שכפתור Reconnect
-        הרגיל לא מופיע כי הוא מותנה בכך שה-Gateway כבר עצור. אותם כללי
-        בטיחות כמו Disconnect - חסום אם יש פוזיציה פתוחה, וב-LIVE נדרשת
-        הקלדת אישור (<span class="mono">ok</span>). אחרי שהוא מסיים, ה-Gateway
-        חוזר להיות "Connecting..."/"Connected" בדיוק כמו אחרי Reconnect
-        רגיל - <strong>Resume Trading</strong> עדיין שלב נפרד שצריך ללחוץ
-        עליו בעצמך.
+        עדיין רץ אבל החיבור בפועל ל-IBKR לא בריא (התג מראה
+        "Connecting..." או "Disconnected"), כך שכפתור Reconnect הרגיל לא
+        מופיע כי הוא מותנה בכך שה-Gateway כבר עצור. ב-LIVE נדרשת תמיד
+        הקלדת אישור (<span class="mono">ok</span>), גם אם אין פוזיציה
+        פתוחה. חסימה על פוזיציה פתוחה חלה <strong>רק אם ה-Gateway כרגע
+        באמת מחובר ומנהל</strong> (התג מראה "Connected") - אם הוא כבר
+        תקוע, הפוזיציה ממילא לא מנוהלת באותו רגע (כל מחזור מסחר נכשל
+        בהתחברות ומדלג על ניהול הסטופים), אז אין טעם לחסום בדיוק את
+        הפעולה שיכולה לתקן את זה. אחרי שהוא מסיים, ה-Gateway חוזר להיות
+        "Connecting..."/"Connected" בדיוק כמו אחרי Reconnect רגיל -
+        <strong>Resume Trading</strong> עדיין שלב נפרד שצריך ללחוץ עליו
+        בעצמך.
       </p>
       <p class="mb-0 text-muted small">
         דורש הרשאת sudo מוגבלת מאוד בשרת (רק start/stop על 4 השירותים

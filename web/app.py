@@ -560,10 +560,23 @@ def api_gateway_reconnect(mode: str = Depends(require_mode), account_id: int = D
 async def api_gateway_reinitialize(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     """One-click Disconnect+Reconnect (see gateway_control.reinitialize) -
     unlike /reconnect above, this works even when the Gateway looks
-    "active" but its actual IBKR session is stuck. Same safety gates as
-    /disconnect (blocked while a position is open in this mode; LIVE
-    requires the same typed confirmation), since it stops the engine too."""
-    positions = db.get_open_positions(account_id, mode)
+    "active" but its actual IBKR session is stuck. The open-position block
+    below only applies while the Gateway is CURRENTLY actually connected
+    and managing (gateway_active + port_listening + engine_active all
+    true, the same "Connected" condition shared.js's own badge uses) -
+    unlike /disconnect (a deliberate action against a healthy connection,
+    always blocked on an open position), a Gateway that's already stuck
+    (port_listening false, "Connecting..."/"Disconnected") means
+    cycle.py's run_cycle is ALREADY failing to connect and skipping stop
+    management every cycle (see its own _connect retry-then-raise, caught
+    by run_service.py's _guarded) - the position is already unmanaged, so
+    blocking the one action that could fix that protects nothing and just
+    leaves the user stuck. LIVE still always requires the typed
+    confirmation, whether or not a position is open, since this stops the
+    engine too."""
+    gw_status = gateway_control.status(mode, _env())
+    currently_managed = gw_status["gateway_active"] and gw_status["port_listening"] and gw_status["engine_active"]
+    positions = db.get_open_positions(account_id, mode) if currently_managed else []
     if positions:
         raise HTTPException(
             status_code=400,
