@@ -15,7 +15,13 @@ async function api(path, options) {
   if (res.status === 401) { window.location.href = "/login"; throw new Error("unauthenticated"); }
   if (!res.ok) {
     const text = await res.text();
-    try { throw new Error(JSON.parse(text).detail || text); } catch (e) { throw new Error(e.message || text); }
+    // err.status lets a caller distinguish WHY a request failed (e.g. 409
+    // "needs the open-positions override prompt" vs any other rejection)
+    // without parsing detail text - see btn-gw-disconnect's own handler.
+    let err;
+    try { err = new Error(JSON.parse(text).detail || text); } catch (e) { err = new Error(e.message || text); }
+    err.status = res.status;
+    throw err;
   }
   return res.status === 204 ? null : res.json();
 }
@@ -178,7 +184,7 @@ document.getElementById("btn-gw-disconnect").addEventListener("click", async () 
   if (currentMode === "live") {
     const typed = prompt(
       'This stops the LIVE Gateway AND trading engine so you can log into TWS/Mobile with the same account.\n' +
-      'Blocked while any LIVE position is open. Type "ok" to confirm:'
+      'Type "ok" to confirm:'
     );
     if (typed !== "ok") { errorEl.textContent = "Not confirmed — nothing was disconnected."; return; }
     payload.confirm = typed;
@@ -191,7 +197,24 @@ document.getElementById("btn-gw-disconnect").addEventListener("click", async () 
     });
     refreshGatewayStatus();
   } catch (e) {
-    errorEl.textContent = "Disconnect failed: " + e.message;
+    // 409 = an open position would be left unmanaged (see /api/gateway/
+    // disconnect's own docstring) - a SECOND, separate typed confirmation
+    // for that specific risk, then one retry with it attached. Any other
+    // status (validation, LIVE confirm mismatch, 500) just surfaces as-is.
+    if (e.status !== 409) { errorEl.textContent = "Disconnect failed: " + e.message; return; }
+    const typed = prompt(
+      e.message + '\n\nType "ok" to disconnect anyway and leave the position(s) unmanaged:'
+    );
+    if (typed !== "ok") { errorEl.textContent = "Not confirmed — nothing was disconnected."; return; }
+    payload.confirm_open_positions = typed;
+    try {
+      await modeApi("/api/gateway/disconnect", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      });
+      refreshGatewayStatus();
+    } catch (e2) {
+      errorEl.textContent = "Disconnect failed: " + e2.message;
+    }
   }
 });
 

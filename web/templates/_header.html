@@ -108,7 +108,7 @@
         </div>
         <div class="card-body">
           <div class="small text-muted mb-2">
-            Temporarily disconnects this mode's IB Gateway + trading engine so you can log into TWS or IBKR Mobile with the same account, without SSH. Blocked while any position is open in this mode — see the guide.
+            Temporarily disconnects this mode's IB Gateway + trading engine so you can log into TWS or IBKR Mobile with the same account, without SSH. Disconnect asks for a second confirmation if a position is open in this mode (it will be left unmanaged - no stop monitoring, no end-of-day close - until you reconnect); Full Reinitialize refuses outright while one is open — see the guide.
           </div>
           <div id="gw-detail" class="small mono text-muted mb-2">-</div>
           <div class="d-flex gap-2">

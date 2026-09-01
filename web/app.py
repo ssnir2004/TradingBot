@@ -46,6 +46,16 @@ LIVE_RISK_CONFIRM_PHRASE = "ok"
 # end of day, so this is a deliberate, confirmed action too.
 DISCONNECT_LIVE_CONFIRM_PHRASE = "ok"
 
+# Typed into a SECOND confirmation modal before disconnecting with an open
+# position - overrides the block below that otherwise always refuses (see
+# /api/gateway/disconnect). Deliberately the same phrase/pattern as every
+# other typed-confirmation speed bump in this file (LIVE_RISK_CONFIRM_
+# PHRASE, DISCONNECT_LIVE_CONFIRM_PHRASE, ACTIVATE_AGGRESSIVE_CONFIRM_
+# PHRASE) rather than a plain boolean flag, since accepting the risk of
+# leaving a real position with no stop monitoring and no end-of-day close
+# deserves the same explicit "type to confirm" friction those already get.
+DISCONNECT_OPEN_POSITIONS_CONFIRM_PHRASE = "ok"
+
 # Typed into the confirmation modal before closing a LIVE position from the
 # Account Holdings panel — this fires a real market order against a real
 # account holding, independent of anything the bot itself is tracking.
@@ -521,18 +531,26 @@ def api_gateway_status(mode: str = Depends(require_mode), user: str = Depends(re
 
 @app.post("/api/gateway/disconnect")
 async def api_gateway_disconnect(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    body = await request.json()
     positions = db.get_open_positions(account_id, mode)
+    forced_open_positions = False
     if positions:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Cannot disconnect: {len(positions)} open {mode} position(s) would be left "
-                "completely unmanaged (no stop monitoring, no end-of-day close) while the "
-                "Gateway is down. Flatten them first."
-            ),
-        )
+        if body.get("confirm_open_positions") != DISCONNECT_OPEN_POSITIONS_CONFIRM_PHRASE:
+            # 409 (not 400, unlike the other confirm checks below) so the
+            # frontend can tell "needs the open-positions override prompt"
+            # apart from every other rejection reason without parsing
+            # detail text - see shared.js's own err.status handling.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{len(positions)} open {mode} position(s) would be left completely "
+                    "unmanaged (no stop monitoring, no end-of-day close) while the Gateway is "
+                    f"down. Type '{DISCONNECT_OPEN_POSITIONS_CONFIRM_PHRASE}' to confirm "
+                    "disconnecting anyway, or flatten them first."
+                ),
+            )
+        forced_open_positions = True
     if mode == "live":
-        body = await request.json()
         if body.get("confirm") != DISCONNECT_LIVE_CONFIRM_PHRASE:
             raise HTTPException(
                 status_code=400,
@@ -542,7 +560,8 @@ async def api_gateway_disconnect(request: Request, mode: str = Depends(require_m
         gateway_control.disconnect(mode)
     except gateway_control.GatewayControlError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    db.log_decision(account_id, mode, "dashboard_control", user=user, action="gateway_disconnect")
+    db.log_decision(account_id, mode, "dashboard_control", user=user, action="gateway_disconnect",
+                     forced_open_positions=forced_open_positions, open_position_count=len(positions))
     return {"ok": True}
 
 
