@@ -135,6 +135,13 @@ def pair_trades(rows: list[dict]) -> list[dict]:
                 # position's life, so its final state is only fully known
                 # once the trade closes.
                 "v6_audit": row.get("v6_audit"),
+                # ORB Long V10 only ("Dynamic Recovery State Engine After
+                # Early-Failure Warning" - see src/db.py's own
+                # EXTRA_STRATEGY_PRESETS comment and src/backtest_engine.py's
+                # own _v10_audit_record) - same nested-dict/off-the-CLOSE-leg
+                # reasoning as v6_audit just above, None for every non-V10
+                # strategy.
+                "v10_audit": row.get("v10_audit"),
                 # Point-in-time market/stock/setup context captured at
                 # entry (see src/entry_metrics.py) - off the OPEN leg
                 # (open_row), not the close leg, since these are all

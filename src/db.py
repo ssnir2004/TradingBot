@@ -2085,6 +2085,121 @@ EXTRA_STRATEGY_PRESETS = [
         "נוסף. **כלי מחקר בלבד - אל תפעיל LIVE.**",
     ),
     (
+        # ORB Long V10 - "Build ORB Long V10: Dynamic Recovery State Engine
+        # After Early-Failure Warning". Byte-for-byte copy of v4.2's own
+        # rules_json (same reasoning as V8's own comment above - not
+        # repeated here) with exactly one new opt-in key added under
+        # "exit": "dynamic_recovery". Entry logic, position sizing,
+        # commission model, hard stop initialization (-2.5R), and the
+        # trailing algorithm are ALL unchanged from v4.2 - see src.
+        # backtest_engine._evaluate_v10_recovery/_v10_audit_record, read
+        # (Step 2, position-open time) and acted on (Step 1, per-bar) as a
+        # pure ADDITION, never a modification of any existing line - v4/
+        # v4.1/v4.2/v4.3/v5/v5.1/V8/V9 never set this key, so it is
+        # structurally unreachable for them.
+        #
+        # Unlike V8/V9 (which tighten the hard stop IMMEDIATELY the
+        # instant the 10-minute "V6" rule fires), V10 treats that SAME
+        # unchanged rule as only a WARNING - it then keeps monitoring at
+        # 15/20/30/45 minutes (recovery vs deterioration signals, see
+        # _evaluate_v10_recovery's own docstring) and only ever tightens
+        # the stop (to -1.5R) once persistent failure is CONFIRMED across
+        # the 20m and 30m checkpoints (or the 45m final one) - a genuine
+        # recovery at any checkpoint cancels monitoring immediately,
+        # keeping the original -2.5R stop untouched. The position is
+        # NEVER closed by this engine itself, only its hard-stop LEVEL
+        # may change, and only after confirmation - a trade that warns but
+        # neither recovers nor confirms failure by 45m simply reverts to
+        # plain v4.2 management for the rest of its life.
+        "ORB Long V10 (Dynamic Recovery)",
+        {
+            "strategy_name": "ORB Long V10 (Dynamic Recovery)",
+            "direction": "long_only",
+            "es_vwap_filter": True,
+            "opening_range": {
+                "or_timeframe": "15m",
+                "confirm_timeframe": "5m",
+                "entry_timeframe": "5m",
+                "session": "new_york",
+                "session_open_et": "09:30",
+            },
+            "universe_filters": {
+                "index": "S&P 500",
+                "min_price_usd": 3.0,
+                "custom_universe": "sp500_marketcap_1b",
+            },
+            "volatility_filters": {
+                "V1_rvol_min": 2.0,
+                "V1_rvol_lookback_days": 14,
+                "V2_atr_period": 14,
+                "V2_atr_pct_tiers": [
+                    {"price_min": 3.0, "price_max": 20.0, "atr_pct_min": 4.0},
+                    {"price_min": 20.0, "price_max": 50.0, "atr_pct_min": 3.0},
+                    {"price_min": 50.0, "price_max": 100.0, "atr_pct_min": 2.0},
+                    {"price_min": 100.0, "price_max": None, "atr_pct_min": 1.5},
+                ],
+            },
+            "entry_confluence": {
+                "rsi_period": 14,
+                "rsi_rising_bars": 3,
+                "ema_period": 20,
+            },
+            "entry_models": {
+                "breakout": {"enabled": True},
+                "retest": {"enabled": True},
+            },
+            "time_filter": {"earliest_entry_et": "09:50", "latest_entry_et": "11:30", "force_close_et": "15:51"},
+            "exit": {
+                "management_style": "no_stop_delayed_trail",
+                "trailing_trigger_R": 1.20,
+                "hard_stop_R": 2.5,
+                "dynamic_recovery": {
+                    "checkpoint_offsets_minutes": [10, 15, 20, 30, 45],
+                    "current_r_max": -0.40,
+                    "rsi_delta_max": -5,
+                    "mfe_r_max": 0.30,
+                    "rsi_period": 14,
+                    "ema9_period": 9,
+                    "ema20_period": 20,
+                    "persistent_failure_stop_R": 1.5,
+                },
+            },
+            "risk": {
+                "max_risk_per_trade_pct": 1.0,
+                "max_position_size_pct_of_portfolio": 10,
+                "max_concurrent_positions": 5,
+                "min_stop_distance_pct": 0.25,
+                "initial_stop_r_multiplier": 1.40,
+                "position_size_multiplier": 2.0,
+            },
+        },
+        "aggressive",
+        "long",
+        "## מה זה עושה\n"
+        "גרסה V10 של ORB Long - **זהה לחלוטין** ל-v4.2 (יקום, כניסה, גודל פוזיציה, סטופ התחלתי "
+        "-2.5R, טריילינג) פרט לתוספת אחת: מנוע החלמה דינמי. בניגוד ל-V8/V9 (שמהדקים את הסטופ "
+        "מיד כש-V6 Risk Event מתרחש), V10 מתייחס לאותו אירוע כ**אזהרה בלבד** וממשיך לעקוב אחרי "
+        "הטרייד בעוד 4 נקודות בדיקה (15/20/30/45 דקות) לפני שהוא מחליט אם להדק את הסטופ.\n\n"
+        "## אירוע האזהרה (10 דקות)\n"
+        "אותו כלל V6 בדיוק כמו V8/V9 (Current R ≤ -0.40R, RSI Delta ≤ -5, חזרה לתוך ה-Opening "
+        "Range, אובדן EMA9, MFE R So Far ≤ +0.30R) - אבל כאן הוא רק מפעיל מעקב, לא נוגע בסטופ.\n\n"
+        "## מעקב החלמה/הידרדרות (15/20/30/45 דקות)\n"
+        "בכל נקודת בדיקה מחושבים 8 סיגנלי החלמה ו-8 סיגנלי הידרדרות (R-multiple, RSI, EMA9/20, "
+        "VWAP, Opening Range, מבנה מחיר, ווליום). החלמה מאושרת (ציון ≥4 + שיפור R) מבטלת את "
+        "המעקב ומשאירה את הסטופ המקורי -2.5R ללא שינוי. הידרדרות מאושרת פעמיים ברצף (20 ואז 30 "
+        "דקות, או סופית ב-45 דקות) מהדקת את הסטופ הקשיח ל--1.5R - **רק אם זה מהדק אותו בפועל** "
+        "(לעולם לא מרפה סטופ שכבר הדוק יותר), ולעולם לא סוגר את הטרייד באופן מיידי.\n\n"
+        "## הפעלת טריילינג ועדיפות\n"
+        "זהה לחלוטין ל-v4.2 - טריילינג תמיד גובר על V10, בכל שלב, ומפסיק את כל המעקב.\n\n"
+        "## פרופיל סיכון\n"
+        "דירוג: aggressive - אסטרטגיה חדשה לגמרי שלא נבדקה כלל. סיכון לעסקה (base): 1% | גודל "
+        "פוזיציה מקס': 10% | פוזיציות בו-זמנית: עד 5\n\n"
+        "## אזהרת סיכון - קרא לפני שאתה שוקל להפעיל\n"
+        "אין לזה שום היסטוריית בקטסט עדיין. כל אזהרות ORB Long v4.2/V8/V9 תקפות כאן. הרץ בקטסט "
+        "מקיף והשווה מול v4.2 (אותה עסקה בדיוק - הכניסות זהות, רק ניהול הסיכון שונה) לפני כל "
+        "שיקול נוסף. **כלי מחקר בלבד - אל תפעיל LIVE.**",
+    ),
+    (
         # v4 of ORB Short v3 - exact mirror of ORB Long v4 above, see its
         # own comment for the full explanation, not repeated here.
         "ORB Short v4 (Scaled Exit, Immediate Trail)",

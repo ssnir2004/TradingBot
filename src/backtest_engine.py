@@ -510,6 +510,432 @@ def _v6_audit_record(pos: dict, exit_reason: str | None, fill_price: float | Non
     }
 
 
+\
+# ============================================================ ORB v10 ===
+# "Dynamic Recovery State Engine After Early-Failure Warning" - the SAME
+# 10-minute V6 rule V8/V9 use, but treated as a WARNING rather than an
+# immediate stop-tightening trigger: a v10 position that warns keeps
+# monitoring at 15/20/30/45 minutes and only ever acts (tightening the
+# hard stop to -1.5R) once deterioration is CONFIRMED across the 20m and
+# 30m checkpoints (or the 45m final one) - a genuine recovery at any
+# checkpoint cancels monitoring immediately, keeping the original -2.5R
+# stop. See EXTRA_STRATEGY_PRESETS' own v10 comment in src/db.py.
+#
+# Entirely opt-in (exit_cfg["dynamic_recovery"]) - v4/v4.1/v4.2/v4.3/v5/
+# v5.1/v8/v9 never set this key, so pos never carries "dynamic_recovery"
+# for them and every function below is a pure no-op, same "opt-in key,
+# absent = untouched" discipline v4.1 -> v4.2's own hard_stop_R (and v8/
+# v9's own dynamic_risk_reduction) already established. v10 itself never
+# sets dynamic_risk_reduction, so it never touches _evaluate_v6_risk_
+# event/_v6_audit_record's own machinery either - the two mechanisms
+# coexist in this file without ever both firing for the same trade.
+
+_V10_STATE_NORMAL = "NORMAL"
+_V10_STATE_MONITORING_RECOVERY = "MONITORING_RECOVERY"
+_V10_STATE_RECOVERED = "RECOVERED"
+_V10_STATE_PERSISTENT_FAILURE = "PERSISTENT_FAILURE"
+_V10_STATE_TRAILING_ACTIVE = "TRAILING_ACTIVE"
+_V10_STATE_CLOSED_BEFORE_EVALUATION = "CLOSED_BEFORE_EVALUATION"
+_V10_STATE_MISSING_REQUIRED_DATA = "MISSING_REQUIRED_DATA"
+# EARLY_WARNING is a transient, same-call transition straight into
+# MONITORING_RECOVERY (see _evaluate_v10_recovery's own idx==0 branch) -
+# never actually observed as pos["dynamic_recovery"]["state"] between
+# calls, so it never needs its own branch below, only documenting here
+# that it's the required state name for the 1-tick window the spec asks
+# for.
+_V10_TERMINAL_STATES = (
+    _V10_STATE_RECOVERED, _V10_STATE_PERSISTENT_FAILURE, _V10_STATE_TRAILING_ACTIVE,
+    _V10_STATE_CLOSED_BEFORE_EVALUATION, _V10_STATE_MISSING_REQUIRED_DATA,
+)
+
+_V10_CHECKPOINT_OFFSETS_MINUTES = [10, 15, 20, 30, 45]  # index 0 = the 10m V6 warning check
+
+
+def _v10_point_in_time_features(dr: dict, pos: dict, intraday: pd.DataFrame, bar_ts: pd.Timestamp, side: str) -> dict:
+    """Every point-in-time value V10's own R1-R8/D1-D8 signals and audit
+    record need, computed ONLY off bars up to and including bar_ts (see
+    the spec's own "No Look-Ahead" rule) - same windowed-lookback
+    convention (orb._CONFLUENCE_LOOKBACK_BARS) V6's own _dynamic_risk_
+    reduction_check already uses for RSI/EMA9, extended here with EMA20
+    and session VWAP (orb._compute_vwap_series - the same session-reset
+    VWAP formula src.es_filter.py's own market-level version already
+    uses, just applied per-symbol instead of to ES)."""
+    entry_price, initial_stop = pos["entry_price"], pos["initial_stop"]
+    initial_risk_dist = (initial_stop - entry_price) if side == "short" else (entry_price - initial_stop)
+    sign = 1 if side == "long" else -1
+    cfg = dr["cfg"]
+
+    window = intraday[intraday.index <= bar_ts].iloc[-orb._CONFLUENCE_LOOKBACK_BARS:]
+    closes = window["Close"]
+    current_price = float(closes.iloc[-1])
+    rsi_series = orb._compute_rsi_series(closes, cfg.get("rsi_period", 14))
+    ema9_series = orb._compute_ema_series(closes, cfg.get("ema9_period", 9))
+    ema20_series = orb._compute_ema_series(closes, cfg.get("ema20_period", 20))
+    current_rsi = float(rsi_series.iloc[-1]) if not rsi_series.empty and not pd.isna(rsi_series.iloc[-1]) else None
+    current_ema9 = float(ema9_series.iloc[-1]) if not ema9_series.empty and not pd.isna(ema9_series.iloc[-1]) else None
+    current_ema20 = float(ema20_series.iloc[-1]) if not ema20_series.empty and not pd.isna(ema20_series.iloc[-1]) else None
+
+    today_bars = window[window.index.date == bar_ts.date()]
+    vwap_series = orb._compute_vwap_series(today_bars) if not today_bars.empty else pd.Series(dtype=float)
+    current_vwap = float(vwap_series.iloc[-1]) if not vwap_series.empty and not pd.isna(vwap_series.iloc[-1]) else None
+    vwap_dist_pct = ((current_price - current_vwap) / current_vwap * 100) if current_vwap else None
+
+    current_r = ((current_price - entry_price) / initial_risk_dist * sign) if initial_risk_dist > 0 else None
+    mfe_r = (
+        (((pos["mfe_price"] - entry_price) if side == "long" else (entry_price - pos["mfe_price"])) / initial_risk_dist)
+        if initial_risk_dist > 0 else None
+    )
+    mae_r = (
+        (((entry_price - pos["mae_price"]) if side == "long" else (pos["mae_price"] - entry_price)) / initial_risk_dist)
+        if initial_risk_dist > 0 and pos.get("mae_price") is not None else None
+    )
+    return {
+        "ts": bar_ts, "price": current_price, "rsi": current_rsi, "ema9": current_ema9, "ema20": current_ema20,
+        "vwap": current_vwap, "vwap_dist_pct": vwap_dist_pct,
+        "current_r": current_r, "mfe_r": mfe_r, "mae_r": mae_r,
+        "above_ema9": (current_price > current_ema9) if current_ema9 is not None else None,
+        "above_ema20": (current_price > current_ema20) if current_ema20 is not None else None,
+        "above_vwap": (current_price > current_vwap) if current_vwap is not None else None,
+        "bar_high": float(window["High"].iloc[-1]), "bar_low": float(window["Low"].iloc[-1]),
+    }
+
+
+def _v10_apply_persistent_failure_stop(pos: dict, dr: dict, side: str, bar_ts: pd.Timestamp) -> None:
+    """Tightens pos["hard_stop_price"] to the confirmed-persistent-failure
+    level (exit_cfg["dynamic_recovery"]["persistent_failure_stop_R"],
+    default 1.5) - ONLY if that's actually tighter than whatever is
+    already active ("never loosen a stop", the same one-way rule cycle.
+    _trailing_stop_decision and _evaluate_v6_risk_event's own tightening
+    already apply elsewhere in this file). The decision bar's own hard-
+    stop check (Step 1, earlier in this same bar, BEFORE this function
+    is ever called - see _evaluate_v10_recovery's own call site) already
+    ran against the PRE-existing level, so the newly-tightened level is
+    only ever checked starting the NEXT bar - see _V10_EXECUTION_ORDER_
+    CONVENTION for why this eliminates same-bar look-ahead by
+    construction, same reasoning as V6's own _V6_EXECUTION_ORDER_
+    CONVENTION."""
+    new_hard_stop_r = dr["cfg"].get("persistent_failure_stop_R", 1.5)
+    initial_risk_dist = (
+        (pos["initial_stop"] - pos["entry_price"]) if side == "short" else (pos["entry_price"] - pos["initial_stop"])
+    )
+    requested_price = None
+    if initial_risk_dist > 0:
+        requested_price = (
+            pos["entry_price"] + new_hard_stop_r * initial_risk_dist if side == "short"
+            else pos["entry_price"] - new_hard_stop_r * initial_risk_dist
+        )
+    dr["stop_before_r"] = dr["initial_hard_stop_r"]
+    dr["stop_before_price"] = pos.get("hard_stop_price")
+    dr["requested_stop_r"] = new_hard_stop_r
+    dr["requested_stop_price"] = requested_price
+
+    if requested_price is None or "hard_stop_price" not in pos:
+        dr["stop_after_r"] = dr["initial_hard_stop_r"]
+        dr["stop_after_price"] = pos.get("hard_stop_price")
+        dr["stop_changed"] = False
+        return
+
+    is_tighter = (requested_price > pos["hard_stop_price"]) if side == "long" else (requested_price < pos["hard_stop_price"])
+    if is_tighter:
+        pos["hard_stop_price"] = requested_price
+        dr["stop_after_r"] = new_hard_stop_r
+        dr["stop_after_price"] = requested_price
+        dr["stop_changed"] = True
+        dr["stop_change_ts"] = bar_ts
+    else:
+        dr["stop_after_r"] = dr["initial_hard_stop_r"]
+        dr["stop_after_price"] = pos.get("hard_stop_price")
+        dr["stop_changed"] = False
+
+
+# Documented once, referenced by _v10_audit_record's own "v10_execution_
+# order_convention" field - same conservative, no-look-ahead convention
+# _V6_EXECUTION_ORDER_CONVENTION already documents for V8/V9.
+_V10_EXECUTION_ORDER_CONVENTION = (
+    "Conservative, no look-ahead: a V10 persistent-failure decision is evaluated at the close of the scheduled "
+    "checkpoint bar and applied to pos['hard_stop_price'] only AFTER that same bar's own stop-out check has "
+    "already run against the PRE-existing (untightened) stop level. The tightened level is therefore only ever "
+    "checked against price movement in bars STRICTLY AFTER the decision bar - that decision bar's own High/Low is "
+    "never evaluated against the newly-tightened level, which eliminates any need to guess intrabar ordering "
+    "within that one bar by construction (v10_same_bar_ambiguity is therefore always False)."
+)
+
+
+def _evaluate_v10_recovery(pos: dict, intraday: pd.DataFrame, bar_ts: pd.Timestamp, side: str) -> None:
+    """V10's own per-bar state-machine driver - called UNCONDITIONALLY
+    for every open position, right after _update_excursion/_evaluate_v6_
+    risk_event and BEFORE the management_style dispatch (see Step 1's
+    own call site), same placement discipline _evaluate_v6_risk_event's
+    own docstring explains (trail_activated is read exactly as it stood
+    at the START of this bar). A no-op for any strategy that never set
+    pos["dynamic_recovery"] (every strategy except V10 itself).
+
+    IMPORTANT (see the spec's own "Do not exit immediately"): this NEVER
+    closes the position - only ever tightens pos["hard_stop_price"] via
+    _v10_apply_persistent_failure_stop, and even that only takes effect
+    starting the NEXT bar."""
+    dr = pos.get("dynamic_recovery")
+    if dr is None or dr["state"] in _V10_TERMINAL_STATES:
+        return
+
+    # Trailing Priority - can happen at ANY time (even before the 10m
+    # warning), and always wins outright over whatever V10 checkpoint is
+    # pending - see the spec's own "V10 must never delay or block
+    # trailing activation" / "Stop all V10 warning and recovery
+    # evaluations".
+    if pos.get("trail_activated"):
+        dr["state"] = _V10_STATE_TRAILING_ACTIVE
+        return
+
+    # Continuous per-bar accumulation since the 10m warning fired - volume
+    # is tracked cumulatively "since warning" (per the spec's own D8),
+    # while interval_high/interval_low reset at every checkpoint so
+    # "Higher High/Low Since Previous Checkpoint" (R7/D7) compares THIS
+    # interval's own extremes against the PRIOR interval's, not a single
+    # running value that can only ever move one direction.
+    if dr["warning_fired"] and bar_ts in intraday.index:
+        bar = intraday.loc[bar_ts]
+        bar_high, bar_low = float(bar["High"]), float(bar["Low"])
+        if float(bar["Close"]) >= float(bar["Open"]):
+            dr["up_volume_since_warning"] += float(bar.get("Volume") or 0)
+        else:
+            dr["down_volume_since_warning"] += float(bar.get("Volume") or 0)
+        dr["interval_high"] = bar_high if dr["interval_high"] is None else max(dr["interval_high"], bar_high)
+        dr["interval_low"] = bar_low if dr["interval_low"] is None else min(dr["interval_low"], bar_low)
+
+    idx = dr["next_checkpoint_idx"]
+    offsets = dr["checkpoints"]
+    if idx >= len(offsets):
+        return
+    scheduled_ts = dr["entry_ts"] + pd.Timedelta(minutes=offsets[idx])
+    if bar_ts < scheduled_ts:
+        return
+
+    dr["next_checkpoint_idx"] = idx + 1
+    checkpoint_minutes = offsets[idx]
+    feats = _v10_point_in_time_features(dr, pos, intraday, bar_ts, side)
+    entry_rsi = dr["entry_rsi"]
+
+    required_ok = bool(
+        feats["current_r"] is not None and feats["rsi"] is not None and entry_rsi is not None
+        and feats["mfe_r"] is not None and dr.get("or_high") is not None and dr.get("or_low") is not None
+    )
+    log_row = {
+        "checkpoint_minutes": checkpoint_minutes, "scheduled_ts": scheduled_ts, "actual_ts": bar_ts,
+        "delay_seconds": (bar_ts - scheduled_ts).total_seconds(),
+    }
+    if not required_ok:
+        dr["state"] = _V10_STATE_MISSING_REQUIRED_DATA
+        log_row["result"] = "MISSING_REQUIRED_DATA"
+        dr["checkpoint_log"].append(log_row)
+        return
+
+    # ---------------------------------------------------- 10m V6 warning
+    if idx == 0:
+        dr["warning_evaluated"] = True
+        returned_inside_or = bool(dr["or_low"] <= feats["price"] <= dr["or_high"])
+        lost_ema9 = bool(dr["entry_above_ema9"] is True and feats["above_ema9"] is False)
+        v6_conditions = {
+            "current_r": feats["current_r"] <= dr["cfg"].get("current_r_max", -0.40),
+            "rsi_delta": (feats["rsi"] - entry_rsi) <= dr["cfg"].get("rsi_delta_max", -5),
+            "returned_inside_or": returned_inside_or,
+            "lost_ema9": lost_ema9,
+            "mfe": feats["mfe_r"] <= dr["cfg"].get("mfe_r_max", 0.30),
+        }
+        warning_triggered = all(v6_conditions.values())
+        log_row.update({
+            "current_r": feats["current_r"], "rsi": feats["rsi"], "rsi_delta": feats["rsi"] - entry_rsi,
+            "mfe_r": feats["mfe_r"], "conditions": v6_conditions, "warning_triggered": warning_triggered,
+            "result": "WARNING_TRIGGERED" if warning_triggered else "NO_WARNING",
+        })
+        dr["checkpoint_log"].append(log_row)
+        if not warning_triggered:
+            # Standard V4.2 behavior continues untouched - the recovery
+            # engine never activates for this trade at all.
+            dr["next_checkpoint_idx"] = len(offsets)
+            return
+        dr["warning_fired"] = True
+        dr["warning_snapshot"] = feats
+        dr["prev_snapshot"] = feats
+        dr["interval_high"] = feats["price"]
+        dr["interval_low"] = feats["price"]
+        # state passes through EARLY_WARNING -> MONITORING_RECOVERY within
+        # this same call, per the spec's own "immediately transition".
+        dr["state"] = _V10_STATE_MONITORING_RECOVERY
+        return
+
+    # ---------------------------------------------- 15/20/30/45m checkpoints
+    warn, prev = dr["warning_snapshot"], dr["prev_snapshot"]
+    delta_r_from_warning = feats["current_r"] - warn["current_r"]
+    delta_r_from_prev = feats["current_r"] - prev["current_r"]
+    rsi_delta_from_entry = feats["rsi"] - entry_rsi
+    rsi_change_from_prev = feats["rsi"] - prev["rsi"]
+    warn_vwap_dist, prev_vwap_dist, cur_vwap_dist = warn.get("vwap_dist_pct"), prev.get("vwap_dist_pct"), feats.get("vwap_dist_pct")
+
+    this_interval_high, this_interval_low = dr["interval_high"], dr["interval_low"]
+    prev_interval_high, prev_interval_low = dr["prev_interval_high"], dr["prev_interval_low"]
+    # First post-warning checkpoint (15m) has no PRIOR interval to compare
+    # against yet (the warning bar itself is the interval's own start) -
+    # "not enough history" is reported as False, never fabricated True.
+    higher_high = bool(prev_interval_high is not None and this_interval_high is not None and this_interval_high > prev_interval_high)
+    higher_low = bool(prev_interval_low is not None and this_interval_low is not None and this_interval_low > prev_interval_low)
+
+    r1 = delta_r_from_warning >= 0.35
+    r2 = delta_r_from_prev >= 0.20
+    r3 = (feats["rsi"] - warn["rsi"]) >= 5
+    r4 = feats["above_ema9"] is True
+    reclaimed_vwap = bool(feats["above_vwap"] is True and warn["above_vwap"] is not True)
+    vwap_improved_since_warning = bool(warn_vwap_dist is not None and cur_vwap_dist is not None and (cur_vwap_dist - warn_vwap_dist) >= 0.20)
+    r5 = bool(reclaimed_vwap or vwap_improved_since_warning)
+    # Long-only: "moved back above OR High" and "no longer inside OR and
+    # exited to upside" are the SAME condition (there's no way to exit
+    # the OR "to the upside" other than crossing or_high) - collapsed here
+    # deliberately, not an oversight.
+    r6 = bool(feats["price"] > dr["or_high"])
+    r7 = bool(higher_high and higher_low)
+    r8 = (feats["mfe_r"] - warn["mfe_r"]) >= 0.30
+    recovery_score = sum(1 for x in (r1, r2, r3, r4, r5, r6, r7, r8) if x)
+
+    d1 = feats["current_r"] <= -1.25
+    d2 = delta_r_from_warning <= -0.30
+    d3 = feats["mfe_r"] <= 0.40
+    d4 = bool(feats["above_ema9"] is False and feats["above_ema20"] is False)
+    vwap_not_improving_vs_prev = bool(
+        prev_vwap_dist is None or cur_vwap_dist is None or cur_vwap_dist <= prev_vwap_dist
+    )
+    d5 = bool(feats["above_vwap"] is False and vwap_not_improving_vs_prev)
+    d6 = bool(rsi_delta_from_entry <= -7 and rsi_change_from_prev <= 0)
+    d7 = bool(not higher_high and not higher_low)
+    d8 = dr["down_volume_since_warning"] > dr["up_volume_since_warning"]
+    deterioration_score = sum(1 for x in (d1, d2, d3, d4, d5, d6, d7, d8) if x)
+
+    persistent_failure_confirmed_now = bool(
+        recovery_score <= 2 and deterioration_score >= 5
+        and feats["current_r"] <= -1.25 and feats["mfe_r"] <= 0.40 and not pos.get("trail_activated")
+    )
+    recovered_now = bool(recovery_score >= 4 and delta_r_from_warning >= 0.35)
+
+    action = "NONE"
+    if checkpoint_minutes == 15:
+        if recovery_score >= 4:
+            dr["recovery_detected_at_15m"] = True
+        # Observational only - the spec's own "Do not exit. Do not
+        # tighten the stop." for this checkpoint.
+    elif checkpoint_minutes == 20:
+        if recovered_now:
+            dr["state"], dr["recovery_confirmed_by_score"], action = _V10_STATE_RECOVERED, True, "RECOVERED"
+        elif persistent_failure_confirmed_now:
+            dr["persistent_failure_candidate_at_20m"] = True
+            action = "CANDIDATE_FLAGGED"
+    elif checkpoint_minutes == 30:
+        if recovered_now:
+            dr["state"], dr["recovery_confirmed_by_score"], action = _V10_STATE_RECOVERED, True, "RECOVERED"
+        elif dr["persistent_failure_candidate_at_20m"] and persistent_failure_confirmed_now:
+            dr["state"] = _V10_STATE_PERSISTENT_FAILURE
+            _v10_apply_persistent_failure_stop(pos, dr, side, bar_ts)
+            action = "PERSISTENT_FAILURE_STOP_TIGHTENED"
+    elif checkpoint_minutes == 45:
+        if recovery_score >= 4:  # final checkpoint's own recovery test omits the delta_r_from_warning gate (see spec)
+            dr["state"], dr["recovery_confirmed_by_score"], action = _V10_STATE_RECOVERED, True, "RECOVERED"
+        elif persistent_failure_confirmed_now:
+            dr["state"] = _V10_STATE_PERSISTENT_FAILURE
+            _v10_apply_persistent_failure_stop(pos, dr, side, bar_ts)
+            action = "PERSISTENT_FAILURE_STOP_TIGHTENED"
+        else:
+            # "Otherwise: Keep original V4.2 management, Stop V10
+            # monitoring" - operationally identical to RECOVERED (both
+            # just mean "use the untouched original stop from here on"),
+            # so reused rather than inventing a 9th state outside the
+            # spec's own required list - recovery_confirmed_by_score
+            # stays False so the audit/classification layer can still
+            # tell the two apart (an R1-R8-confirmed recovery vs this
+            # default fallthrough).
+            dr["state"], action = _V10_STATE_RECOVERED, "NO_ACTION_FINAL_CHECKPOINT"
+
+    log_row.update({
+        "current_r": feats["current_r"], "delta_r_from_prev": delta_r_from_prev, "delta_r_from_warning": delta_r_from_warning,
+        "rsi": feats["rsi"], "rsi_change_from_prev": rsi_change_from_prev, "rsi_change_from_warning": feats["rsi"] - warn["rsi"],
+        "mfe_r": feats["mfe_r"], "mae_r": feats["mae_r"],
+        "above_ema9": feats["above_ema9"], "above_ema20": feats["above_ema20"], "ema9_above_ema20":
+            (feats["ema9"] > feats["ema20"]) if feats["ema9"] is not None and feats["ema20"] is not None else None,
+        "above_vwap": feats["above_vwap"], "vwap_dist_pct": cur_vwap_dist,
+        "price_inside_opening_range": bool(dr["or_low"] <= feats["price"] <= dr["or_high"]),
+        "price_above_opening_range_high": bool(feats["price"] > dr["or_high"]),
+        "higher_high_since_prev_checkpoint": higher_high, "higher_low_since_prev_checkpoint": higher_low,
+        "up_volume_since_warning": dr["up_volume_since_warning"], "down_volume_since_warning": dr["down_volume_since_warning"],
+        "r1": r1, "r2": r2, "r3": r3, "r4": r4, "r5": r5, "r6": r6, "r7": r7, "r8": r8, "recovery_score": recovery_score,
+        "d1": d1, "d2": d2, "d3": d3, "d4": d4, "d5": d5, "d6": d6, "d7": d7, "d8": d8, "deterioration_score": deterioration_score,
+        "state_before": _V10_STATE_MONITORING_RECOVERY, "state_after": dr["state"], "action_taken": action,
+    })
+    dr["checkpoint_log"].append(log_row)
+
+    dr["prev_snapshot"] = feats
+    dr["prev_interval_high"], dr["prev_interval_low"] = this_interval_high, this_interval_low
+    dr["interval_high"], dr["interval_low"] = None, None
+
+
+def _v10_hard_stop_exit_reason(pos: dict) -> str:
+    """"hard_stop" for a plain/untightened stop (V4.2's own original
+    -2.5R, matching every other strategy's own convention so downstream
+    exit-reason-keyed analytics keep working unchanged) - a DISTINCT
+    "v10_persistent_failure_stop" only when THIS exact hard_stop_price is
+    the one V10's own PERSISTENT_FAILURE action tightened (see the
+    spec's own "use a distinct exit reason", mirrored from V6's own
+    reasoning for why v8/v9 do NOT get a separate string - here the spec
+    explicitly asks for one, so it gets one)."""
+    dr = pos.get("dynamic_recovery")
+    if dr is not None and dr.get("state") == _V10_STATE_PERSISTENT_FAILURE and dr.get("stop_changed"):
+        return "v10_persistent_failure_stop"
+    return "hard_stop"
+
+
+def _v10_audit_record(pos: dict, exit_reason: str | None, fill_price: float | None, exit_ts) -> dict | None:
+    """Builds the V10 audit record for one closed trade, from whatever
+    state _evaluate_v10_recovery already accumulated on pos["dynamic_
+    recovery"] over the position's life - called once, right before
+    EVERY trades.append({...}) call in simulate_orb_strategy (same "every
+    exit path reports identically" discipline _v6_audit_record already
+    establishes). None for any non-V10 strategy (dynamic_recovery never
+    set on pos at all)."""
+    dr = pos.get("dynamic_recovery")
+    if dr is None:
+        return None
+
+    if not dr["warning_evaluated"] and dr["state"] == _V10_STATE_NORMAL:
+        # The ONLY way _evaluate_v10_recovery can have never reached even
+        # the 10m warning check is the trade closing before any bar ever
+        # reached entry_ts + 10 minutes.
+        dr["state"] = _V10_STATE_CLOSED_BEFORE_EVALUATION
+
+    warn = dr.get("warning_snapshot") or {}
+    adjusted_stop_hit = bool(dr.get("stop_changed") and exit_reason == "v10_persistent_failure_stop")
+
+    return {
+        "v10_warning_evaluated": dr["warning_evaluated"],
+        "v10_warning_triggered": dr["warning_fired"],
+        "v10_state": dr["state"],
+        "v10_recovery_confirmed_by_score": dr.get("recovery_confirmed_by_score", False),
+        "v10_recovery_detected_at_15m": dr.get("recovery_detected_at_15m", False),
+        "v10_persistent_failure_candidate_at_20m": dr.get("persistent_failure_candidate_at_20m", False),
+        "10m_current_r": warn.get("current_r"), "10m_rsi": warn.get("rsi"),
+        "10m_rsi_delta": (warn["rsi"] - dr["entry_rsi"]) if warn.get("rsi") is not None and dr.get("entry_rsi") is not None else None,
+        "10m_mfe_r": warn.get("mfe_r"), "10m_mae_r": warn.get("mae_r"),
+        "10m_above_ema9": warn.get("above_ema9"), "10m_above_ema20": warn.get("above_ema20"), "10m_above_vwap": warn.get("above_vwap"),
+        "checkpoints_evaluated": len(dr["checkpoint_log"]),
+        "checkpoint_log": dr["checkpoint_log"],
+        "stop_before_v10_r": dr.get("stop_before_r"), "stop_before_v10_price": dr.get("stop_before_price"),
+        "requested_v10_stop_r": dr.get("requested_stop_r"), "requested_v10_stop_price": dr.get("requested_stop_price"),
+        "stop_after_v10_r": dr.get("stop_after_r"), "stop_after_v10_price": dr.get("stop_after_price"),
+        "v10_stop_changed": bool(dr.get("stop_changed")),
+        "v10_stop_change_timestamp": dr["stop_change_ts"].isoformat() if dr.get("stop_change_ts") is not None else None,
+        "adjusted_stop_hit": adjusted_stop_hit,
+        "adjusted_stop_hit_timestamp": exit_ts.isoformat() if adjusted_stop_hit and hasattr(exit_ts, "isoformat") else (exit_ts if adjusted_stop_hit else None),
+        "adjusted_stop_fill_price": fill_price if adjusted_stop_hit else None,
+        "v10_same_bar_ambiguity": False,
+        "v10_execution_order_convention": _V10_EXECUTION_ORDER_CONVENTION,
+    }
+
+
 def _es_day_groups(es_intraday: pd.DataFrame | None) -> dict:
     """Same per-day split as day_groups_by_symbol, but for the one shared
     ES series every symbol's own tagging reads from (see _es_filter_pass)
@@ -1194,6 +1620,7 @@ def simulate_orb_strategy(
                         "trail_activated": pos.get("trail_activated", False),
                         "trail_activated_at_r": pos.get("trail_activated_at_r"),
                         "v6_audit": _v6_audit_record(pos, "eod_close", None, bar_ts),
+                        "v10_audit": _v10_audit_record(pos, "eod_close", None, bar_ts),
                     })
                 open_positions.clear()
                 break
@@ -1206,7 +1633,6 @@ def simulate_orb_strategy(
                 pos = open_positions[symbol]
                 this_bar = intraday.loc[[bar_ts]]
                 _update_excursion(pos, intraday.loc[bar_ts])
-                _evaluate_v6_risk_event(pos, intraday, bar_ts, side)
 
                 if management_style == "fixed_target_no_trail":
                     # Stop or fixed target, whichever hits first this bar.
@@ -1361,6 +1787,16 @@ def simulate_orb_strategy(
                     # above when the very first candidate isn't valid/
                     # improving yet.
                     if pos["trail_activated"]:
+                        # Trailing Priority (V6/V10 alike): hard_stop_price is
+                        # never even checked once trailing is active, so
+                        # calling these here (before the trailing-stop check
+                        # below, which never touches hard_stop_price) carries
+                        # no look-ahead risk - only here to let each function
+                        # correctly transition to its own "trailing is/became
+                        # active" terminal state instead of staying PENDING
+                        # forever once a trade reaches this branch.
+                        _evaluate_v6_risk_event(pos, intraday, bar_ts, side)
+                        _evaluate_v10_recovery(pos, intraday, bar_ts, side)
                         stop_hit = _find_stop_out(this_bar, pos["stop_price"], side)
                         if stop_hit is not None:
                             trade_id += 1
@@ -1372,6 +1808,7 @@ def simulate_orb_strategy(
                                 "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
                                 "trail_activated": True, "trail_activated_at_r": pos["trail_activated_at_r"],
                                 "v6_audit": _v6_audit_record(pos, "trailing_stop", pos["stop_price"], bar_ts),
+                                "v10_audit": _v10_audit_record(pos, "trailing_stop", pos["stop_price"], bar_ts),
                             })
                             del open_positions[symbol]
                             continue
@@ -1402,28 +1839,54 @@ def simulate_orb_strategy(
                             hard_stop_hit = _find_stop_out(this_bar, pos["hard_stop_price"], side)
                             if hard_stop_hit is not None:
                                 trade_id += 1
+                                # exit_reason stays "hard_stop" whether this was
+                                # the original -2.5R level or a v8/v9 TIGHTENED
+                                # one - never a new exit_reason string, so
+                                # anything downstream keyed off exit_reason ==
+                                # "hard_stop" (e.g. src.telemetry_engine.py's
+                                # own _rule_outcome_category) keeps working
+                                # unchanged for v8/v9 trades too; v6_audit (see
+                                # EXTRA_STRATEGY_PRESETS' own v8/v9 comment in
+                                # src/db.py) is how a report tells the two
+                                # apart. V10 is the ONE exception - its own spec
+                                # explicitly asks for a distinct exit_reason
+                                # when ITS OWN confirmed-persistent-failure stop
+                                # is what actually fired (see _v10_hard_stop_
+                                # exit_reason's own docstring); a no-op "hard_
+                                # stop" for every other strategy, V10 included
+                                # before/without a confirmed persistent failure.
+                                hard_stop_exit_reason = _v10_hard_stop_exit_reason(pos)
                                 trades.append({
                                     "id": trade_id, "symbol": symbol, "side": close_action,
                                     "fill_price": pos["hard_stop_price"], "size": pos["qty"],
                                     "timestamp_iso": bar_ts.isoformat(),
-                                    # exit_reason stays "hard_stop" whether this
-                                    # was the original -2.5R level or a v8/v9
-                                    # TIGHTENED one - never a new exit_reason
-                                    # string, so anything downstream keyed off
-                                    # exit_reason == "hard_stop" (e.g. src.
-                                    # telemetry_engine.py's own _rule_outcome_
-                                    # category) keeps working unchanged for v8/
-                                    # v9 trades too. v6_audit (see EXTRA_
-                                    # STRATEGY_PRESETS' own v8/v9 comment in
-                                    # src/db.py) is how a report tells the two
-                                    # apart.
-                                    "exit_reason": "hard_stop", "commission": commission_per_trade,
+                                    "exit_reason": hard_stop_exit_reason, "commission": commission_per_trade,
                                     "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
                                     "trail_activated": False, "trail_activated_at_r": None,
                                     "v6_audit": _v6_audit_record(pos, "hard_stop", pos["hard_stop_price"], bar_ts),
+                                    "v10_audit": _v10_audit_record(pos, hard_stop_exit_reason, pos["hard_stop_price"], bar_ts),
                                 })
                                 del open_positions[symbol]
                                 continue
+
+                        # V6/V10 evaluated HERE - strictly AFTER this bar's
+                        # own hard-stop check just above already ran against
+                        # the PRE-existing (untightened) level, never before
+                        # it. This is what actually makes the "no look-ahead,
+                        # only takes effect starting the NEXT bar" claim in
+                        # _V6_EXECUTION_ORDER_CONVENTION/_V10_EXECUTION_ORDER_
+                        # CONVENTION true - an EARLIER version of this file
+                        # called both functions unconditionally before the
+                        # whole management_style dispatch (so a same-bar
+                        # tightening WAS visible to that same bar's own hard-
+                        # stop check, a real look-ahead bug caught while
+                        # building V10 and fixed here for V6/V8/V9 too, not
+                        # just V10). trail_activated is still read correctly
+                        # as "not yet activated this bar" by both functions,
+                        # since the mfe_r/trailing-activation check below has
+                        # not run yet at this point either.
+                        _evaluate_v6_risk_event(pos, intraday, bar_ts, side)
+                        _evaluate_v10_recovery(pos, intraday, bar_ts, side)
 
                         initial_risk = (pos["initial_stop"] - pos["entry_price"]) if side == "short" else (pos["entry_price"] - pos["initial_stop"])
                         mfe_r = (
@@ -1773,6 +2236,56 @@ def simulate_orb_strategy(
                                 "initial_hard_stop_r": exit_cfg.get("hard_stop_R"),
                                 "checked": False, "actual_ts": None, "reason": None,
                             }
+                        # ORB v10 only (exit_cfg["dynamic_recovery"] - see
+                        # EXTRA_STRATEGY_PRESETS' own v10 comment in src/db.py,
+                        # "Build ORB Long V10 - Dynamic Recovery State Engine
+                        # After Early-Failure Warning"). Mutually exclusive
+                        # with dynamic_risk_reduction above in practice (V10
+                        # never sets that key, V8/V9 never set this one), but
+                        # nothing here actually depends on that - each is
+                        # simply absent (None) on `pos` for every strategy
+                        # that doesn't opt into it, same "opt-in key, absent =
+                        # untouched" discipline as everywhere else in this
+                        # file. entry_rsi/entry_above_ema9 computed the exact
+                        # same windowed-lookback way as dynamic_risk_
+                        # reduction's own (V10's 10-minute check reuses the
+                        # unchanged V6 rule verbatim, just as a warning instead
+                        # of an immediate trigger - see _evaluate_v10_
+                        # recovery's own idx==0 branch).
+                        recovery_cfg = exit_cfg.get("dynamic_recovery")
+                        if recovery_cfg is not None:
+                            v10_entry_window = intraday[intraday.index <= bar_ts]["Close"].iloc[-orb._CONFLUENCE_LOOKBACK_BARS:]
+                            v10_entry_rsi_series = orb._compute_rsi_series(v10_entry_window, recovery_cfg.get("rsi_period", 14))
+                            v10_entry_ema_series = orb._compute_ema_series(v10_entry_window, recovery_cfg.get("ema9_period", 9))
+                            v10_entry_rsi = (
+                                float(v10_entry_rsi_series.iloc[-1])
+                                if not v10_entry_rsi_series.empty and not pd.isna(v10_entry_rsi_series.iloc[-1]) else None
+                            )
+                            v10_entry_ema9 = (
+                                float(v10_entry_ema_series.iloc[-1])
+                                if not v10_entry_ema_series.empty and not pd.isna(v10_entry_ema_series.iloc[-1]) else None
+                            )
+                            open_positions[symbol]["dynamic_recovery"] = {
+                                "cfg": recovery_cfg, "entry_ts": bar_ts,
+                                "checkpoints": recovery_cfg.get("checkpoint_offsets_minutes", list(_V10_CHECKPOINT_OFFSETS_MINUTES)),
+                                "next_checkpoint_idx": 0, "state": _V10_STATE_NORMAL,
+                                "warning_evaluated": False, "warning_fired": False,
+                                "warning_snapshot": None, "prev_snapshot": None,
+                                "or_high": detail.get("or_high"), "or_low": detail.get("or_low"),
+                                "entry_rsi": v10_entry_rsi,
+                                "entry_above_ema9": (price > v10_entry_ema9) if v10_entry_ema9 is not None else None,
+                                "initial_hard_stop_r": exit_cfg.get("hard_stop_R"),
+                                "up_volume_since_warning": 0.0, "down_volume_since_warning": 0.0,
+                                "interval_high": None, "interval_low": None,
+                                "prev_interval_high": None, "prev_interval_low": None,
+                                "persistent_failure_candidate_at_20m": False,
+                                "recovery_detected_at_15m": False, "recovery_confirmed_by_score": False,
+                                "stop_before_r": None, "stop_before_price": None,
+                                "requested_stop_r": None, "requested_stop_price": None,
+                                "stop_after_r": None, "stop_after_price": None,
+                                "stop_changed": False, "stop_change_ts": None,
+                                "checkpoint_log": [],
+                            }
                     entries_today += 1
 
         for symbol, pos in open_positions.items():
@@ -1793,6 +2306,7 @@ def simulate_orb_strategy(
                 "trail_activated": pos.get("trail_activated", False),
                 "trail_activated_at_r": pos.get("trail_activated_at_r"),
                 "v6_audit": _v6_audit_record(pos, "eod_close", None, day_bars.index[-1]),
+                "v10_audit": _v10_audit_record(pos, "eod_close", None, day_bars.index[-1]),
             })
 
     return {"trades": trades, "skipped_symbols": skipped, "filter_stats": filter_stats}
