@@ -1521,27 +1521,62 @@ async function loadRiskReductionReport(backtestId, baselineId, variantIds, conta
 function renderRiskReductionReportHtml(report) {
   const fmt2 = (v) => (v === null || v === undefined) ? "-" : Number(v).toFixed(2);
   const fmt3 = (v) => (v === null || v === undefined) ? "-" : Number(v).toFixed(3);
+  const bool = (v) => v === null || v === undefined ? "-" : (v ? "✓" : "✗");
   const rows = [report.baseline, ...report.variants];
   const coreTable = `
     <div class="table-responsive">
       <table class="table table-sm mono mb-3">
-        <thead><tr><th>Strategy</th><th>Trades</th><th>Win %</th><th>Net P&amp;L</th><th>Avg Final R</th><th>Median Final R</th><th>Expectancy $</th><th>Profit Factor</th><th>Max Drawdown $</th></tr></thead>
+        <thead><tr><th>Strategy</th><th>Trades</th><th>Win %</th><th>Net P&amp;L</th><th>Avg Final R</th><th>Median Final R</th><th>Expectancy R</th><th>Profit Factor</th><th>Max Drawdown $</th><th>Max Drawdown R</th><th>Longest Losing Streak</th></tr></thead>
         <tbody>
           ${rows.map(r => {
             const cm = r.core_metrics;
-            return `<tr><td>${r.label}</td><td>${cm.total_trades}</td><td>${cm.win_rate_pct}%</td><td>$${fmt2(cm.net_pnl_usd)}</td><td>${fmt3(cm.avg_final_r)}</td><td>${fmt3(cm.median_final_r)}</td><td>$${fmt2(cm.expectancy_usd)}</td><td>${cm.profit_factor}</td><td>$${fmt2(cm.max_drawdown_usd)}</td></tr>`;
+            return `<tr><td>${r.label}</td><td>${cm.total_trades}</td><td>${cm.win_rate_pct}%</td><td>$${fmt2(cm.net_pnl_usd)}</td><td>${fmt3(cm.avg_final_r)}</td><td>${fmt3(cm.median_final_r)}</td><td>${fmt3(cm.expectancy_r)}</td><td>${cm.profit_factor}</td><td>$${fmt2(cm.max_drawdown_usd)}</td><td>${fmt3(cm.max_drawdown_r)}</td><td>${cm.longest_losing_streak ?? "-"}</td></tr>`;
           }).join("")}
         </tbody>
       </table>
     </div>`;
-  const variantSections = report.variants.map(v => `
-    <div class="mb-3">
-      <div class="fw-bold small">${v.label} — Risk Event Metrics</div>
+
+  // "V8 minus V4.2" delta columns - only meaningful for variants (the
+  // baseline compared against itself is not shown).
+  const deltaTable = `
+    <div class="table-responsive">
+      <table class="table table-sm mono mb-3">
+        <thead><tr><th>Strategy vs ${report.baseline.label}</th><th>Net P&amp;L Δ</th><th>Total Δ R</th><th>Profit Factor Δ</th><th>Expectancy Δ R</th><th>Max Drawdown Δ $</th><th>Win Rate Δ %</th></tr></thead>
+        <tbody>
+          ${report.variants.map(v => {
+            const d = v.summary_deltas;
+            return `<tr><td>${v.label}</td><td>$${fmt2(d.net_pnl_delta_usd)}</td><td>${fmt3(d.total_delta_r)}</td><td>${d.profit_factor_delta === null ? "-" : fmt3(d.profit_factor_delta)}</td><td>${fmt3(d.expectancy_delta_r)}</td><td>$${fmt2(d.max_drawdown_delta_usd)}</td><td>${fmt2(d.win_rate_delta_pct)}%</td></tr>`;
+          }).join("")}
+        </tbody>
+      </table>
+    </div>`;
+
+  const variantSections = report.variants.map(v => {
+    const ep = v.entry_parity;
+    const parityBadge = ep.parity_ok
+      ? `<span class="badge bg-success">Parity OK</span>`
+      : `<span class="badge bg-danger">Parity FAILED — comparison not conclusive</span>`;
+    const recon = v.reconciliation_checks;
+    const reconBadge = recon.all_checks_passed
+      ? `<span class="badge bg-success">Reconciliation checks passed</span>`
+      : `<span class="badge bg-danger">Reconciliation checks FAILED</span>`;
+    const vm = v.v6_event_summary_metrics;
+    const trigRows = v.v6_triggered_trades_rows;
+    const trigSummary = v.v6_triggered_trades_summary;
+    return `
+    <div class="mb-4">
+      <div class="fw-bold small">${v.label}</div>
       <div class="small text-muted mb-1">
-        ${v.risk_event_metrics.risk_events} risk event(s) out of ${v.risk_event_metrics.total_trades} trade(s)
-        (${v.risk_event_metrics.risk_event_pct ?? "-"}%) · Later hit adjusted stop: ${v.risk_event_metrics.later_hit_adjusted_stop} ·
-        Later activated trailing: ${v.risk_event_metrics.later_activated_trailing} ·
-        Later became winner: ${v.risk_event_metrics.later_became_winner} · Later became loser: ${v.risk_event_metrics.later_became_loser}
+        Entry Parity — ${parityBadge} · V4.2: ${ep.v4_2_total_trades} · Variant: ${ep.variant_total_trades} ·
+        Matched: ${ep.matched_trades} · V4.2-only: ${ep.v4_2_only_trades} · Variant-only: ${ep.variant_only_trades} ·
+        Price mismatches: ${ep.entry_price_mismatches} · Size mismatches: ${ep.position_size_mismatches}
+      </div>
+      <div class="small text-muted mb-1">
+        V6 Event Summary — Eligible: ${vm.trades_eligible_for_evaluation} (excluded: ${vm.excluded_trade_closed} closed / ${vm.excluded_trailing_active} trailing-active / ${vm.excluded_missing_data} missing-data) ·
+        Evaluated: ${vm.trades_evaluated} · Triggered: <strong>${vm.v6_risk_events_triggered}</strong> (${vm.pct_eligible_triggering ?? "-"}% of eligible) ·
+        Stops Tightened: ${vm.stops_actually_tightened} · Adjusted Stop Hit: ${vm.adjusted_stops_hit} ·
+        Later Trailing (no hit): ${vm.triggered_later_activated_trailing} · Ended Winner: ${vm.triggered_ended_winner} · Ended Loser: ${vm.triggered_ended_loser} ·
+        Saved Loss: ${vm.saved_loss_trades} · Prevented Recovery: ${vm.prevented_recovery_trades} · Ambiguous: ${vm.ambiguous_same_bar_intrabar}
       </div>
       <div class="small text-muted mb-1">
         Hard Stop Impact — Trades Saved: <strong>${v.hard_stop_impact.trades_saved}</strong> ·
@@ -1552,30 +1587,35 @@ function renderRiskReductionReportHtml(report) {
         Delta Analysis (vs ${report.baseline.label}) — Matched: ${v.delta_analysis.matched_trades}
         ${v.delta_analysis.unmatched_trades ? ` (${v.delta_analysis.unmatched_trades} unmatched)` : ""} ·
         Total Delta R: ${fmt3(v.delta_analysis.total_delta_r)} · Avg Delta R: ${fmt3(v.delta_analysis.avg_delta_r)} ·
-        Median Delta R: ${fmt3(v.delta_analysis.median_delta_r)}
+        Median Delta R: ${fmt3(v.delta_analysis.median_delta_r)} · Total Delta P&amp;L: $${fmt2(v.delta_analysis.total_delta_pnl_usd)}
       </div>
-      ${v.risk_event_trades.length ? `
+      <div class="small mb-2">${reconBadge}</div>
+      <div class="fw-bold small">V6 Triggered Trades (${trigSummary.triggers})</div>
+      ${trigRows.length ? `
       <div class="table-responsive">
         <table class="table table-sm table-hover mono">
-          <thead><tr><th>Symbol</th><th>Entry Date</th><th>10m Current R</th><th>10m RSI Delta</th><th>10m MFE R</th><th>Original v4.2 Result</th>
-            ${Object.keys(v.risk_event_trades[0]).filter(k => k.endsWith("_result") && k !== "original_v42_result").map(k => `<th>${k.replace("_result", "")}</th>`).join("")}
-          </tr></thead>
+          <thead><tr><th>Symbol</th><th>Entry</th><th>Exit</th><th>Exit Reason</th><th>Stop Changed</th><th>Adjusted Stop Hit</th><th>Classification</th><th>V4.2 Final R</th><th>Variant Final R</th><th>Δ R</th><th>Δ P&amp;L</th></tr></thead>
           <tbody>
-            ${v.risk_event_trades.map(row => `
-              <tr><td>${row.symbol}</td><td>${row.entry_date}</td><td>${fmt3(row["10m_current_r"])}</td><td>${fmt2(row["10m_rsi_delta"])}</td>
-                <td>${fmt3(row["10m_mfe_r"])}</td><td>${fmt3(row.original_v42_result)}</td>
-                ${Object.keys(row).filter(k => k.endsWith("_result") && k !== "original_v42_result").map(k => `<td>${fmt3(row[k])}</td>`).join("")}
+            ${trigRows.map(row => `
+              <tr><td>${row.symbol}</td><td>${row.entry_time}</td><td>${row.exit_time ?? "-"}</td><td>${row.exit_reason ?? "-"}</td>
+                <td>${bool(row.v6_stop_changed)}</td><td>${bool(row.adjusted_stop_hit)}</td><td>${row.classification ?? "-"}</td>
+                <td>${fmt3(row.v4_2_final_r)}</td><td>${fmt3(row.variant_final_r)}</td><td>${fmt3(row.delta_r)}</td><td>${row.delta_pnl_usd == null ? "-" : "$" + fmt2(row.delta_pnl_usd)}</td>
               </tr>`).join("")}
           </tbody>
         </table>
-      </div>` : `<div class="small text-muted">No Risk Events for this variant in this scope.</div>`}
-    </div>`).join("");
-  const winnerHtml = report.winner ? `
+      </div>` : `<div class="small text-muted">No V6 Risk Events triggered for this variant in this scope.</div>`}
+    </div>`;
+  }).join("");
+
+  const winnerHtml = report.winner ? (report.winner.verdict_blocked ? `
+    <div class="alert alert-warning small py-2 mb-0">
+      <strong>V8 vs V9 verdict blocked:</strong> ${report.winner.reason}
+    </div>` : `
     <div class="alert alert-secondary small py-2 mb-0">
       <strong>V8 vs V9:</strong> Better Net P&amp;L: ${report.winner.better_net_pnl} · Better Profit Factor: ${report.winner.better_profit_factor} ·
       Better Max Drawdown: ${report.winner.better_drawdown} · Better Expectancy: ${report.winner.better_expectancy}
-    </div>` : "";
-  return coreTable + variantSections + winnerHtml;
+    </div>`) : "";
+  return coreTable + deltaTable + variantSections + winnerHtml;
 }
 
 async function pollBacktest(id) {

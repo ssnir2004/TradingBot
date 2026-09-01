@@ -125,19 +125,16 @@ def pair_trades(rows: list[dict]) -> list[dict]:
                 "trail_activated_at_r": row.get("trail_activated_at_r"),
                 # ORB Long V8/V9 only ("Dynamic Risk Reduction Based On V6
                 # Detection" - see src/db.py's own EXTRA_STRATEGY_PRESETS
-                # comment and src/backtest_engine.py's own _dynamic_risk_
-                # reduction_check) - False/None for every other strategy,
-                # which never sets these on a trade row at all. Off the
-                # CLOSE leg (`row`), same reasoning as mfe_price/trail_
+                # comment and src/backtest_engine.py's own _v6_audit_record)
+                # - the FULL V6 Risk Event audit trail as one nested dict
+                # (every field src.risk_reduction_report.py's own "Mandatory
+                # Trade-Level Audit Fields" reads), None for every other
+                # strategy, which never sets this on a trade row at all. Off
+                # the CLOSE leg (`row`), same reasoning as mfe_price/trail_
                 # activated above - the Risk Event fires DURING the
                 # position's life, so its final state is only fully known
                 # once the trade closes.
-                "risk_event_triggered": row.get("risk_event_triggered", False),
-                "risk_event_10m_current_r": row.get("risk_event_10m_current_r"),
-                "risk_event_10m_rsi_delta": row.get("risk_event_10m_rsi_delta"),
-                "risk_event_10m_mfe_r": row.get("risk_event_10m_mfe_r"),
-                "hard_stop_tightened": row.get("hard_stop_tightened", False),
-                "risk_event_stop_tightened_to_r": row.get("risk_event_stop_tightened_to_r"),
+                "v6_audit": row.get("v6_audit"),
                 # Point-in-time market/stock/setup context captured at
                 # entry (see src/entry_metrics.py) - off the OPEN leg
                 # (open_row), not the close leg, since these are all

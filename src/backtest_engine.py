@@ -204,18 +204,18 @@ def _update_excursion(pos: dict, bar) -> None:
 
 
 def _dynamic_risk_reduction_check(pos: dict, drr: dict, intraday: pd.DataFrame, bar_ts: pd.Timestamp, side: str) -> dict:
-    """ORB Long V8/V9's own "V6 Risk Event" detection (see EXTRA_STRATEGY_
-    PRESETS' own v8/v9 comment in src/db.py, "Build ORB Long V8 and V9 -
-    Dynamic Risk Reduction Based On V6 Detection") - the SAME 10-minute
+    """ORB Long V8/V9's own "V6 Risk Event" condition-level evaluation
+    (see EXTRA_STRATEGY_PRESETS' own v8/v9 comment in src/db.py, "Fix and
+    Validate ORB Long V8 Dynamic Risk Reduction") - the SAME 10-minute
     rule src/telemetry_engine.py's own "Early Failure V6" already
     evaluates POST-HOC on already-closed trades (see its own _early_
-    failure_v6), but computed LIVE here, once, at the first bar where the
-    position has been open for at least dynamic_risk_reduction's own
-    trigger_offset_minutes. This is the only place in this codebase RSI/
-    EMA9 are computed DURING an open position's own life - telemetry_
-    engine.py is explicitly passive/read-only/post-hoc (see its own
-    module docstring: "NEVER read by any strategy's entry/exit decision")
-    and is never imported or called from here.
+    failure_v6), but computed LIVE here instead, once per position, at
+    the first bar >= drr["scheduled_ts"] (see _evaluate_v6_risk_event,
+    the only caller). This is the only place in this codebase RSI/EMA9
+    are computed DURING an open position's own life - telemetry_engine.py
+    is explicitly passive/read-only/post-hoc (see its own module
+    docstring: "NEVER read by any strategy's entry/exit decision") and is
+    never imported or called from here.
 
     Reuses orb._compute_rsi_series/_compute_ema_series over a trailing
     orb._CONFLUENCE_LOOKBACK_BARS window of the symbol's own continuous
@@ -223,17 +223,28 @@ def _dynamic_risk_reduction_check(pos: dict, drr: dict, intraday: pd.DataFrame, 
     _trend_confluence_ok already uses for entry-time RSI/EMA (see its own
     docstring for why windowing doesn't change the converged result) -
     rather than telemetry_engine.py's own indicator frame, which computes
-    over a symbol's ENTIRE cached history in one call (built for a batch
-    post-hoc pass over every trade at once, not a single point-in-time
-    check on one still-open position).
+    over a symbol's ENTIRE cached history in one call. Uses ONLY `intraday`
+    rows at or before `bar_ts` and `pos["mfe_price"]` (already intrabar-
+    accurate as of this exact bar via _update_excursion, called before
+    this function ever runs) - no future bar, no final trade outcome, no
+    final MFE/MAE is ever read here (see the spec's own "No Look-Ahead
+    Test"). Values are never rounded before the condition comparisons
+    below - only _round() at export/display time elsewhere.
 
-    Returns every value the "Risk Event Trade Table"/reporting needs
-    (current_r, rsi_delta, mfe_r_so_far, returned_inside_or, lost_ema9,
-    triggered) - None (never a fabricated 0) wherever a value couldn't be
-    computed (insufficient RSI/EMA warmup, initial_risk_dist <= 0), and
-    `triggered` is then simply False in that case - same "insufficient
-    data means False, not unknown" convention orb._rsi_trending/_trend_
-    confluence_ok already establish, never silently treated as a pass."""
+    Every condition (condition_current_r/condition_rsi_delta/condition_
+    returned_inside_or/condition_lost_ema9/condition_mfe) is computed
+    INDEPENDENTLY, never short-circuited, so a non-triggering trade's own
+    audit record can show exactly which condition(s) failed - None (never
+    a fabricated pass/fail) wherever its own required input couldn't be
+    computed at all (insufficient RSI/EMA warmup, initial_risk_dist <= 0,
+    missing opening-range bounds) - same "insufficient data means False,
+    not unknown" convention orb._rsi_trending/_trend_confluence_ok already
+    establish for `all_conditions_passed`/`triggered` themselves (a None
+    condition can never contribute a pass), while still being reported as
+    None (not False) in its own condition_* field so "genuinely failed"
+    and "couldn't be evaluated" are never visually conflated - see
+    `required_data_complete` for the single all-or-nothing data-
+    completeness flag reporting/reconciliation actually needs."""
     cfg = drr["cfg"]
     entry_price, initial_stop = pos["entry_price"], pos["initial_stop"]
     initial_risk_dist = (initial_stop - entry_price) if side == "short" else (entry_price - initial_stop)
@@ -253,21 +264,249 @@ def _dynamic_risk_reduction_check(pos: dict, drr: dict, intraday: pd.DataFrame, 
     )
     rsi_delta = (current_rsi - drr["entry_rsi"]) if current_rsi is not None and drr["entry_rsi"] is not None else None
     above_ema9_now = (current_price > current_ema9) if current_ema9 is not None else None
-    lost_ema9 = bool(
-        drr["entry_above_ema9"] is True and above_ema9_now is False
-    )
+    lost_ema9 = bool(drr["entry_above_ema9"] is True and above_ema9_now is False)
     or_high, or_low = drr.get("or_high"), drr.get("or_low")
     returned_inside_or = bool(or_high is not None and or_low is not None and or_low <= current_price <= or_high)
 
-    triggered = bool(
-        current_r is not None and current_r <= cfg.get("current_r_max", -0.40)
-        and rsi_delta is not None and rsi_delta <= cfg.get("rsi_delta_max", -5)
-        and returned_inside_or and lost_ema9
-        and mfe_r_so_far is not None and mfe_r_so_far <= cfg.get("mfe_r_max", 0.30)
+    condition_current_r = None if current_r is None else bool(current_r <= cfg.get("current_r_max", -0.40))
+    condition_rsi_delta = None if rsi_delta is None else bool(rsi_delta <= cfg.get("rsi_delta_max", -5))
+    condition_returned_inside_or = returned_inside_or
+    condition_lost_ema9 = lost_ema9
+    condition_mfe = None if mfe_r_so_far is None else bool(mfe_r_so_far <= cfg.get("mfe_r_max", 0.30))
+
+    required_data_complete = bool(
+        current_r is not None and rsi_delta is not None and mfe_r_so_far is not None
+        and or_high is not None and or_low is not None
+    )
+    all_conditions_passed = bool(
+        condition_current_r and condition_rsi_delta and condition_returned_inside_or
+        and condition_lost_ema9 and condition_mfe
     )
     return {
-        "triggered": triggered, "current_r": current_r, "rsi_delta": rsi_delta,
+        "current_r": current_r, "current_rsi": current_rsi, "rsi_delta": rsi_delta,
         "mfe_r_so_far": mfe_r_so_far, "returned_inside_or": returned_inside_or, "lost_ema9": lost_ema9,
+        "required_data_complete": required_data_complete,
+        "condition_current_r": condition_current_r, "condition_rsi_delta": condition_rsi_delta,
+        "condition_returned_inside_or": condition_returned_inside_or, "condition_lost_ema9": condition_lost_ema9,
+        "condition_mfe": condition_mfe,
+        "all_conditions_passed": all_conditions_passed, "triggered": all_conditions_passed,
+    }
+
+
+def _evaluate_v6_risk_event(pos: dict, intraday: pd.DataFrame, bar_ts: pd.Timestamp, side: str) -> None:
+    """ORB v8/v9's own "V6 Risk Event" - called UNCONDITIONALLY for every
+    open position, right after _update_excursion and BEFORE the
+    management_style dispatch (see Step 1's own call site) - a no-op for
+    any strategy that never set pos["dynamic_risk_reduction"] (v4/v4.1/
+    v4.2/v4.3/v5/v5.1 never do - see EXTRA_STRATEGY_PRESETS' own v8/v9
+    comment in src/db.py), and evaluated exactly ONCE per position,
+    mutating pos["dynamic_risk_reduction"] ("drr") in place.
+
+    Running this BEFORE the branch dispatch - not inside the "not yet
+    trailing" branch alone, as an earlier version of this function did -
+    is what correctly answers "was trailing active AT the V6 evaluation
+    timestamp" even when trailing activated on an EARLIER bar than the
+    V6 evaluation itself: pos["trail_activated"] is read here exactly as
+    it stood at the START of this bar, before anything below has a
+    chance to flip it. A trade that closes (via ANY exit path) before
+    ever reaching a bar with bar_ts >= drr["scheduled_ts"] simply never
+    gets this function to fire drr["checked"] = True at all - _v6_audit_
+    record (called once at every actual close site) resolves that
+    remaining case to V6_NOT_APPLICABLE_TRADE_CLOSED.
+
+    IMPORTANT (see the spec's own "Do NOT exit the trade... Only risk
+    management changes"): this NEVER closes the position - only ever
+    tightens pos["hard_stop_price"], and even that only takes effect
+    starting the NEXT bar (Step 1's own hard-stop check for THIS bar,
+    immediately below wherever this is called from, already ran against
+    the PRE-existing level before this function had a chance to update
+    it) - see _V6_EXECUTION_ORDER_CONVENTION for why this eliminates any
+    same-bar look-ahead ambiguity by construction."""
+    drr = pos.get("dynamic_risk_reduction")
+    if drr is None or drr["checked"] or bar_ts < drr["scheduled_ts"]:
+        return
+    drr["checked"] = True
+    drr["actual_ts"] = bar_ts
+
+    if pos.get("trail_activated"):
+        drr["trail_active_at_evaluation"] = True
+        drr["reason"] = "V6_NOT_APPLICABLE_TRAILING_ACTIVE"
+        drr["stop_after_r"] = drr["initial_hard_stop_r"]
+        drr["stop_after_price"] = pos.get("hard_stop_price")
+        return
+    drr["trail_active_at_evaluation"] = False
+
+    result = _dynamic_risk_reduction_check(pos, drr, intraday, bar_ts, side)
+    drr.update(result)
+    drr["stop_before_price"] = pos.get("hard_stop_price")
+
+    if not result["required_data_complete"]:
+        drr["reason"] = "V6_MISSING_REQUIRED_DATA"
+        drr["stop_after_r"] = drr["initial_hard_stop_r"]
+        drr["stop_after_price"] = drr["stop_before_price"]
+        return
+
+    if not result["triggered"]:
+        drr["reason"] = "V6_NOT_TRIGGERED"
+        drr["stop_after_r"] = drr["initial_hard_stop_r"]
+        drr["stop_after_price"] = drr["stop_before_price"]
+        return
+
+    # Triggered - compute the requested adjusted stop off the trade's own
+    # authoritative entry price/initial risk width (never a moving
+    # reference), and apply it ONLY if it's actually tighter than
+    # whatever is already active ("never loosen a stop" - the same one-
+    # way rule cycle._trailing_stop_decision already applies to trailing
+    # elsewhere in this file).
+    new_hard_stop_r = drr["cfg"]["new_hard_stop_R"]
+    initial_risk_dist = (
+        (pos["initial_stop"] - pos["entry_price"]) if side == "short" else (pos["entry_price"] - pos["initial_stop"])
+    )
+    requested_price = None
+    if initial_risk_dist > 0:
+        requested_price = (
+            pos["entry_price"] + new_hard_stop_r * initial_risk_dist if side == "short"
+            else pos["entry_price"] - new_hard_stop_r * initial_risk_dist
+        )
+    drr["requested_adjusted_stop_r"] = new_hard_stop_r
+    drr["requested_adjusted_stop_price"] = requested_price
+
+    if requested_price is None or "hard_stop_price" not in pos:
+        # Can't apply without a real hard_stop_price to compare against
+        # (e.g. a future strategy sets dynamic_risk_reduction without
+        # hard_stop_R) - not a "triggered" outcome in any meaningful
+        # sense, since there is nothing to tighten.
+        drr["reason"] = "V6_NOT_TRIGGERED"
+        drr["stop_after_r"] = drr["initial_hard_stop_r"]
+        drr["stop_after_price"] = drr["stop_before_price"]
+        return
+
+    is_tighter = (requested_price > pos["hard_stop_price"]) if side == "long" else (requested_price < pos["hard_stop_price"])
+    if is_tighter:
+        pos["hard_stop_price"] = requested_price
+        drr["reason"] = "V6_TRIGGERED_STOP_TIGHTENED"
+        drr["stop_after_r"] = new_hard_stop_r
+        drr["stop_after_price"] = requested_price
+    else:
+        drr["reason"] = "V6_TRIGGERED_ALREADY_TIGHTER"
+        drr["stop_after_r"] = drr["initial_hard_stop_r"]
+        drr["stop_after_price"] = drr["stop_before_price"]
+
+
+# Documented once, referenced by both _evaluate_v6_risk_event's own
+# docstring and every _v6_audit_record's own "v6_execution_order_
+# convention" field (see the spec's own "Critical Intrabar Validation").
+_V6_EXECUTION_ORDER_CONVENTION = (
+    "Conservative, no look-ahead: the V6 decision is evaluated at the close of the scheduled bar and applied to "
+    "pos['hard_stop_price'] only AFTER that same bar's own stop-out check has already run against the PRE-existing "
+    "(untightened) stop level. The tightened level is therefore only ever checked against price movement in bars "
+    "STRICTLY AFTER the V6 decision bar - that decision bar's own High/Low is never evaluated against the newly-"
+    "tightened level, which eliminates any need to guess intrabar ordering within that one bar by construction "
+    "(v6_same_bar_stop_ambiguity is therefore always False)."
+)
+
+
+def _v6_audit_record(pos: dict, exit_reason: str | None, fill_price: float | None, exit_ts) -> dict | None:
+    """Builds the COMPLETE V6 Risk Event audit record for one closed
+    trade (every field the spec's own "Mandatory Trade-Level Audit
+    Fields" / "V6 Risk Event Audit" sheet needs), from whatever state
+    _evaluate_v6_risk_event already accumulated on pos["dynamic_risk_
+    reduction"] over the position's life. Called once, right before
+    EVERY trades.append({...}) call in simulate_orb_strategy (every exit
+    path: original/tightened hard stop, trailing stop, eod_close, force_
+    close), so every exit path reports these fields identically. None
+    for a strategy that never opted into dynamic_risk_reduction at all
+    (v4/v4.1/v4.2/v4.3/v5/v5.1) - the caller spreads this dict's own keys
+    onto the trade record only when it isn't None."""
+    drr = pos.get("dynamic_risk_reduction")
+    if drr is None:
+        return None
+    if not drr["checked"]:
+        # The ONLY way _evaluate_v6_risk_event (called on every open-
+        # position bar, in both the trailing-active and not-yet-trailing
+        # cases - see its own docstring) can have never set checked=True
+        # is the trade itself closing before any bar ever reached
+        # drr["scheduled_ts"].
+        drr["checked"] = True
+        drr["reason"] = "V6_NOT_APPLICABLE_TRADE_CLOSED"
+        drr["stop_after_r"] = drr["initial_hard_stop_r"]
+        drr["stop_after_price"] = pos.get("hard_stop_price")
+
+    reason = drr.get("reason")
+    evaluated = reason in ("V6_NOT_TRIGGERED", "V6_TRIGGERED_ALREADY_TIGHTER", "V6_TRIGGERED_STOP_TIGHTENED")
+    applicable = reason not in ("V6_NOT_APPLICABLE_TRADE_CLOSED", "V6_NOT_APPLICABLE_TRAILING_ACTIVE")
+    triggered = reason in ("V6_TRIGGERED_ALREADY_TIGHTER", "V6_TRIGGERED_STOP_TIGHTENED")
+    stop_changed = reason == "V6_TRIGGERED_STOP_TIGHTENED"
+
+    actual_ts = drr.get("actual_ts")
+    scheduled_ts = drr["scheduled_ts"]
+    trail_activation_ts = pos.get("trail_activation_ts")
+
+    # Adjusted-stop-hit outcome fields - True only when this trade's own
+    # ACTUAL exit was a hard_stop AND the stop had genuinely been
+    # tightened beforehand (never inferred from price alone) - pos[
+    # "hard_stop_price"]/fill_price are always exactly equal for a real
+    # hard_stop exit (see the exit-site code below, "fill_price": pos[
+    # "hard_stop_price"]), so no separate price-match check is needed.
+    adjusted_stop_hit = bool(stop_changed and exit_reason == "hard_stop")
+    if exit_reason == "trailing_stop":
+        protective_stop_source = "V4_2_TRAILING_STOP"
+    elif exit_reason == "hard_stop":
+        protective_stop_source = "V6_ADJUSTED_HARD_STOP" if stop_changed else "INITIAL_HARD_STOP"
+    else:
+        protective_stop_source = None
+
+    return {
+        "v6_scheduled_evaluation_timestamp": scheduled_ts.isoformat(),
+        "v6_actual_evaluation_timestamp": actual_ts.isoformat() if actual_ts is not None else None,
+        "v6_evaluation_delay_seconds": (actual_ts - scheduled_ts).total_seconds() if actual_ts is not None else None,
+        "v6_evaluated": evaluated,
+        "v6_applicable": applicable,
+        "v6_not_applicable_reason": reason if not applicable else None,
+        "trade_open_at_v6_evaluation": actual_ts is not None,
+        "trail_active_at_v6_evaluation": drr.get("trail_active_at_evaluation"),
+        "trail_activation_timestamp": trail_activation_ts.isoformat() if trail_activation_ts is not None else None,
+        "trail_activated_after_v6": bool(
+            actual_ts is not None and trail_activation_ts is not None and trail_activation_ts > actual_ts
+        ),
+        "v6_current_r": drr.get("current_r"), "v6_entry_rsi": drr.get("entry_rsi"),
+        "v6_current_rsi": drr.get("current_rsi"), "v6_rsi_delta": drr.get("rsi_delta"),
+        "v6_returned_inside_opening_range": drr.get("returned_inside_or"), "v6_lost_ema9": drr.get("lost_ema9"),
+        "v6_mfe_r_so_far": drr.get("mfe_r_so_far"), "v6_required_data_complete": drr.get("required_data_complete"),
+        "v6_triggered": triggered,
+        "condition_trade_open": actual_ts is not None,
+        "condition_trailing_not_active": (drr.get("trail_active_at_evaluation") is False) if actual_ts is not None else None,
+        "condition_current_r": drr.get("condition_current_r"), "condition_rsi_delta": drr.get("condition_rsi_delta"),
+        "condition_returned_inside_or": drr.get("condition_returned_inside_or"),
+        "condition_lost_ema9": drr.get("condition_lost_ema9"), "condition_mfe": drr.get("condition_mfe"),
+        "all_conditions_passed": bool(drr.get("all_conditions_passed", False)),
+        "stop_before_v6_r": drr.get("initial_hard_stop_r"), "stop_before_v6_price": drr.get("stop_before_price"),
+        "requested_adjusted_stop_r": drr.get("requested_adjusted_stop_r", drr["cfg"].get("new_hard_stop_R")),
+        "requested_adjusted_stop_price": drr.get("requested_adjusted_stop_price"),
+        "stop_after_v6_r": drr.get("stop_after_r"), "stop_after_v6_price": drr.get("stop_after_price"),
+        "v6_stop_changed": stop_changed,
+        "v6_stop_change_timestamp": actual_ts.isoformat() if stop_changed and actual_ts is not None else None,
+        "v6_stop_change_reason": reason,
+        "adjusted_stop_hit": adjusted_stop_hit,
+        "adjusted_stop_hit_timestamp": exit_ts.isoformat() if adjusted_stop_hit and hasattr(exit_ts, "isoformat") else (exit_ts if adjusted_stop_hit else None),
+        "adjusted_stop_fill_price": fill_price if adjusted_stop_hit else None,
+        # This codebase's own R-multiple convention is already commission-
+        # free (perf.r_multiple is a pure price ratio - commission is
+        # tracked separately, in dollars) - "before/after costs" therefore
+        # coincide exactly for R; a genuine $ before/after-costs split is
+        # reported at the trade-pair level instead (net_pnl_usd vs
+        # gross_pnl_usd), not duplicated here.
+        # Negated - stop_after_r/requested_adjusted_stop_r are UNSIGNED
+        # magnitudes ("how many R away from entry", matching hard_stop_R's
+        # own rules_json convention), but a stop-out is always an adverse
+        # move by definition - this field instead matches final_r's own
+        # SIGNED convention (negative = loss) elsewhere in this codebase,
+        # so it's directly comparable to Final R/Delta R in the report.
+        "adjusted_stop_exit_r_before_costs": -drr.get("stop_after_r") if adjusted_stop_hit and drr.get("stop_after_r") is not None else None,
+        "adjusted_stop_exit_r_after_costs": -drr.get("stop_after_r") if adjusted_stop_hit and drr.get("stop_after_r") is not None else None,
+        "protective_stop_source_at_exit": protective_stop_source,
+        "v6_same_bar_stop_ambiguity": False,
+        "v6_execution_order_convention": _V6_EXECUTION_ORDER_CONVENTION,
     }
 
 
@@ -954,12 +1193,7 @@ def simulate_orb_strategy(
                         "profit_lock_activated_at_r": pos.get("profit_lock_activated_at_r"),
                         "trail_activated": pos.get("trail_activated", False),
                         "trail_activated_at_r": pos.get("trail_activated_at_r"),
-                        "risk_event_triggered": pos.get("risk_event_triggered", False),
-                        "risk_event_10m_current_r": pos.get("risk_event_10m_current_r"),
-                        "risk_event_10m_rsi_delta": pos.get("risk_event_10m_rsi_delta"),
-                        "risk_event_10m_mfe_r": pos.get("risk_event_10m_mfe_r"),
-                        "hard_stop_tightened": pos.get("hard_stop_tightened", False),
-                        "risk_event_stop_tightened_to_r": pos.get("risk_event_stop_tightened_to_r"),
+                        "v6_audit": _v6_audit_record(pos, "eod_close", None, bar_ts),
                     })
                 open_positions.clear()
                 break
@@ -972,6 +1206,7 @@ def simulate_orb_strategy(
                 pos = open_positions[symbol]
                 this_bar = intraday.loc[[bar_ts]]
                 _update_excursion(pos, intraday.loc[bar_ts])
+                _evaluate_v6_risk_event(pos, intraday, bar_ts, side)
 
                 if management_style == "fixed_target_no_trail":
                     # Stop or fixed target, whichever hits first this bar.
@@ -1136,12 +1371,7 @@ def simulate_orb_strategy(
                                 "exit_reason": "trailing_stop", "commission": commission_per_trade,
                                 "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
                                 "trail_activated": True, "trail_activated_at_r": pos["trail_activated_at_r"],
-                                "risk_event_triggered": pos.get("risk_event_triggered", False),
-                                "risk_event_10m_current_r": pos.get("risk_event_10m_current_r"),
-                                "risk_event_10m_rsi_delta": pos.get("risk_event_10m_rsi_delta"),
-                                "risk_event_10m_mfe_r": pos.get("risk_event_10m_mfe_r"),
-                                "hard_stop_tightened": pos.get("hard_stop_tightened", False),
-                                "risk_event_stop_tightened_to_r": pos.get("risk_event_stop_tightened_to_r"),
+                                "v6_audit": _v6_audit_record(pos, "trailing_stop", pos["stop_price"], bar_ts),
                             })
                             del open_positions[symbol]
                             continue
@@ -1183,78 +1413,17 @@ def simulate_orb_strategy(
                                     # exit_reason == "hard_stop" (e.g. src.
                                     # telemetry_engine.py's own _rule_outcome_
                                     # category) keeps working unchanged for v8/
-                                    # v9 trades too. risk_event_*/hard_stop_
-                                    # tightened below (see EXTRA_STRATEGY_
-                                    # PRESETS' own v8/v9 comment in src/db.py)
-                                    # is how a report tells the two apart.
+                                    # v9 trades too. v6_audit (see EXTRA_
+                                    # STRATEGY_PRESETS' own v8/v9 comment in
+                                    # src/db.py) is how a report tells the two
+                                    # apart.
                                     "exit_reason": "hard_stop", "commission": commission_per_trade,
                                     "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
                                     "trail_activated": False, "trail_activated_at_r": None,
-                                    "risk_event_triggered": pos.get("risk_event_triggered", False),
-                                    "risk_event_10m_current_r": pos.get("risk_event_10m_current_r"),
-                                    "risk_event_10m_rsi_delta": pos.get("risk_event_10m_rsi_delta"),
-                                    "risk_event_10m_mfe_r": pos.get("risk_event_10m_mfe_r"),
-                                    "hard_stop_tightened": pos.get("hard_stop_tightened", False),
-                                    "risk_event_stop_tightened_to_r": pos.get("risk_event_stop_tightened_to_r"),
+                                    "v6_audit": _v6_audit_record(pos, "hard_stop", pos["hard_stop_price"], bar_ts),
                                 })
                                 del open_positions[symbol]
                                 continue
-
-                        # ORB v8/v9 only (exit_cfg["dynamic_risk_reduction"] -
-                        # see EXTRA_STRATEGY_PRESETS' own v8/v9 comment in src/
-                        # db.py, "Build ORB Long V8 and V9 - Dynamic Risk
-                        # Reduction Based On V6 Detection"). Absent for v4/
-                        # v4.1/v4.2/v4.3/v5/v5.1 (none of them set this key),
-                        # so `pos` never carries "dynamic_risk_reduction" for
-                        # them and this entire block is skipped - a pure no-op,
-                        # same "opt-in key, absent = untouched" discipline v4.1
-                        # -> v4.2's own hard_stop_R already established.
-                        #
-                        # IMPORTANT (see the spec's own "Do NOT exit the
-                        # trade... Only risk management changes"): this NEVER
-                        # closes the position itself - it only ever tightens
-                        # pos["hard_stop_price"] (checked at the TOP of this
-                        # same branch, next bar onward - never re-checked
-                        # against the just-tightened level THIS bar, avoiding
-                        # same-bar look-ahead ambiguity) via the exact same
-                        # "only ever move toward entry, never loosen" one-way
-                        # rule cycle._trailing_stop_decision already applies
-                        # elsewhere in this file.
-                        drr = pos.get("dynamic_risk_reduction")
-                        if drr is not None and not drr["checked"]:
-                            elapsed_minutes = (bar_ts - drr["entry_ts"]).total_seconds() / 60
-                            if elapsed_minutes >= drr["cfg"].get("trigger_offset_minutes", 10):
-                                drr["checked"] = True  # evaluated exactly once, at the first bar >= trigger_offset_minutes
-                                risk_result = _dynamic_risk_reduction_check(pos, drr, intraday, bar_ts, side)
-                                pos["risk_event_triggered"] = risk_result["triggered"]
-                                pos["risk_event_10m_current_r"] = risk_result["current_r"]
-                                pos["risk_event_10m_rsi_delta"] = risk_result["rsi_delta"]
-                                pos["risk_event_10m_mfe_r"] = risk_result["mfe_r_so_far"]
-                                if risk_result["triggered"] and "hard_stop_price" in pos:
-                                    new_hard_stop_r = drr["cfg"]["new_hard_stop_R"]
-                                    drr_initial_risk_dist = (
-                                        (pos["initial_stop"] - pos["entry_price"]) if side == "short"
-                                        else (pos["entry_price"] - pos["initial_stop"])
-                                    )
-                                    if drr_initial_risk_dist > 0:
-                                        candidate_stop = (
-                                            pos["entry_price"] + new_hard_stop_r * drr_initial_risk_dist if side == "short"
-                                            else pos["entry_price"] - new_hard_stop_r * drr_initial_risk_dist
-                                        )
-                                        # "Never loosen a stop... If current Hard
-                                        # Stop is already tighter, keep the
-                                        # tighter stop" - only replace hard_stop_
-                                        # price when the candidate is actually
-                                        # CLOSER to entry (a smaller loss) than
-                                        # whatever is already active.
-                                        is_tighter = (
-                                            (candidate_stop > pos["hard_stop_price"]) if side == "long"
-                                            else (candidate_stop < pos["hard_stop_price"])
-                                        )
-                                        if is_tighter:
-                                            pos["hard_stop_price"] = candidate_stop
-                                            pos["hard_stop_tightened"] = True
-                                            pos["risk_event_stop_tightened_to_r"] = new_hard_stop_r
 
                         initial_risk = (pos["initial_stop"] - pos["entry_price"]) if side == "short" else (pos["entry_price"] - pos["initial_stop"])
                         mfe_r = (
@@ -1265,6 +1434,15 @@ def simulate_orb_strategy(
                         if mfe_r >= trailing_trigger_r_v41:
                             pos["trail_activated"] = True
                             pos["trail_activated_at_r"] = trailing_trigger_r_v41
+                            # ORB v8/v9 only: records WHEN trailing activated
+                            # (see EXTRA_STRATEGY_PRESETS' own v8/v9 comment in
+                            # src/db.py) - _v6_audit_record's own "trail_
+                            # activation_timestamp"/"trail_activated_after_v6"
+                            # fields need this. An unread extra key for v4.1/
+                            # v4.2/v4.3 (they never carry "dynamic_risk_
+                            # reduction", so nothing ever reads this field for
+                            # them) - never spread into the trade record itself.
+                            pos["trail_activation_ts"] = bar_ts
                             recent_bars = intraday[intraday.index <= bar_ts].tail(2)
                             candidate = (
                                 orb.low_of_last_n_bars(recent_bars, 2) if side == "long"
@@ -1555,20 +1733,24 @@ def simulate_orb_strategy(
                             open_positions[symbol]["hard_stop_price"] = hard_stop_price
                         # ORB v8/v9 only (exit_cfg["dynamic_risk_reduction"] -
                         # see EXTRA_STRATEGY_PRESETS' own v8/v9 comment in src/
-                        # db.py). Captures everything the Step-1 "V6 Risk
-                        # Event" check (_dynamic_risk_reduction_check) needs
-                        # once, at entry, rather than recomputing it later:
-                        # entry_ts (this position's own elapsed-time clock),
-                        # or_high/or_low (from `detail`, the SAME opening
-                        # range the entry signal itself used - never re-
-                        # derived), and entry RSI/EMA9 (same windowed-lookback
-                        # convention orb._trend_confluence_ok already uses for
-                        # entry-time RSI/EMA - see _dynamic_risk_reduction_
-                        # check's own docstring). None entirely (key never set
-                        # on pos) when exit_cfg has no dynamic_risk_reduction -
-                        # v4.1/v4.2/v4.3's own rules_json never set it, so this
-                        # is a pure no-op for them (see the Step-1 loop's own
-                        # "dynamic_risk_reduction" in pos check).
+                        # db.py). Captures everything _evaluate_v6_risk_event/
+                        # _dynamic_risk_reduction_check need once, at entry,
+                        # rather than recomputing it later: scheduled_ts (v6_
+                        # scheduled_evaluation_timestamp = entry_ts + trigger_
+                        # offset_minutes, computed once here per the spec's
+                        # own exact formula), or_high/or_low (from `detail`,
+                        # the SAME opening range the entry signal itself used
+                        # - never re-derived), entry RSI/EMA9 (same windowed-
+                        # lookback convention orb._trend_confluence_ok already
+                        # uses for entry-time RSI/EMA - see _dynamic_risk_
+                        # reduction_check's own docstring), and initial_hard_
+                        # stop_r (the strategy's own configured hard_stop_R,
+                        # e.g. 2.5 - "Stop Before V6 R" is always this exact
+                        # value until/unless V6 actually changes it). None
+                        # entirely (key never set on pos) when exit_cfg has no
+                        # dynamic_risk_reduction - v4/v4.1/v4.2/v4.3/v5/v5.1's
+                        # own rules_json never set it, so this is a pure no-op
+                        # for them (see _evaluate_v6_risk_event's own guard).
                         dynamic_cfg = exit_cfg.get("dynamic_risk_reduction")
                         if dynamic_cfg is not None:
                             entry_window = intraday[intraday.index <= bar_ts]["Close"].iloc[-orb._CONFLUENCE_LOOKBACK_BARS:]
@@ -1584,10 +1766,12 @@ def simulate_orb_strategy(
                             )
                             open_positions[symbol]["dynamic_risk_reduction"] = {
                                 "cfg": dynamic_cfg, "entry_ts": bar_ts,
+                                "scheduled_ts": bar_ts + pd.Timedelta(minutes=dynamic_cfg.get("trigger_offset_minutes", 10)),
                                 "or_high": detail.get("or_high"), "or_low": detail.get("or_low"),
                                 "entry_rsi": entry_rsi,
                                 "entry_above_ema9": (price > entry_ema9) if entry_ema9 is not None else None,
-                                "checked": False,
+                                "initial_hard_stop_r": exit_cfg.get("hard_stop_R"),
+                                "checked": False, "actual_ts": None, "reason": None,
                             }
                     entries_today += 1
 
@@ -1608,12 +1792,7 @@ def simulate_orb_strategy(
                 "profit_lock_activated_at_r": pos.get("profit_lock_activated_at_r"),
                 "trail_activated": pos.get("trail_activated", False),
                 "trail_activated_at_r": pos.get("trail_activated_at_r"),
-                "risk_event_triggered": pos.get("risk_event_triggered", False),
-                "risk_event_10m_current_r": pos.get("risk_event_10m_current_r"),
-                "risk_event_10m_rsi_delta": pos.get("risk_event_10m_rsi_delta"),
-                "risk_event_10m_mfe_r": pos.get("risk_event_10m_mfe_r"),
-                "hard_stop_tightened": pos.get("hard_stop_tightened", False),
-                "risk_event_stop_tightened_to_r": pos.get("risk_event_stop_tightened_to_r"),
+                "v6_audit": _v6_audit_record(pos, "eod_close", None, day_bars.index[-1]),
             })
 
     return {"trades": trades, "skipped_symbols": skipped, "filter_stats": filter_stats}
