@@ -1729,6 +1729,66 @@ def sync_broker_fills(ib, account_id: int, mode: str):
         )
 
 
+# Consecutive refresh_account_info runs (~5 min apart, same cadence as the
+# job that calls it - see run_service.py) a bot-tracked position has to be
+# absent from the broker's own real holdings before it's treated as closed
+# outside the bot (manual TWS/Mobile sell, another script, etc.) and its DB
+# row removed. Requiring more than one confirms this against a single
+# stale/lagging broker snapshot wrongly dropping tracking for a real,
+# still-open live position - the same "don't rely on a single mechanism for
+# something this important" reasoning the protective stop order itself
+# already gets (see _place_touch_turn_limit's own docstring).
+BROKER_MISSING_STREAK_TO_RECONCILE = 2
+
+
+def reconcile_broker_positions(account_id: int, mode: str, ib, broker_symbols: set[str]):
+    """Removes a bot-tracked open position (the `positions` table - what
+    the dashboard's Open Positions card and every entry/management gate
+    read) once it's been confirmed absent from the broker's own real
+    holdings for BROKER_MISSING_STREAK_TO_RECONCILE consecutive
+    refresh_account_info runs in a row.
+
+    Without this, a position closed by anything OTHER than the bot's own
+    tracked exit mechanisms - a manual sell via TWS/IBKR Mobile being the
+    common case, since it doesn't fill the bot's own resting stop order and
+    so isn't recognized by check_stop_outs either - leaves a permanent
+    phantom row: the dashboard keeps showing a position that's already
+    flat, and manage_position keeps "managing" it every cycle (fetching a
+    price, evaluating breakeven/trailing, and potentially trying to place
+    or cancel stop orders against a symbol with zero real shares).
+
+    Also best-effort cancels the position's own resting stop order (if
+    any) once reconciled away - IBKR does NOT auto-cancel a standalone
+    stop order just because the shares it protects are already gone, so a
+    manually-sold position can leave a stale SELL stop resting that would
+    open an unintended short if the price ever fell to it. _cancel_stop
+    already no-ops safely if the order is already gone (expired,
+    cancelled, or never existed)."""
+    for pos in db.get_open_positions(account_id, mode):
+        if pos["symbol"] in broker_symbols:
+            db.mark_position_seen_at_broker(account_id, mode, pos["symbol"])
+            continue
+        streak = db.bump_position_broker_missing(account_id, mode, pos["symbol"])
+        if streak < BROKER_MISSING_STREAK_TO_RECONCILE:
+            continue
+        try:
+            _cancel_stop(ib, pos.get("stop_order_id"))
+        except Exception:
+            pass
+        db.remove_position(account_id, mode, pos["symbol"])
+        notify(
+            f"[{mode.upper()}] POSITION CLOSED ELSEWHERE: {pos['symbol']}",
+            f"No longer held at the broker after {streak} consecutive checks (~"
+            f"{5 * streak} min) - removed from tracking. Likely closed manually "
+            "(TWS/Mobile) or by another process; its stop order (if any) was "
+            "also cancelled - verify at the broker if in doubt.", "high",
+        )
+        log_decision(account_id, mode, {
+            "event": "position_closed_elsewhere", "symbol": pos["symbol"],
+            "side": pos.get("side", "long"), "broker_missing_streak": streak,
+        })
+
+
 def refresh_account_info(account_id: int, mode: str):
     """Pulls net liquidation / cash balance / buying power, every real
     position and resting order, and today's executions (see
@@ -1769,9 +1829,15 @@ def refresh_account_info(account_id: int, mode: str):
         # alone) pulls in orders from other sessions too: the bot's own
         # cycle connection, a manual TWS/Mobile order, etc. Lets the
         # dashboard show a holding's real protective orders even for a
-        # symbol the bot never touched.
+        # symbol the bot never touched. reconcile_broker_positions below
+        # relies on this too - its own best-effort stop cancel needs
+        # ib.trades() (what _find_order searches) to already know about an
+        # order placed under the main cycle's OWN client id, which this
+        # connection (ACCOUNT_REFRESH_CLIENT_ID) otherwise has no visibility
+        # into at all.
         ib.reqAllOpenOrders()
         ib.sleep(1)
+        reconcile_broker_positions(account_id, mode, ib, {p["symbol"] for p in broker_positions})
         broker_orders = [
             {
                 "symbol": t.contract.symbol,

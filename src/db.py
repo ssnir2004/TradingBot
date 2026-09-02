@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS positions (
     r_multiple REAL DEFAULT 0.0,
     hold_overnight INTEGER NOT NULL DEFAULT 0,
     target_price REAL,
+    broker_missing_streak INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (account_id, mode, symbol)
 );
 
@@ -2982,6 +2983,12 @@ def init_db(seed_rules_path: Path | None = None):
         # src/orb.py), read back by cycle.manage_position's ORB branch to
         # know when to close the whole position at its fixed R:R target.
         _migrate_add_column(conn, "positions", "target_price", "REAL")
+        # How many consecutive cycle.refresh_account_info runs in a row this
+        # bot-tracked position was NOT found among the broker's own real
+        # holdings - see mark_position_seen_at_broker/bump_position_broker_
+        # missing and refresh_account_info's own reconciliation. 0 for every
+        # position that was last confirmed present (the normal case).
+        _migrate_add_column(conn, "positions", "broker_missing_streak", "INTEGER NOT NULL DEFAULT 0")
         _migrate_add_column(conn, "watchlist", "universe", "TEXT NOT NULL DEFAULT ',default,'")
         _migrate_add_column(conn, "watchlist", "direction", "TEXT NOT NULL DEFAULT 'long'")
         # NULL for trades recorded the old way (trade.py/close_position.py's
@@ -3696,6 +3703,40 @@ def remove_position(account_id: int, mode: str, symbol: str):
         conn.execute(
             "DELETE FROM positions WHERE account_id = ? AND mode = ? AND symbol = ?", (account_id, mode, symbol)
         )
+
+
+def mark_position_seen_at_broker(account_id: int, mode: str, symbol: str):
+    """Resets broker_missing_streak to 0 - this bot-tracked position was
+    just confirmed present among the broker's own real holdings (see
+    cycle.refresh_account_info's own reconciliation)."""
+    _check_mode(mode)
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE positions SET broker_missing_streak = 0 WHERE account_id = ? AND mode = ? AND symbol = ?",
+            (account_id, mode, symbol),
+        )
+
+
+def bump_position_broker_missing(account_id: int, mode: str, symbol: str) -> int:
+    """This bot-tracked position was NOT found among the broker's own real
+    holdings on this refresh (see cycle.refresh_account_info) - increments
+    its miss streak and returns the new count, so the caller can decide
+    whether it's been missing for enough CONSECUTIVE checks in a row to
+    treat as genuinely closed elsewhere (e.g. a manual TWS/Mobile sell)
+    rather than one stale/lagging broker snapshot. Returns 0 if the
+    position is already gone (e.g. removed by a concurrent cycle.py tick)."""
+    _check_mode(mode)
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE positions SET broker_missing_streak = broker_missing_streak + 1 "
+            "WHERE account_id = ? AND mode = ? AND symbol = ?",
+            (account_id, mode, symbol),
+        )
+        row = conn.execute(
+            "SELECT broker_missing_streak FROM positions WHERE account_id = ? AND mode = ? AND symbol = ?",
+            (account_id, mode, symbol),
+        ).fetchone()
+        return row["broker_missing_streak"] if row else 0
 
 
 def has_pending_order_today(account_id: int, mode: str, symbol: str, placed_date: str) -> bool:
