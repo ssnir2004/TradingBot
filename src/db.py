@@ -81,6 +81,10 @@ CREATE TABLE IF NOT EXISTS positions (
     hold_overnight INTEGER NOT NULL DEFAULT 0,
     target_price REAL,
     broker_missing_streak INTEGER NOT NULL DEFAULT 0,
+    hard_stop_price REAL,
+    mfe_price REAL,
+    trail_activated INTEGER NOT NULL DEFAULT 0,
+    trail_activated_at_r REAL,
     PRIMARY KEY (account_id, mode, symbol)
 );
 
@@ -2989,6 +2993,19 @@ def init_db(seed_rules_path: Path | None = None):
         # missing and refresh_account_info's own reconciliation. 0 for every
         # position that was last confirmed present (the normal case).
         _migrate_add_column(conn, "positions", "broker_missing_streak", "INTEGER NOT NULL DEFAULT 0")
+        # "no_stop_delayed_trail" management_style's own live state
+        # (v4.1/v4.2/v4.3/V8/V9/V10 - see cycle.manage_position's own
+        # branch for that management_style) - hard_stop_price is the real
+        # resting-stop level actually placed at entry (NULL for a
+        # strategy with no exit_cfg["hard_stop_R"], e.g. v4.1), mfe_price
+        # the best price seen since entry (per-cycle granularity, not
+        # truly intrabar), trail_activated/trail_activated_at_r record
+        # once MFE has cleared exit_cfg["trailing_trigger_R"]. NULL/0 for
+        # every position under any OTHER management_style - unread there.
+        _migrate_add_column(conn, "positions", "hard_stop_price", "REAL")
+        _migrate_add_column(conn, "positions", "mfe_price", "REAL")
+        _migrate_add_column(conn, "positions", "trail_activated", "INTEGER NOT NULL DEFAULT 0")
+        _migrate_add_column(conn, "positions", "trail_activated_at_r", "REAL")
         _migrate_add_column(conn, "watchlist", "universe", "TEXT NOT NULL DEFAULT ',default,'")
         _migrate_add_column(conn, "watchlist", "direction", "TEXT NOT NULL DEFAULT 'long'")
         # NULL for trades recorded the old way (trade.py/close_position.py's
@@ -3681,18 +3698,30 @@ def get_open_positions(account_id: int, mode: str) -> list[dict]:
 def upsert_position(account_id: int, mode: str, pos: dict):
     _check_mode(mode)
     # target_price defaults to None for every non-ORB caller (predates this
-    # field, same reasoning as the side default just below).
-    pos = {"side": "long", "target_price": None, **pos}
+    # field, same reasoning as the side default just below). hard_stop_price/
+    # mfe_price/trail_activated/trail_activated_at_r default the same way
+    # for every caller that isn't cycle.entry_scan's own "no_stop_delayed_
+    # trail" branch (see manage_position's own docstring for that
+    # management_style).
+    pos = {
+        "side": "long", "target_price": None, "hard_stop_price": None,
+        "mfe_price": None, "trail_activated": False, "trail_activated_at_r": None,
+        **pos,
+    }
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO positions (account_id, mode, symbol, side, entry_price, entry_time_iso, qty, initial_stop, "
-            "stop_price, stop_order_id, state, r_multiple, target_price) VALUES "
+            "stop_price, stop_order_id, state, r_multiple, target_price, hard_stop_price, mfe_price, "
+            "trail_activated, trail_activated_at_r) VALUES "
             "(:account_id, :mode, :symbol, :side, :entry_price, :entry_time_iso, :qty, :initial_stop, :stop_price, "
-            ":stop_order_id, :state, :r_multiple, :target_price) "
+            ":stop_order_id, :state, :r_multiple, :target_price, :hard_stop_price, :mfe_price, "
+            ":trail_activated, :trail_activated_at_r) "
             "ON CONFLICT(account_id, mode, symbol) DO UPDATE SET "
             "qty=excluded.qty, initial_stop=excluded.initial_stop, stop_price=excluded.stop_price, "
             "stop_order_id=excluded.stop_order_id, state=excluded.state, r_multiple=excluded.r_multiple, "
-            "target_price=excluded.target_price",
+            "target_price=excluded.target_price, hard_stop_price=excluded.hard_stop_price, "
+            "mfe_price=excluded.mfe_price, trail_activated=excluded.trail_activated, "
+            "trail_activated_at_r=excluded.trail_activated_at_r",
             {**pos, "account_id": account_id, "mode": mode},
         )
 

@@ -720,6 +720,93 @@ def manage_position(account_id: int, mode: str, ib, pos: dict, rules: dict) -> d
             db.upsert_position(account_id, mode, pos)
         return pos
 
+    if exit_cfg.get("management_style") == "no_stop_delayed_trail":
+        # ORB v4.1/v4.2/v4.3/V8/V9/V10 - mirrors backtest_engine.py's own
+        # "no_stop_delayed_trail" simulator (see its own docstring there,
+        # and entry_scan's own comment for the real-stop-placement half of
+        # this): no breakeven stage at all - the position holds under its
+        # real resting stop (hard_stop_price if the strategy opted in via
+        # exit_cfg["hard_stop_R"], else the tight initial_stop for v4.1)
+        # until MFE clears exit_cfg["trailing_trigger_R"], at which point
+        # it switches straight to the SAME swing-trailing
+        # (_trailing_stop_decision) staged_trail already uses above - not
+        # v2/v3's own breakeven-then-trail two-stage progression.
+        #
+        # hard_stop_price/mfe_price/trail_activated/trail_activated_at_r
+        # are set at entry (see entry_scan) for anything opened after this
+        # was added. A position already open in the DB from BEFORE this
+        # branch existed (crash-looping since it fell through to the
+        # generic default path below and hit exit_cfg["breakeven_
+        # trigger_R"] missing - see this file's own git history) has none
+        # of them - backfilled here from the SAME entry_price/initial_stop
+        # this position was already sized against (never guessed), and its
+        # real resting stop order is repositioned to match on the very
+        # first cycle this runs against it.
+        if "hard_stop_price" not in pos or pos["hard_stop_price"] is None:
+            hard_stop_r = exit_cfg.get("hard_stop_R")
+            if hard_stop_r is not None:
+                backfilled_hard_stop = (entry + hard_stop_r * initial_risk) if side == "short" else (entry - hard_stop_r * initial_risk)
+                old_stop = pos.get("stop_price", pos["initial_stop"])
+                _cancel_stop(ib, pos.get("stop_order_id"))
+                pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], backfilled_hard_stop, side)
+                pos["hard_stop_price"] = backfilled_hard_stop
+                pos["stop_price"] = backfilled_hard_stop
+                notify(
+                    f"[{mode.upper()}] STOP CORRECTED {pos['symbol']}",
+                    f"opened before this strategy's real hard-stop tracking existed - repositioning stop ${old_stop:.2f} -> ${backfilled_hard_stop:.2f} to match its intended {hard_stop_r}R hard stop",
+                    "high",
+                )
+                log_decision(account_id, mode, {"event": "hard_stop_backfilled", "symbol": pos["symbol"], "side": side, "old": old_stop, "new": backfilled_hard_stop})
+            else:
+                pos["hard_stop_price"] = None
+        if pos.get("mfe_price") is None:
+            pos["mfe_price"] = entry
+        pos.setdefault("trail_activated", False)
+        pos.setdefault("trail_activated_at_r", None)
+
+        # Best price seen since entry, per-cycle granularity (not truly
+        # intrabar like backtest_engine.py's own _update_excursion - live
+        # only samples price once per cycle, the same approximation every
+        # other live MFE-adjacent read in this file already accepts).
+        pos["mfe_price"] = max(pos["mfe_price"], price) if side == "long" else min(pos["mfe_price"], price)
+
+        if pos["trail_activated"]:
+            bars = _get_5min_bars(pos["symbol"])
+            candidate = None
+            if bars is not None and len(bars) >= 2:
+                candidate = orb.low_of_last_n_bars(bars, 2) if side == "long" else orb.high_of_last_n_bars(bars, 2)
+            decision = _trailing_stop_decision(pos, candidate)
+            if decision["action"] == "trail_stop":
+                _cancel_stop(ib, pos.get("stop_order_id"))
+                pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], decision["new_stop_price"], side)
+                old_stop = pos.get("stop_price", pos["initial_stop"])
+                pos["stop_price"] = decision["new_stop_price"]
+                notify(f"[{mode.upper()}] TRAIL {pos['symbol']}", f"stop ${old_stop:.2f} -> ${decision['new_stop_price']:.2f}", "default")
+                log_decision(account_id, mode, {"event": "trail_stop", "symbol": pos["symbol"], "side": side, "old": old_stop, "new": decision["new_stop_price"]})
+        else:
+            mfe_r = ((entry - pos["mfe_price"]) if side == "short" else (pos["mfe_price"] - entry)) / initial_risk
+            trailing_trigger_r = exit_cfg.get("trailing_trigger_R", 1.20)
+            if mfe_r >= trailing_trigger_r:
+                pos["trail_activated"] = True
+                pos["trail_activated_at_r"] = trailing_trigger_r
+                bars = _get_5min_bars(pos["symbol"])
+                candidate = None
+                if bars is not None and len(bars) >= 2:
+                    candidate = orb.low_of_last_n_bars(bars, 2) if side == "long" else orb.high_of_last_n_bars(bars, 2)
+                decision = _trailing_stop_decision(pos, candidate)
+                new_stop_note = pos.get("stop_price", pos["initial_stop"])
+                if decision["action"] == "trail_stop":
+                    _cancel_stop(ib, pos.get("stop_order_id"))
+                    pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], decision["new_stop_price"], side)
+                    pos["stop_price"] = decision["new_stop_price"]
+                    new_stop_note = decision["new_stop_price"]
+                notify(f"[{mode.upper()}] TRAILING ACTIVATED {pos['symbol']}", f"MFE cleared {trailing_trigger_r}R, stop -> ${new_stop_note:.2f}", "default")
+                log_decision(account_id, mode, {"event": "trail_activated", "symbol": pos["symbol"], "side": side, "at_r": trailing_trigger_r, "stop": new_stop_note})
+
+        if pos["qty"] > 0:
+            db.upsert_position(account_id, mode, pos)
+        return pos
+
     if pos["state"] == "pre_breakeven":
         decision = _breakeven_decision(pos, exit_cfg, r_multiple)
         if decision["action"] == "breakeven_flip":
@@ -1343,7 +1430,30 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
         else:
             fill_qty, fill_price = size, price
 
-        stop_order_id = _place_stop(ib, ticker, fill_qty, initial_stop, side)
+        # "no_stop_delayed_trail" strategies (v4.1/v4.2/v4.3/V8/V9/V10) that
+        # opt into exit_cfg["hard_stop_R"] place their REAL resting stop at
+        # that wider level, not at the tight ORB initial_stop - see
+        # manage_position's own "no_stop_delayed_trail" branch docstring
+        # for why (it's the strategy's own deliberately wider, more patient
+        # stop, not a bug). v4.1 itself (no hard_stop_R at all) keeps the
+        # tight initial_stop as its real resting stop - a deliberate, more
+        # conservative departure from backtest_engine.py's own "never stops
+        # for adverse movement" semantics for that specific case, since
+        # resting NO protective stop at all is a materially different (and
+        # unacceptable) live risk posture. initial_risk here is realized
+        # off the ACTUAL fill_price, matching manage_position's own
+        # r_multiple math - not backtest_engine.py's pre-fill signal price.
+        order_stop_price = initial_stop
+        extra_position_fields = {}
+        if rules["exit"].get("management_style") == "no_stop_delayed_trail":
+            extra_position_fields = {"mfe_price": fill_price, "trail_activated": False, "trail_activated_at_r": None}
+            hard_stop_r = rules["exit"].get("hard_stop_R")
+            if hard_stop_r is not None:
+                initial_risk = abs(fill_price - initial_stop)
+                order_stop_price = (fill_price + hard_stop_r * initial_risk) if side == "short" else (fill_price - hard_stop_r * initial_risk)
+                extra_position_fields["hard_stop_price"] = order_stop_price
+
+        stop_order_id = _place_stop(ib, ticker, fill_qty, order_stop_price, side)
         new_position = {
             "symbol": ticker,
             "side": side,
@@ -1351,10 +1461,11 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
             "entry_time_iso": datetime.now(ET).isoformat(timespec="seconds"),
             "qty": fill_qty,
             "initial_stop": initial_stop,
-            "stop_price": initial_stop,
+            "stop_price": order_stop_price,
             "stop_order_id": stop_order_id,
             "state": "pre_breakeven",
             "r_multiple": 0.0,
+            **extra_position_fields,
         }
         if is_orb:
             new_position["target_price"] = signal["target_price"]
