@@ -653,6 +653,15 @@ def manage_position(account_id: int, mode: str, ib, pos: dict, rules: dict) -> d
     r_multiple = ((entry - price) if side == "short" else (price - entry)) / initial_risk
     pos["r_multiple"] = r_multiple
 
+    # Worst price seen since entry, same per-cycle (not truly intrabar)
+    # sampling as mfe_price above - tracked for EVERY position regardless
+    # of management_style, purely observational (read only by the
+    # Decision Intelligence Center dashboard and the V10 dynamic_recovery
+    # live-parity replay's mae_r feature - see db.upsert_position's own
+    # migration comment). Never influences any stop/trailing/exit
+    # decision below.
+    pos["mae_price"] = min(pos.get("mae_price") or entry, price) if side == "long" else max(pos.get("mae_price") or entry, price)
+
     if exit_cfg.get("management_style") == "fixed_target_no_trail":
         # ORB positions: no breakeven flip, no swing trailing - the broker-side
         # stop placed at entry (initial_stop, never moved) protects the
@@ -1444,9 +1453,9 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
         # off the ACTUAL fill_price, matching manage_position's own
         # r_multiple math - not backtest_engine.py's pre-fill signal price.
         order_stop_price = initial_stop
-        extra_position_fields = {}
+        extra_position_fields = {"mae_price": fill_price}
         if rules["exit"].get("management_style") == "no_stop_delayed_trail":
-            extra_position_fields = {"mfe_price": fill_price, "trail_activated": False, "trail_activated_at_r": None}
+            extra_position_fields.update({"mfe_price": fill_price, "trail_activated": False, "trail_activated_at_r": None})
             hard_stop_r = rules["exit"].get("hard_stop_R")
             if hard_stop_r is not None:
                 initial_risk = abs(fill_price - initial_stop)

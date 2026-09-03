@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS positions (
     mfe_price REAL,
     trail_activated INTEGER NOT NULL DEFAULT 0,
     trail_activated_at_r REAL,
+    mae_price REAL,
     PRIMARY KEY (account_id, mode, symbol)
 );
 
@@ -3006,6 +3007,15 @@ def init_db(seed_rules_path: Path | None = None):
         _migrate_add_column(conn, "positions", "mfe_price", "REAL")
         _migrate_add_column(conn, "positions", "trail_activated", "INTEGER NOT NULL DEFAULT 0")
         _migrate_add_column(conn, "positions", "trail_activated_at_r", "REAL")
+        # Worst price seen since entry (per-cycle granularity, symmetric to
+        # mfe_price above) - tracked for EVERY open position regardless of
+        # management_style (see cycle.manage_position's top-of-function
+        # computation, right after r_multiple), purely observational: never
+        # read back by any stop/trailing/exit decision, only by the
+        # read-only Decision Intelligence Center dashboard (web/app.py's
+        # /api/decision_center) and backtest_engine's own live-parity
+        # dynamic_recovery replay (mae_r).
+        _migrate_add_column(conn, "positions", "mae_price", "REAL")
         _migrate_add_column(conn, "watchlist", "universe", "TEXT NOT NULL DEFAULT ',default,'")
         _migrate_add_column(conn, "watchlist", "direction", "TEXT NOT NULL DEFAULT 'long'")
         # NULL for trades recorded the old way (trade.py/close_position.py's
@@ -3706,22 +3716,23 @@ def upsert_position(account_id: int, mode: str, pos: dict):
     pos = {
         "side": "long", "target_price": None, "hard_stop_price": None,
         "mfe_price": None, "trail_activated": False, "trail_activated_at_r": None,
+        "mae_price": None,
         **pos,
     }
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO positions (account_id, mode, symbol, side, entry_price, entry_time_iso, qty, initial_stop, "
             "stop_price, stop_order_id, state, r_multiple, target_price, hard_stop_price, mfe_price, "
-            "trail_activated, trail_activated_at_r) VALUES "
+            "trail_activated, trail_activated_at_r, mae_price) VALUES "
             "(:account_id, :mode, :symbol, :side, :entry_price, :entry_time_iso, :qty, :initial_stop, :stop_price, "
             ":stop_order_id, :state, :r_multiple, :target_price, :hard_stop_price, :mfe_price, "
-            ":trail_activated, :trail_activated_at_r) "
+            ":trail_activated, :trail_activated_at_r, :mae_price) "
             "ON CONFLICT(account_id, mode, symbol) DO UPDATE SET "
             "qty=excluded.qty, initial_stop=excluded.initial_stop, stop_price=excluded.stop_price, "
             "stop_order_id=excluded.stop_order_id, state=excluded.state, r_multiple=excluded.r_multiple, "
             "target_price=excluded.target_price, hard_stop_price=excluded.hard_stop_price, "
             "mfe_price=excluded.mfe_price, trail_activated=excluded.trail_activated, "
-            "trail_activated_at_r=excluded.trail_activated_at_r",
+            "trail_activated_at_r=excluded.trail_activated_at_r, mae_price=excluded.mae_price",
             {**pos, "account_id": account_id, "mode": mode},
         )
 
@@ -3981,6 +3992,38 @@ def get_decision_log(account_id: int, mode: str, limit: int = 200) -> list[dict]
             (account_id, mode, limit),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def get_decision_log_for_symbol(account_id: int, mode: str, symbol: str, scan_limit: int = 5000) -> list[dict]:
+    """Every decision_log row for one symbol, oldest first — powers the
+    Decision Intelligence Center's read-only Timeline/Flight-Recorder/
+    Entry-Qualified views (web/app.py's /api/decision_center, src/
+    decision_observer.py). symbol isn't its own indexed column (it's
+    nested inside payload_json - see log_decision), so this scans the
+    most recent `scan_limit` rows for this account+mode and filters in
+    Python - the same "small enough to just parse" reasoning count_todays_
+    entries above already relies on, generous here since a single
+    position's own decision_log footprint (filter_eval scans, entry,
+    every stop/trail event) is a tiny fraction of a whole account+mode's
+    activity."""
+    _check_mode(mode)
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM decision_log WHERE account_id = ? AND mode = ? ORDER BY id DESC LIMIT ?",
+            (account_id, mode, scan_limit),
+        ).fetchall()
+    out = []
+    for r in rows:
+        row = dict(r)
+        try:
+            payload = json.loads(row["payload_json"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if payload.get("symbol") == symbol:
+            row["payload"] = payload
+            out.append(row)
+    out.reverse()
+    return out
 
 
 def log_cycle_error(account_id: int, mode: str, traceback_text: str):

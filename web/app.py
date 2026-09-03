@@ -16,6 +16,7 @@ from datetime import date
 from io import BytesIO
 from pathlib import Path
 
+import pandas as pd
 from dotenv import dotenv_values
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -25,7 +26,7 @@ from fastapi.templating import Jinja2Templates
 import cycle
 import morning_prefilter
 import run_optimization
-from src import backtest_data, backtest_engine, db, gateway_provisioning, mode_config, perf, risk_reduction_report, secrets_store, telemetry_engine, trade_diagnostics, trades_csv, trades_pdf, trades_xlsx, v10_recovery_report
+from src import backtest_data, backtest_engine, db, decision_observer, gateway_provisioning, mode_config, perf, risk_reduction_report, secrets_store, telemetry_engine, trade_diagnostics, trades_csv, trades_pdf, trades_xlsx, v10_recovery_report
 from src.sp500_tickers import SP500_TICKERS
 from web import gateway_control
 from web.auth import COOKIE_NAME, make_session_cookie, read_session, require_user
@@ -316,6 +317,30 @@ def telemetry_page(request: Request):
         return RedirectResponse("/backtest", status_code=303)
     return templates.TemplateResponse(request, "telemetry.html", {
         "active_page": "telemetry",
+        "is_admin": bool(account and account.get("is_admin")),
+    })
+
+
+@app.get("/decision_center", response_class=HTMLResponse)
+def decision_center_page(request: Request):
+    """Bot Decision Intelligence Center - a single-screen, strictly
+    read-only observability page over whichever strategy is currently
+    active per side (long/short) - see src/decision_observer.py's own
+    module docstring for the "never affects a trading decision"
+    guarantee. Same viewer-redirect precedent as /optimization/
+    /telemetry: this reads real paper/live position data (not just
+    backtest results), so a viewer account is redirected to /backtest
+    exactly like every other operational screen."""
+    if not db.any_users_exist():
+        return RedirectResponse("/setup", status_code=303)
+    username = read_session(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    account = db.get_user_by_username(username)
+    if account and account.get("role") == "viewer":
+        return RedirectResponse("/backtest", status_code=303)
+    return templates.TemplateResponse(request, "decision_center.html", {
+        "active_page": "decision_center",
         "is_admin": bool(account and account.get("is_admin")),
     })
 
@@ -698,6 +723,117 @@ def api_positions(mode: str = Depends(require_mode), account_id: int = Depends(r
         pos["current_price"] = price
         pos["unrealized_r"] = (move / risk_per_share) if move is not None and risk_per_share > 0 else None
     return positions
+
+
+# --------------------------------------------- Decision Intelligence Center
+# Strictly read-only - every endpoint below only ever reads db.positions/
+# decision_log/trades and fresh yfinance bars (via src.decision_observer,
+# reusing cycle._current_price/get_chart_bars and, for V8/V9/V10 signal
+# replay, src.backtest_engine's own pure functions - see that module's own
+# docstring). Nothing here writes to db.positions, places/cancels an
+# order, or feeds back into cycle.manage_position - a bug or crash
+# anywhere in this section cannot affect a single live trading decision.
+def _rules_for_side(account_id: int, side: str) -> dict:
+    return db.get_active_rules(account_id, side) or {"exit": cycle._FALLBACK_EXIT_CFG}
+
+
+@app.get("/api/decision_center/overview")
+def api_decision_center_overview(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    strategies = {side: db.get_active_strategy(account_id, side) for side in db.DIRECTIONS}
+    rows = []
+    for pos in db.get_open_positions(account_id, mode):
+        side = pos.get("side", "long")
+        rules = _rules_for_side(account_id, side)
+        exit_cfg = rules.get("exit", {})
+        snapshot = decision_observer.position_snapshot(pos, exit_cfg)
+        score = decision_observer.attractiveness_score(snapshot, exit_cfg)
+        strategy = strategies.get(side)
+        rows.append({
+            "snapshot": snapshot, "score": score,
+            "strategy_name": strategy["name"] if strategy else None,
+            "management_style": exit_cfg.get("management_style"),
+            "has_dynamic_signals": bool(exit_cfg.get("dynamic_recovery") or exit_cfg.get("dynamic_risk_reduction")),
+        })
+    return {
+        "positions": rows,
+        "strategies": {side: (s["name"] if s else None) for side, s in strategies.items()},
+    }
+
+
+@app.get("/api/decision_center/position/{symbol}")
+def api_decision_center_position(symbol: str, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    positions = {p["symbol"]: p for p in db.get_open_positions(account_id, mode)}
+    pos = positions.get(symbol)
+    if pos is None:
+        raise HTTPException(status_code=404, detail=f"No open {mode} position in {symbol}")
+    side = pos.get("side", "long")
+    rules = _rules_for_side(account_id, side)
+    exit_cfg = rules.get("exit", {})
+    strategy = db.get_active_strategy(account_id, side)
+
+    snapshot = decision_observer.position_snapshot(pos, exit_cfg)
+    score = decision_observer.attractiveness_score(snapshot, exit_cfg)
+    entry_qualified = decision_observer.entry_qualified_checklist(account_id, mode, pos)
+    timeline = decision_observer.position_timeline(account_id, mode, symbol)
+    signals = decision_observer.replay_dynamic_signals(pos, rules)
+
+    return {
+        "snapshot": snapshot, "score": score, "strategy_name": strategy["name"] if strategy else None,
+        "entry_qualified": entry_qualified, "timeline": timeline, "signals": signals,
+        "diagnostics": {"position": pos, "exit_cfg": exit_cfg},
+    }
+
+
+@app.get("/api/decision_center/closed_trades")
+def api_decision_center_closed_trades(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access), limit: int = 300):
+    """Historical Replay tab's picker list - real closed round-trips,
+    FIFO-paired the same way every other performance view in this app
+    already does (src.perf.pair_trades over db.get_trades)."""
+    rows = db.get_trades(account_id, mode, limit=limit)
+    pairs = perf.pair_trades(rows)
+    pairs.sort(key=lambda p: p["sell_time"] if p["side"] == "long" else p["buy_time"], reverse=True)
+    out = []
+    for i, p in enumerate(pairs):
+        r = perf.r_multiple(p)
+        out.append({
+            "id": i, "symbol": p["symbol"], "side": p["side"],
+            "entry_time": p["buy_time"] if p["side"] == "long" else p["sell_time"],
+            "exit_time": p["sell_time"] if p["side"] == "long" else p["buy_time"],
+            "pnl_usd": p["pnl_usd"], "r_multiple": r,
+        })
+    return out
+
+
+@app.get("/api/decision_center/replay")
+def api_decision_center_replay(
+    symbol: str, entry_at: str, exit_at: str,
+    mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access),
+):
+    """Bar-by-bar price path + the real decision_log timeline for one
+    already-closed trade, for the Historical Replay tab's play/pause/step
+    control - entry_at/exit_at (from api_decision_center_closed_trades'
+    own rows) disambiguate which of possibly several historical trades on
+    this symbol is being replayed."""
+    bars = decision_observer.fetch_bars(symbol)
+    if bars is None or bars.empty:
+        raise HTTPException(status_code=404, detail=f"No intraday bars available for {symbol}")
+    try:
+        entry_ts, exit_ts = pd.Timestamp(entry_at), pd.Timestamp(exit_at)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Bad timestamp: {exc}")
+    window = bars[(bars.index >= entry_ts - pd.Timedelta(minutes=15)) & (bars.index <= exit_ts + pd.Timedelta(minutes=15))]
+    events = [
+        e for e in decision_observer.position_timeline(account_id, mode, symbol)
+        if entry_at <= e["at"] <= exit_at
+    ]
+    return {
+        "symbol": symbol,
+        "bars": [
+            {"t": ts.isoformat(), "o": float(r["Open"]), "h": float(r["High"]), "l": float(r["Low"]), "c": float(r["Close"])}
+            for ts, r in window.iterrows()
+        ],
+        "events": events,
+    }
 
 
 # Moving a LIVE stop cancels the order actually protecting the position and

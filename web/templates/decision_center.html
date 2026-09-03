@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TradingBot — Decision Center</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+{% include "_theme.html" %}
+<style>
+  body { background:#f4f6f8; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .mode-tab { cursor:pointer; }
+  .mode-tab.active-paper { background:#0dcaf0 !important; color:#000 !important; }
+  .mode-tab.active-live { background:#dc3545 !important; color:#fff !important; }
+  .pos-card { cursor:pointer; border-width:2px; }
+  .pos-card.selected { border-color: var(--bs-primary); }
+  .badge-status-HOLDING { background:#6c757d; }
+  .badge-status-PROGRESSING { background:#0d6efd; }
+  .badge-status-TRAILING { background:#198754; }
+  .badge-status-AT_RISK { background:#dc3545; }
+  .score-bar-track { height:10px; background:#e9ecef; border-radius:5px; overflow:hidden; }
+  .score-bar { height:100%; background:linear-gradient(90deg,#dc3545,#ffc107,#198754); }
+  .checklist-item { padding:.25rem .5rem; border-radius:.25rem; margin-bottom:2px; }
+  .checklist-pass { background:rgba(25,135,84,.12); }
+  .checklist-fail { background:rgba(220,53,69,.08); color:#6c757d; }
+  .timeline-item { border-left:2px solid #dee2e6; padding:.25rem 0 .25rem 1rem; margin-left:.5rem; position:relative; }
+  .timeline-item::before { content:""; position:absolute; left:-5px; top:.5rem; width:8px; height:8px; border-radius:50%; background:#6c757d; }
+  .timeline-item.ev-entry::before { background:#0d6efd; }
+  .timeline-item.ev-trail_activated::before, .timeline-item.ev-trail_stop::before { background:#198754; }
+  .timeline-item.ev-stop_out::before, .timeline-item.ev-force_close::before { background:#dc3545; }
+  .timeline-item.ev-hard_stop_backfilled::before { background:#fd7e14; }
+  pre.diag { max-height:400px; overflow:auto; background:#212529; color:#e9ecef; padding:.75rem; border-radius:.375rem; font-size:.78rem; }
+  [data-bs-theme="dark"] pre.diag { background:#1a1d20; }
+  #replay-canvas { width:100%; height:180px; border:1px solid #dee2e6; border-radius:.375rem; background:#fff; }
+  [data-bs-theme="dark"] #replay-canvas { background:#212529; border-color:#495057; }
+  .disclaimer-banner { background:#fff3cd; border:1px solid #ffe69c; color:#664d03; border-radius:.375rem; padding:.5rem .75rem; font-size:.85rem; }
+  [data-bs-theme="dark"] .disclaimer-banner { background:#3a3222; border-color:#665a2e; color:#ffda6a; }
+</style>
+</head>
+<body>
+{% include "_nav.html" %}
+
+<div class="container-fluid px-4 pb-5">
+
+  <div class="alert alert-info small mb-3">
+    <strong>Read-only observability.</strong> This screen only ever narrates what the bot's own live logic already decided (see <code>src/decision_observer.py</code>) — nothing here can change a stop, trigger an order, or delay execution. It never runs the strategy itself.
+  </div>
+
+  <div class="d-flex gap-2 mb-3">
+    <button id="tab-paper" class="btn btn-outline-info mode-tab fw-bold">PAPER</button>
+    <button id="tab-live" class="btn btn-outline-danger mode-tab fw-bold">LIVE — real money</button>
+  </div>
+
+  <div class="row g-3 mb-3">
+    <div class="col-lg-6">
+      <div class="card h-100">
+        <div class="card-header">Active Strategy — Long</div>
+        <div class="card-body py-2" id="active-strategy-long">Loading…</div>
+      </div>
+    </div>
+    <div class="col-lg-6">
+      <div class="card h-100">
+        <div class="card-header">Active Strategy — Short</div>
+        <div class="card-body py-2" id="active-strategy-short">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3 mb-3" id="overview-cards"></div>
+  <div id="no-positions" class="text-muted small mb-3 d-none">No open positions being managed by the bot in this mode right now.</div>
+
+  <div class="card mb-3" id="detail-card" style="display:none;">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span>Position: <strong id="detail-symbol">-</strong></span>
+      <span id="detail-badges"></span>
+    </div>
+    <div class="card-body">
+      <ul class="nav nav-tabs mb-3" id="dc-tabs">
+        <li class="nav-item"><button class="nav-link active" data-tab="overview">Overview</button></li>
+        <li class="nav-item"><button class="nav-link" data-tab="engine">Decision Engine</button></li>
+        <li class="nav-item"><button class="nav-link" data-tab="health">Position Health</button></li>
+        <li class="nav-item"><button class="nav-link" data-tab="timeline">Timeline</button></li>
+        <li class="nav-item"><button class="nav-link" data-tab="signals">Signals</button></li>
+        <li class="nav-item"><button class="nav-link" data-tab="diagnostics">Diagnostics</button></li>
+      </ul>
+
+      <div class="dc-pane" data-pane="overview"></div>
+      <div class="dc-pane d-none" data-pane="engine"></div>
+      <div class="dc-pane d-none" data-pane="health"></div>
+      <div class="dc-pane d-none" data-pane="timeline"></div>
+      <div class="dc-pane d-none" data-pane="signals"></div>
+      <div class="dc-pane d-none" data-pane="diagnostics"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">Historical Replay</div>
+    <div class="card-body">
+      <div class="row g-2 align-items-end mb-3">
+        <div class="col-auto">
+          <label class="form-label small mb-0">Closed trade</label>
+          <select id="replay-picker" class="form-select form-select-sm"><option>Loading…</option></select>
+        </div>
+        <div class="col-auto">
+          <button id="btn-replay-load" class="btn btn-sm btn-outline-primary">Load</button>
+        </div>
+        <div class="col-auto">
+          <button id="btn-replay-step-back" class="btn btn-sm btn-outline-secondary" disabled>◀ Step</button>
+          <button id="btn-replay-play" class="btn btn-sm btn-outline-success" disabled>▶ Play</button>
+          <button id="btn-replay-step" class="btn btn-sm btn-outline-secondary" disabled>Step ▶</button>
+        </div>
+        <div class="col-auto text-muted small" id="replay-cursor-label"></div>
+      </div>
+      <canvas id="replay-canvas" height="180"></canvas>
+      <div id="replay-events" class="mt-3"></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// Minimal fetch/mode helpers, deliberately independent of shared.js
+// (this page skips _header.html - no bot controls/IBKR creds card here,
+// nothing to wire those helpers into) - kept local so this page has zero
+// coupling to bot.html/trading.html's own control-panel JS.
+let currentMode = "paper";
+async function api(path) {
+  const res = await fetch(path, { credentials: "same-origin" });
+  if (res.status === 401) { window.location.href = "/login"; throw new Error("unauthenticated"); }
+  if (!res.ok) { const t = await res.text(); throw new Error(t); }
+  return res.json();
+}
+function modeApi(path) {
+  const sep = path.includes("?") ? "&" : "?";
+  return api(`${path}${sep}mode=${currentMode}`);
+}
+function setMode(mode) {
+  currentMode = mode;
+  document.getElementById("tab-paper").classList.toggle("active-paper", mode === "paper");
+  document.getElementById("tab-live").classList.toggle("active-live", mode === "live");
+  refreshAll();
+}
+document.getElementById("tab-paper").addEventListener("click", () => setMode("paper"));
+document.getElementById("tab-live").addEventListener("click", () => setMode("live"));
+
+function fmt(v, d) { return (v === null || v === undefined) ? "-" : Number(v).toFixed(d === undefined ? 2 : d); }
+function fmtR(v) { return (v === null || v === undefined) ? "-" : `${Number(v).toFixed(2)}R`; }
+function fmtMoney(v) { return (v === null || v === undefined) ? "-" : `$${Number(v).toFixed(2)}`; }
+function fmtAge(mins) {
+  if (mins === null || mins === undefined) return "-";
+  if (mins < 60) return `${Math.round(mins)}m`;
+  return `${(mins / 60).toFixed(1)}h`;
+}
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+let selectedSymbol = null;
+let overviewRows = [];
+
+async function refreshAll() {
+  await Promise.all([refreshActiveStrategies(), refreshOverview(), refreshReplayPicker()]);
+}
+
+async function refreshActiveStrategies() {
+  try {
+    const o = await modeApi("/api/decision_center/overview");
+    document.getElementById("active-strategy-long").textContent = o.strategies.long || "None active";
+    document.getElementById("active-strategy-short").textContent = o.strategies.short || "None active";
+  } catch (e) { /* handled in refreshOverview */ }
+}
+
+async function refreshOverview() {
+  const container = document.getElementById("overview-cards");
+  try {
+    const o = await modeApi("/api/decision_center/overview");
+    overviewRows = o.positions;
+    container.innerHTML = "";
+    document.getElementById("no-positions").classList.toggle("d-none", o.positions.length > 0);
+    o.positions.forEach(row => {
+      const s = row.snapshot;
+      const col = document.createElement("div");
+      col.className = "col-md-6 col-xl-4";
+      col.innerHTML = `
+        <div class="card pos-card h-100 ${s.symbol === selectedSymbol ? "selected" : ""}" data-symbol="${s.symbol}">
+          <div class="card-body">
+            <div class="d-flex justify-content-between align-items-start mb-1">
+              <div><strong>${s.symbol}</strong> <span class="badge ${s.side === "short" ? "bg-danger" : "bg-primary"}">${s.side.toUpperCase()}</span></div>
+              <span class="badge badge-status-${s.status}">${s.status.replace("_", " ")}</span>
+            </div>
+            <div class="small text-muted mb-1">${row.strategy_name || "-"}</div>
+            <div class="d-flex justify-content-between small mb-1">
+              <span>R: <strong class="${s.r_multiple >= 0 ? "text-success" : "text-danger"}">${fmtR(s.r_multiple)}</strong></span>
+              <span>MFE: ${fmtR(s.mfe_r)}</span>
+              <span>MAE: ${fmtR(s.mae_r)}</span>
+            </div>
+            <div class="score-bar-track mb-1"><div class="score-bar" style="width:${row.score.score}%"></div></div>
+            <div class="small text-muted">Attractiveness: ${row.score.score}/100 · Age ${fmtAge(s.age_minutes)}</div>
+          </div>
+        </div>`;
+      col.querySelector(".pos-card").addEventListener("click", () => selectPosition(s.symbol));
+      container.appendChild(col);
+    });
+    if (selectedSymbol && !o.positions.some(r => r.snapshot.symbol === selectedSymbol)) {
+      selectedSymbol = null;
+      document.getElementById("detail-card").style.display = "none";
+    }
+  } catch (e) {
+    container.innerHTML = `<div class="col-12 text-danger small">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function selectPosition(symbol) {
+  selectedSymbol = symbol;
+  document.querySelectorAll(".pos-card").forEach(el => el.classList.toggle("selected", el.dataset.symbol === symbol));
+  document.getElementById("detail-card").style.display = "";
+  document.getElementById("detail-symbol").textContent = symbol;
+  loadDetail(symbol);
+}
+
+let currentDetail = null;
+
+async function loadDetail(symbol) {
+  try {
+    currentDetail = await modeApi(`/api/decision_center/position/${encodeURIComponent(symbol)}`);
+  } catch (e) {
+    document.getElementById("detail-badges").innerHTML = `<span class="text-danger small">${escapeHtml(e.message)}</span>`;
+    return;
+  }
+  renderBadges();
+  renderOverviewPane();
+  renderEnginePane();
+  renderHealthPane();
+  renderTimelinePane();
+  renderSignalsPane();
+  renderDiagnosticsPane();
+}
+
+function renderBadges() {
+  const s = currentDetail.snapshot;
+  document.getElementById("detail-badges").innerHTML =
+    `<span class="badge badge-status-${s.status} me-1">${s.status.replace("_", " ")}</span>` +
+    `<span class="badge bg-secondary">${currentDetail.strategy_name || "-"}</span>`;
+}
+
+document.querySelectorAll("#dc-tabs button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#dc-tabs button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    document.querySelectorAll(".dc-pane").forEach(p => p.classList.add("d-none"));
+    document.querySelector(`.dc-pane[data-pane="${btn.dataset.tab}"]`).classList.remove("d-none");
+  });
+});
+
+function renderOverviewPane() {
+  const s = currentDetail.snapshot;
+  document.querySelector('.dc-pane[data-pane="overview"]').innerHTML = `
+    <div class="row g-3">
+      <div class="col-md-6">
+        <table class="table table-sm mb-0">
+          <tr><th>Entry price</th><td>${fmtMoney(s.entry_price)}</td></tr>
+          <tr><th>Current price</th><td>${fmtMoney(s.current_price)}</td></tr>
+          <tr><th>R-multiple</th><td class="${s.r_multiple >= 0 ? "text-success" : "text-danger"}">${fmtR(s.r_multiple)}</td></tr>
+          <tr><th>MFE</th><td>${fmtMoney(s.mfe_price)} (${fmtR(s.mfe_r)})</td></tr>
+          <tr><th>MAE</th><td>${fmtMoney(s.mae_price)} (${fmtR(s.mae_r)})</td></tr>
+          <tr><th>Age</th><td>${fmtAge(s.age_minutes)}</td></tr>
+          <tr><th>Qty</th><td>${s.qty}</td></tr>
+        </table>
+      </div>
+      <div class="col-md-6">
+        <table class="table table-sm mb-0">
+          <tr><th>Initial stop</th><td>${fmtMoney(s.initial_stop)}</td></tr>
+          <tr><th>Hard stop</th><td>${fmtMoney(s.hard_stop_price)}</td></tr>
+          <tr><th>Active stop (real order)</th><td><strong>${fmtMoney(s.active_stop)}</strong></td></tr>
+          <tr><th>Trailing</th><td>${s.trail_activated ? `Active (activated at ${fmtR(s.trail_activated_at_r)})` : "Not yet activated"}</td></tr>
+        </table>
+        <div class="small text-muted mt-2">${escapeHtml(s.exit_logic)}</div>
+      </div>
+    </div>`;
+}
+
+function renderEnginePane() {
+  const eq = currentDetail.entry_qualified;
+  const score = currentDetail.score;
+  const s = currentDetail.snapshot;
+  let checklistHtml = "";
+  if (eq.available) {
+    const d = eq.detail;
+    const keys = d.model === "orb"
+      ? [["confirm_break", "Confirmed break of opening range"], ["retest_hit", "Retest hit"]]
+      : [["D1", "D1"], ["D2", "D2"], ["D3", "D3"], ["I1", "I1"], ["I2", "I2"], ["I3", "I3"]];
+    checklistHtml = keys.filter(([k]) => k in d).map(([k, label]) => {
+      const v = d[k];
+      return `<div class="checklist-item ${v ? "checklist-pass" : "checklist-fail"}">${v ? "✓" : "✗"} ${label}</div>`;
+    }).join("") || `<pre class="diag">${escapeHtml(JSON.stringify(d, null, 2))}</pre>`;
+    checklistHtml += `<div class="small text-muted mt-2">Scanned at ${eq.at}${d.rvol !== undefined ? `, RVOL ${fmt(d.rvol, 2)}` : ""}${d.gap_pct !== undefined ? `, Gap ${fmt(d.gap_pct, 2)}%` : ""}</div>`;
+  } else {
+    checklistHtml = `<div class="text-muted small">${escapeHtml(eq.reason)}</div>`;
+  }
+
+  let explanation = `${s.symbol} is a <strong>${s.side}</strong> position via <em>${currentDetail.strategy_name || "an unnamed strategy"}</em>, `;
+  explanation += `currently at <strong>${fmtR(s.r_multiple)}</strong>. `;
+  if (s.trail_activated) explanation += `Trailing has activated (crossed ${fmtR(s.trail_activated_at_r)}) - the real stop now follows price. `;
+  else explanation += `The position is still under its ${s.hard_stop_price !== null ? "hard" : "initial"} stop at ${fmtMoney(s.active_stop)}, waiting to clear the trailing trigger. `;
+  explanation += s.mae_r < -0.3 ? `It has drawn down to ${fmtR(s.mae_r)} at its worst. ` : "";
+
+  const contribHtml = score.contributors.map(c =>
+    `<div class="d-flex justify-content-between small border-bottom py-1"><span>${escapeHtml(c.detail)}</span><span class="${c.points >= 0 ? "text-success" : "text-danger"}">${c.points >= 0 ? "+" : ""}${c.points}</span></div>`
+  ).join("");
+
+  document.querySelector('.dc-pane[data-pane="engine"]').innerHTML = `
+    <div class="row g-3">
+      <div class="col-lg-6">
+        <h6>Attractiveness Score: ${score.score}/100</h6>
+        <div class="score-bar-track mb-2"><div class="score-bar" style="width:${score.score}%"></div></div>
+        ${contribHtml}
+      </div>
+      <div class="col-lg-6">
+        <h6>Entry Qualified</h6>
+        ${checklistHtml}
+      </div>
+    </div>
+    <hr>
+    <h6>Decision Explanation</h6>
+    <p class="small">${explanation}</p>`;
+}
+
+function gaugeHtml(label, pct, color) {
+  pct = Math.max(0, Math.min(100, pct));
+  return `
+    <div class="mb-3">
+      <div class="d-flex justify-content-between small"><span>${label}</span><span>${pct.toFixed(0)}%</span></div>
+      <div class="score-bar-track"><div style="width:${pct}%;height:100%;background:${color};"></div></div>
+    </div>`;
+}
+
+function renderHealthPane() {
+  const sig = currentDetail.signals;
+  const pane = document.querySelector('.dc-pane[data-pane="health"]');
+  if (!sig || !sig.applicable) {
+    pane.innerHTML = `<div class="text-muted small">This strategy doesn't use dynamic recovery/risk-reduction monitoring - no health signal exists for this position.</div>`;
+    return;
+  }
+  const banner = `<div class="disclaimer-banner mb-3">This is a genuine, freshly-computed replay of ${sig.mechanism === "v10_dynamic_recovery" ? "the V10 recovery" : "the V8/V9 risk-reduction"} logic against live market data - shown for awareness only. It is <strong>not wired into the bot's real stop</strong> (live_enforced: false) - the real, protective stop is exactly what the Overview tab's "Active stop" shows.</div>`;
+  if (sig.error) {
+    pane.innerHTML = banner + `<div class="text-muted small">${escapeHtml(sig.error)}</div>`;
+    return;
+  }
+  if (sig.mechanism === "v10_dynamic_recovery") {
+    const last = (sig.checkpoint_log || []).filter(r => "recovery_score" in r).slice(-1)[0];
+    const recoveryPct = last ? (last.recovery_score / 8) * 100 : 0;
+    const deteriorationPct = last ? (last.deterioration_score / 8) * 100 : 0;
+    pane.innerHTML = banner + `
+      <div class="mb-2"><strong>State:</strong> ${sig.state}${sig.warning_fired ? " (early-warning fired)" : sig.warning_evaluated ? " (10m check: no warning)" : " (not yet evaluated)"}</div>
+      ${last ? gaugeHtml("Recovery score", recoveryPct, "#198754") + gaugeHtml("Deterioration score", deteriorationPct, "#dc3545") : `<div class="text-muted small">No checkpoint reached yet.</div>`}
+      <canvas id="radar-canvas" width="360" height="260" class="mt-2"></canvas>`;
+    if (last) drawRadar(last);
+  } else {
+    pane.innerHTML = banner + `
+      <div class="mb-2"><strong>Checked:</strong> ${sig.checked ? "yes" : "not yet"}</div>
+      ${sig.checked ? `
+        <table class="table table-sm">
+          <tr><th>Reason</th><td>${sig.reason}</td></tr>
+          <tr><th>Current R</th><td>${fmtR(sig.current_r)}</td></tr>
+          <tr><th>RSI delta</th><td>${fmt(sig.rsi_delta, 1)}</td></tr>
+          <tr><th>Returned inside OR</th><td>${sig.returned_inside_or}</td></tr>
+          <tr><th>Lost EMA9</th><td>${sig.lost_ema9}</td></tr>
+          <tr><th>MFE so far</th><td>${fmtR(sig.mfe_r_so_far)}</td></tr>
+          <tr><th>All conditions passed</th><td>${sig.all_conditions_passed}</td></tr>
+        </table>` : `<div class="text-muted small">Scheduled at ${sig.scheduled_ts}</div>`}`;
+  }
+}
+
+function drawRadar(row) {
+  const cv = document.getElementById("radar-canvas");
+  if (!cv) return;
+  const ctx = cv.getContext("2d");
+  const cx = 180, cy = 130, r = 100;
+  const rKeys = ["r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8"];
+  const n = rKeys.length;
+  ctx.clearRect(0, 0, 360, 260);
+  ctx.strokeStyle = "#ced4da";
+  for (let ring = 1; ring <= 4; ring++) {
+    ctx.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const a = (i / n) * 2 * Math.PI - Math.PI / 2;
+      const rad = (ring / 4) * r;
+      const x = cx + rad * Math.cos(a), y = cy + rad * Math.sin(a);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  ctx.beginPath();
+  ctx.fillStyle = "rgba(25,135,84,.35)";
+  ctx.strokeStyle = "#198754";
+  rKeys.forEach((k, i) => {
+    const a = (i / n) * 2 * Math.PI - Math.PI / 2;
+    const rad = row[k] ? r : r * 0.15;
+    const x = cx + rad * Math.cos(a), y = cy + rad * Math.sin(a);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    ctx.font = "11px sans-serif";
+    ctx.fillStyle = "#495057";
+    ctx.fillText(k.toUpperCase(), cx + (r + 15) * Math.cos(a) - 6, cy + (r + 15) * Math.sin(a) + 4);
+    ctx.fillStyle = "rgba(25,135,84,.35)";
+  });
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+}
+
+function eventLabel(ev) {
+  const p = ev.detail;
+  switch (ev.event) {
+    case "entry": return `Entered ${p.side} @ ${fmtMoney(p.price)}, stop ${fmtMoney(p.stop)}, qty ${p.qty}`;
+    case "trail_activated": return `Trailing activated at ${fmtR(p.at_r)}, stop → ${fmtMoney(p.stop)}`;
+    case "trail_stop": return `Stop trailed ${fmtMoney(p.old)} → ${fmtMoney(p.new)}`;
+    case "breakeven_flip": return `Stop moved to breakeven (${fmtMoney(p.new_stop)})`;
+    case "hard_stop_backfilled": return `Stop corrected ${fmtMoney(p.old)} → ${fmtMoney(p.new)} (backfilled hard stop)`;
+    case "stop_out": return `Stopped out @ ${fmtMoney(p.fill_price)} (P&L ${fmtMoney(p.pnl)})`;
+    case "target_close": return `Closed at target ~${fmtMoney(p.target)}`;
+    case "force_close": return `Force-closed (EOD) ${p.confirmed ? "" : "- close attempt did not confirm"}`;
+    case "filter_eval": case "orb_filter_eval": return `Entry filter scan (pass: ${p.pass})`;
+    case "entry_rejected": return `Entry rejected: ${p.reason}`;
+    default: return ev.event;
+  }
+}
+
+function renderTimeline(events, container) {
+  if (!events.length) { container.innerHTML = `<div class="text-muted small">No decision_log events found.</div>`; return; }
+  container.innerHTML = events.map(ev => `
+    <div class="timeline-item ev-${ev.event}">
+      <div class="small text-muted mono">${ev.at}</div>
+      <div>${escapeHtml(eventLabel(ev))}</div>
+    </div>`).join("");
+}
+
+function renderTimelinePane() {
+  renderTimeline(currentDetail.timeline, document.querySelector('.dc-pane[data-pane="timeline"]'));
+}
+
+function renderSignalsPane() {
+  const sig = currentDetail.signals;
+  const pane = document.querySelector('.dc-pane[data-pane="signals"]');
+  if (!sig || !sig.applicable) {
+    pane.innerHTML = `<div class="text-muted small">Not applicable - this strategy's exit config carries no dynamic_recovery/dynamic_risk_reduction monitoring.</div>`;
+    return;
+  }
+  if (sig.mechanism !== "v10_dynamic_recovery") {
+    pane.innerHTML = `<div class="text-muted small">V8/V9's own mechanism is a single 10-minute check, already fully shown on the Position Health tab - no ongoing checklist to show here.</div>`;
+    return;
+  }
+  const last = (sig.checkpoint_log || []).filter(r => "recovery_score" in r).slice(-1)[0];
+  if (!last) {
+    pane.innerHTML = `<div class="text-muted small">No checkpoint with R1-R8/D1-D8 signals reached yet (still before the 15-minute mark, or the 10-minute warning never fired).</div>`;
+    return;
+  }
+  const rLabels = { r1: "Δ R from warning ≥ 0.35", r2: "Δ R from prior checkpoint ≥ 0.20", r3: "RSI +5 since warning", r4: "Above EMA9", r5: "Reclaimed/improved vs VWAP", r6: "Price back above OR high", r7: "Higher high & higher low", r8: "MFE +0.30R since warning" };
+  const dLabels = { d1: "Current R ≤ -1.25", d2: "Δ R from warning ≤ -0.30", d3: "MFE ≤ 0.40R", d4: "Below EMA9 & EMA20", d5: "Below VWAP, not improving", d6: "RSI -7 since entry, not recovering", d7: "No higher high/low", d8: "Down-volume > up-volume since warning" };
+  function block(title, labels, color) {
+    return `<h6>${title} (${Object.keys(labels).filter(k => last[k]).length}/${Object.keys(labels).length})</h6>` +
+      Object.entries(labels).map(([k, label]) => `<div class="checklist-item ${last[k] ? "checklist-pass" : "checklist-fail"}">${last[k] ? "✓" : "✗"} ${label}</div>`).join("");
+  }
+  pane.innerHTML = `
+    <div class="row g-3">
+      <div class="col-md-6">${block("Recovery signals", rLabels, "#198754")}</div>
+      <div class="col-md-6">${block("Deterioration signals", dLabels, "#dc3545")}</div>
+    </div>
+    <div class="text-muted small mt-2">From checkpoint at ${last.checkpoint_minutes}m (${last.actual_ts})</div>`;
+}
+
+function renderDiagnosticsPane() {
+  document.querySelector('.dc-pane[data-pane="diagnostics"]').innerHTML = `
+    <h6>Raw position state</h6>
+    <pre class="diag">${escapeHtml(JSON.stringify(currentDetail.diagnostics.position, null, 2))}</pre>
+    <h6>Exit config (currently active strategy)</h6>
+    <pre class="diag">${escapeHtml(JSON.stringify(currentDetail.diagnostics.exit_cfg, null, 2))}</pre>
+    <h6>Dynamic signal replay (raw)</h6>
+    <pre class="diag">${escapeHtml(JSON.stringify(currentDetail.signals, null, 2))}</pre>
+    <details class="mt-2">
+      <summary class="small">Flight Recorder — full decision_log for this symbol (${currentDetail.timeline.length} events)</summary>
+      <pre class="diag">${escapeHtml(JSON.stringify(currentDetail.timeline, null, 2))}</pre>
+    </details>`;
+}
+
+// ------------------------------------------------------ Historical Replay
+let replayTrades = [];
+let replayData = null;
+let replayIdx = 0;
+let replayTimer = null;
+
+async function refreshReplayPicker() {
+  const sel = document.getElementById("replay-picker");
+  try {
+    replayTrades = await modeApi("/api/decision_center/closed_trades");
+    sel.innerHTML = replayTrades.length
+      ? replayTrades.map(t => `<option value="${t.id}">${t.symbol} ${t.side} — ${t.entry_time} (${fmtR(t.r_multiple)})</option>`).join("")
+      : `<option>No closed trades yet</option>`;
+  } catch (e) {
+    sel.innerHTML = `<option>Failed to load</option>`;
+  }
+}
+
+document.getElementById("btn-replay-load").addEventListener("click", async () => {
+  const id = Number(document.getElementById("replay-picker").value);
+  const t = replayTrades.find(x => x.id === id);
+  if (!t) return;
+  stopReplay();
+  try {
+    replayData = await modeApi(`/api/decision_center/replay?symbol=${encodeURIComponent(t.symbol)}&entry_at=${encodeURIComponent(t.entry_time)}&exit_at=${encodeURIComponent(t.exit_time)}`);
+  } catch (e) {
+    document.getElementById("replay-events").innerHTML = `<div class="text-danger small">${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  replayIdx = 0;
+  ["btn-replay-step-back", "btn-replay-play", "btn-replay-step"].forEach(id2 => document.getElementById(id2).disabled = replayData.bars.length === 0);
+  drawReplayFrame();
+});
+
+function stopReplay() {
+  if (replayTimer) { clearInterval(replayTimer); replayTimer = null; document.getElementById("btn-replay-play").textContent = "▶ Play"; }
+}
+
+document.getElementById("btn-replay-step").addEventListener("click", () => { stopReplay(); stepReplay(1); });
+document.getElementById("btn-replay-step-back").addEventListener("click", () => { stopReplay(); stepReplay(-1); });
+document.getElementById("btn-replay-play").addEventListener("click", () => {
+  if (replayTimer) { stopReplay(); return; }
+  document.getElementById("btn-replay-play").textContent = "⏸ Pause";
+  replayTimer = setInterval(() => {
+    if (replayIdx >= replayData.bars.length - 1) { stopReplay(); return; }
+    stepReplay(1);
+  }, 400);
+});
+
+function stepReplay(dir) {
+  if (!replayData) return;
+  replayIdx = Math.max(0, Math.min(replayData.bars.length - 1, replayIdx + dir));
+  drawReplayFrame();
+}
+
+function drawReplayFrame() {
+  const cv = document.getElementById("replay-canvas");
+  const ctx = cv.getContext("2d");
+  cv.width = cv.clientWidth;
+  const bars = replayData.bars;
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (!bars.length) return;
+  const visible = bars.slice(0, replayIdx + 1);
+  const closes = bars.map(b => b.c);
+  const lo = Math.min(...closes), hi = Math.max(...closes);
+  const pad = (hi - lo) * 0.1 || 1;
+  const x = i => (i / (bars.length - 1 || 1)) * (cv.width - 20) + 10;
+  const y = v => cv.height - 20 - ((v - (lo - pad)) / ((hi + pad) - (lo - pad))) * (cv.height - 40);
+
+  ctx.strokeStyle = "#adb5bd";
+  ctx.beginPath();
+  bars.forEach((b, i) => { i === 0 ? ctx.moveTo(x(i), y(b.c)) : ctx.lineTo(x(i), y(b.c)); });
+  ctx.stroke();
+
+  ctx.strokeStyle = "#0d6efd";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  visible.forEach((b, i) => { i === 0 ? ctx.moveTo(x(i), y(b.c)) : ctx.lineTo(x(i), y(b.c)); });
+  ctx.stroke();
+  ctx.lineWidth = 1;
+
+  ctx.fillStyle = "#0d6efd";
+  ctx.beginPath();
+  ctx.arc(x(replayIdx), y(bars[replayIdx].c), 4, 0, 2 * Math.PI);
+  ctx.fill();
+
+  document.getElementById("replay-cursor-label").textContent = `${bars[replayIdx].t} — close ${fmtMoney(bars[replayIdx].c)} (${replayIdx + 1}/${bars.length})`;
+
+  const cutoff = bars[replayIdx].t;
+  const shown = replayData.events.filter(e => e.at <= cutoff);
+  renderTimeline(shown, document.getElementById("replay-events"));
+}
+
+window.addEventListener("resize", () => { if (replayData) drawReplayFrame(); });
+
+setMode("paper");
+setInterval(refreshOverview, 15000);
+</script>
+</body>
+</html>
