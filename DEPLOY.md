@@ -224,6 +224,72 @@ sudo -iu tradingbot bash -c "cd /opt/tradingbot && git pull && .venv/bin/pip ins
 sudo systemctl restart trading-bot-paper.service trading-bot-live.service dashboard.service
 ```
 
+## Automatic deployment (GitHub Actions)
+
+`.github/workflows/deploy.yml` runs the exact two commands above over SSH
+the moment a commit lands on `main` (also triggerable on demand from the
+Actions tab, no new commit needed). **By deliberate choice this has no
+safety gate** — no test run, no check for an open LIVE position, no
+approval step. A merge to `main` reaches your real trading server,
+including the live engine restarting mid-session, within about a minute.
+Keep whatever review/merge discipline on `main` you want enforced, since
+nothing downstream of that merge will stop it.
+
+### One-time setup
+
+**1. Generate a dedicated deploy key** (don't reuse your own SSH key) —
+run this on your own machine, not the server:
+
+```bash
+ssh-keygen -t ed25519 -C "github-actions-deploy" -f ./tradingbot_deploy_key -N ""
+```
+
+This produces `tradingbot_deploy_key` (private) and
+`tradingbot_deploy_key.pub` (public).
+
+**2. Authorize the public key on the server** — append it to whichever
+account's `authorized_keys` you SSH into the server as (the same account
+that already has passwordless `sudo` today, normally `ubuntu` — the
+deploy commands above only work non-interactively in CI if `sudo` doesn't
+prompt for a password):
+
+```bash
+ssh ubuntu@<your-instance-ip> "cat >> ~/.ssh/authorized_keys" < tradingbot_deploy_key.pub
+```
+
+**3. Add four repository secrets** — GitHub repo → Settings → Secrets and
+variables → Actions → New repository secret:
+
+| Secret | Value |
+|---|---|
+| `DEPLOY_HOST` | your instance's IP or hostname |
+| `DEPLOY_USER` | the account from step 2 (e.g. `ubuntu`) |
+| `DEPLOY_SSH_KEY` | the full contents of `tradingbot_deploy_key` (the **private** key) |
+| `DEPLOY_PORT` | only if SSH isn't on port 22 — omit otherwise |
+
+Then delete the local `tradingbot_deploy_key`/`tradingbot_deploy_key.pub`
+files (or keep the private key somewhere safe outside the repo) — once
+it's in GitHub Secrets you don't need the file around, and it should
+never be committed.
+
+**4. Confirm passwordless sudo actually works** for the two deploy
+commands under the account from step 2, since that's what lets the
+workflow run non-interactively:
+
+```bash
+ssh ubuntu@<your-instance-ip> 'sudo -n -iu tradingbot bash -c "cd /opt/tradingbot && git pull" && sudo -n systemctl restart dashboard.service'
+```
+
+If either `sudo -n` call prints a password prompt/error instead of
+running, that account needs passwordless sudo before the workflow will
+work (Oracle's default `ubuntu` cloud-init user normally already has it).
+
+### Testing it
+
+Push a trivial commit to `main`, or trigger it manually from the repo's
+Actions tab → "Deploy to Oracle server" → Run workflow, and watch the run
+log there.
+
 ### Custom-universe strategies (e.g. "Long Breakout NASDAQ Beta", "ORB Long/Short")
 
 A strategy can restrict itself to a fundamentals-screened universe (market

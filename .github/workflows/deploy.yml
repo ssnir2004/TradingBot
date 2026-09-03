@@ -1,0 +1,35 @@
+name: Deploy to Oracle server
+
+# Pushes straight to production the moment a commit lands on main - no
+# tests, no open-position check, no manual approval, by explicit choice
+# (see DEPLOY.md's own "Automatic deployment" section for why). workflow_
+# dispatch lets you re-run the exact same deploy on demand (e.g. after a
+# one-off server-side fix) without needing a new commit.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Serializes deploys so two pushes close together can't run git pull +
+# systemctl restart on the server at the same time and step on each other
+# - the second waits for the first to finish rather than running in
+# parallel (never cancels an in-flight deploy partway through).
+concurrency:
+  group: deploy-oracle
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH deploy
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          script: |
+            sudo -iu tradingbot bash -c "cd /opt/tradingbot && git pull && .venv/bin/pip install -r requirements.txt"
+            sudo systemctl restart trading-bot-paper.service trading-bot-live.service dashboard.service
