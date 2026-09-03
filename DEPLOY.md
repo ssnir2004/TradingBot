@@ -227,13 +227,16 @@ sudo systemctl restart trading-bot-paper.service trading-bot-live.service dashbo
 ## Automatic deployment (GitHub Actions)
 
 `.github/workflows/deploy.yml` runs the exact two commands above over SSH
-the moment a commit lands on `main` (also triggerable on demand from the
-Actions tab, no new commit needed). **By deliberate choice this has no
-safety gate** — no test run, no check for an open LIVE position, no
-approval step. A merge to `main` reaches your real trading server,
+the moment a commit lands on `claude/ai-trading-bot-ibkr-haqc10` — this
+repo's own default branch (there's no separate `main` here; if you later
+introduce one, update the branch name in the workflow file to match, or
+it silently stops firing) — also triggerable on demand from the Actions
+tab, no new commit needed. **By deliberate choice this has no safety
+gate** — no test run, no check for an open LIVE position, no approval
+step. Every push to that branch reaches your real trading server,
 including the live engine restarting mid-session, within about a minute.
-Keep whatever review/merge discipline on `main` you want enforced, since
-nothing downstream of that merge will stop it.
+Keep whatever review/merge discipline you want enforced before code lands
+there, since nothing downstream of that push will stop it.
 
 ### One-time setup
 
@@ -286,8 +289,9 @@ work (Oracle's default `ubuntu` cloud-init user normally already has it).
 
 ### Testing it
 
-Push a trivial commit to `main`, or trigger it manually from the repo's
-Actions tab → "Deploy to Oracle server" → Run workflow, and watch the run
+Push a trivial commit to `claude/ai-trading-bot-ibkr-haqc10`, or trigger
+it manually from the repo's Actions tab → "Deploy to Oracle server" → Run
+workflow, and watch the run
 log there.
 
 ### Custom-universe strategies (e.g. "Long Breakout NASDAQ Beta", "ORB Long/Short")
