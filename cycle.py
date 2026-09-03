@@ -547,8 +547,30 @@ def _breakeven_decision(pos: dict, exit_cfg: dict, r_multiple: float) -> dict:
     rode the trailing stop - so closing part of the position early was
     costing more in forgone upside than it banked in locked-in profit):
     the full position now holds untouched until r_multiple clears
-    breakeven_trigger_R, then moves straight to trailing."""
-    if r_multiple >= exit_cfg["breakeven_trigger_R"]:
+    breakeven_trigger_R, then moves straight to trailing.
+
+    exit_cfg["breakeven_trigger_R"] is absent for every "no_stop_delayed_
+    trail" strategy (v4.1/v4.2/v4.3/V8/V9/V10 - see EXTRA_STRATEGY_
+    PRESETS in src/db.py) since backtest_engine.py's own real simulator
+    for that management_style never uses breakeven at all (MFE-triggered
+    trailing instead - see its own docstring). manage_position has no
+    live-engine implementation of that style yet (only "fixed_target_
+    no_trail"/"staged_trail" are specially handled; everything else,
+    including "no_stop_delayed_trail", falls through to this generic
+    default path) - a REAL, currently-live bug found 2026-09-03: every
+    open position under one of those strategies was hitting this as a
+    bare exit_cfg["breakeven_trigger_R"] and crashing the ENTIRE cycle
+    (management AND entry scanning) on every single tick, all day. This
+    silently holds instead - no breakeven flip, no trailing, but the
+    position's own real broker-side stop order (placed at entry) still
+    protects it - rather than crashing the cycle every 5 minutes. Proper
+    live support for this management_style (real hard-stop placement,
+    MFE-triggered trailing) is a separate, larger task that needs its own
+    careful implementation and testing before it touches live capital."""
+    trigger = exit_cfg.get("breakeven_trigger_R")
+    if trigger is None:
+        return {"action": "hold"}
+    if r_multiple >= trigger:
         return {"action": "breakeven_flip", "new_stop_price": pos["entry_price"], "new_state": "post_breakeven"}
     return {"action": "hold"}
 
