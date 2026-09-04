@@ -513,8 +513,9 @@ document.getElementById("chart-modal").addEventListener("shown.bs.modal", () => 
   rsiSeries.createPriceLine({ price: 50, color: "#999", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: false, title: "" });
 
   loadChartData(symbol);
+  refreshPriceTriggers(symbol);
   if (chartRefreshTimer) clearInterval(chartRefreshTimer);
-  chartRefreshTimer = setInterval(() => loadChartData(symbol), 30000);
+  chartRefreshTimer = setInterval(() => { loadChartData(symbol); refreshPriceTriggers(symbol); }, 30000);
   chartResizeHandler = () => chartInstance && chartInstance.applyOptions({ width: container.clientWidth });
   window.addEventListener("resize", chartResizeHandler);
 });
@@ -529,7 +530,87 @@ document.getElementById("chart-modal").addEventListener("hidden.bs.modal", () =>
   sma20LineSeries = null;
   sma200LineSeries = null;
   chartSmaLines = [];
+  priceTriggerLines = [];
   pendingChartSymbol = null;
+});
+
+// ------------------------------------------------------ price triggers ---
+// "Buy line"/"sell line" - a real native IBKR STP order placed from the
+// chart (see place_price_trigger.py); once it fills, cycle.py starts
+// managing the resulting position like any strategy-opened one.
+let priceTriggerLines = [];
+const PRICE_TRIGGER_LIVE_CONFIRM_PHRASE = "ok";
+
+async function refreshPriceTriggers(symbol) {
+  const body = document.getElementById("pt-body");
+  if (!body) return;
+  let rows;
+  try {
+    rows = (await modeApi("/api/price_triggers")).filter(t => t.symbol === symbol);
+  } catch (e) { return; }
+
+  body.innerHTML = rows.length ? rows.map(t => `
+    <tr>
+      <td>${t.side === "long" ? "קניה" : "מכירה"}</td>
+      <td>${fmtMoney(t.trigger_price)}</td>
+      <td>${fmtMoney(t.stop_price)}</td>
+      <td>${t.qty}</td>
+      <td><button type="button" class="btn btn-sm btn-outline-danger pt-cancel-btn" data-id="${t.id}">בטל</button></td>
+    </tr>`).join("") : '<tr><td colspan="5" class="text-center text-muted">אין הוראות ממתינות</td></tr>';
+
+  if (candleSeries) {
+    priceTriggerLines.forEach(l => candleSeries.removePriceLine(l));
+    priceTriggerLines = rows.map(t => candleSeries.createPriceLine({
+      price: t.trigger_price, color: t.side === "long" ? "#16a085" : "#c0392b", lineWidth: 2,
+      lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true,
+      title: t.side === "long" ? "BUY" : "SELL",
+    }));
+  }
+}
+
+document.getElementById("pt-body").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".pt-cancel-btn");
+  if (!btn || !pendingChartSymbol) return;
+  btn.disabled = true;
+  try {
+    await modeApi(`/api/price_triggers/${btn.dataset.id}`, { method: "DELETE" });
+    refreshPriceTriggers(pendingChartSymbol);
+  } catch (e) {
+    alert("ביטול ההוראה נכשל: " + e.message);
+    btn.disabled = false;
+  }
+});
+
+document.getElementById("pt-submit").addEventListener("click", async () => {
+  const errorEl = document.getElementById("pt-error");
+  errorEl.textContent = "";
+  if (!pendingChartSymbol) return;
+  const payload = {
+    symbol: pendingChartSymbol,
+    side: document.getElementById("pt-side").value,
+    trigger_price: document.getElementById("pt-trigger-price").value,
+    stop_price: document.getElementById("pt-stop-price").value,
+    qty: document.getElementById("pt-qty").value,
+  };
+  if (currentMode === "live") {
+    const typed = prompt(`זו הוראה אמיתית שתפעל בכסף אמת ברגע שהמחיר יגיע לטריגר.\nהקלד "${PRICE_TRIGGER_LIVE_CONFIRM_PHRASE}" לאישור:`);
+    if (typed !== PRICE_TRIGGER_LIVE_CONFIRM_PHRASE) {
+      errorEl.textContent = "לא אושר - ההוראה לא נשלחה.";
+      return;
+    }
+    payload.confirm = typed;
+  }
+  try {
+    await modeApi("/api/price_triggers", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    document.getElementById("pt-trigger-price").value = "";
+    document.getElementById("pt-stop-price").value = "";
+    document.getElementById("pt-qty").value = "";
+    refreshPriceTriggers(pendingChartSymbol);
+  } catch (e) {
+    errorEl.textContent = "שליחת ההוראה נכשלה: " + e.message;
+  }
 });
 
 document.addEventListener("click", (e) => {

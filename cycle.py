@@ -1722,6 +1722,82 @@ def _cancel_pending_touch_turn_order(account_id: int, mode: str, ib, po: dict, s
     log_decision(account_id, mode, {"event": f"touch_turn_{status}", "symbol": po["symbol"], "side": po["side"]})
 
 
+def check_price_triggers(account_id: int, mode: str, ib, positions: list[dict]) -> list[dict]:
+    """The real STP order behind a user-set "buy line"/"sell line" is
+    placed directly by place_price_trigger.py (a dashboard-spawned
+    subprocess, same as trade.py/open_position.py), not by this
+    orchestrator - this function only ever watches for that order's fill
+    or cancellation. Runs every cycle tick regardless of the bot's enabled
+    flag (same
+    reasoning as check_stop_outs/manage_position/check_pending_touch_turn_
+    orders - see run_cycle's Step 3/4) - a resting entry-trigger order can
+    fill, or need cleaning up after a broker-side cancel, whether or not
+    new entries are currently paused.
+
+    Fill detection reads the order's OWN status/avgFillPrice/filled qty
+    straight off ib.trades() (not _broker_position's net-quantity check,
+    which touch_turn's equivalent uses) - a user could set a buy/sell line
+    on a symbol they already hold (manually or via the bot), where a net-
+    position check would misattribute the pre-existing quantity to this
+    fill. On a fill, promotes it into a normal tracked position exactly
+    like entry_scan's/check_pending_touch_turn_orders' own tail does
+    (broker-side protective stop via _place_stop at the stop_price fixed
+    at creation time, then db.upsert_position) - manage_position picks it
+    up on the very next tick under whichever strategy is currently active
+    for that side (or _FALLBACK_EXIT_CFG if none), the same as any other
+    position; there is no separate "manually triggered" management path.
+
+    A trigger order that's no longer live at the broker (cancelled from
+    within TWS/IBKR directly, or auto-cancelled some other way) is
+    resolved 'cancelled' here too, so it stops being offered for
+    cancellation on the dashboard and its chart line disappears."""
+    for trig in db.get_price_triggers(account_id, mode, "pending"):
+        trade = next((t for t in ib.trades() if t.order.orderId == trig["broker_order_id"]), None)
+        if trade is None:
+            continue  # not visible on this connection yet - re-checked next tick
+        status = trade.orderStatus.status
+        if status == "Filled":
+            symbol, side = trig["symbol"], trig["side"]
+            fill_qty = int(trade.orderStatus.filled) or trig["qty"]
+            fill_price = trade.orderStatus.avgFillPrice or trig["trigger_price"]
+            stop_order_id = _place_stop(ib, symbol, fill_qty, trig["stop_price"], side)
+            now_iso = datetime.now(ET).isoformat(timespec="seconds")
+            new_position = {
+                "symbol": symbol, "side": side, "entry_price": fill_price,
+                "entry_time_iso": now_iso, "qty": fill_qty,
+                "initial_stop": trig["stop_price"], "stop_price": trig["stop_price"],
+                "stop_order_id": stop_order_id, "state": "pre_breakeven", "r_multiple": 0.0,
+                "mae_price": fill_price,
+            }
+            db.upsert_position(account_id, mode, new_position)
+            positions.append(new_position)
+            db.resolve_price_trigger(account_id, mode, trig["id"], "filled", filled_at=now_iso, fill_price=fill_price)
+            notify(
+                f"[{mode.upper()}] Price trigger FILLED: {symbol}",
+                f"{side} @ ${fill_price:.2f}, qty {fill_qty}, stop ${trig['stop_price']:.2f} - now bot-managed",
+                "default",
+            )
+            log_decision(account_id, mode, {
+                "event": "price_trigger_fill", "symbol": symbol, "side": side,
+                "trigger_price": trig["trigger_price"], "price": fill_price, "qty": fill_qty, "stop": trig["stop_price"],
+            })
+        elif status in ("Cancelled", "ApiCancelled", "Inactive"):
+            db.resolve_price_trigger(account_id, mode, trig["id"], "cancelled")
+            log_decision(account_id, mode, {"event": "price_trigger_cancelled", "symbol": trig["symbol"], "side": trig["side"], "reason": status})
+
+    return positions
+
+
+def _cancel_price_trigger(account_id: int, mode: str, ib, trig: dict):
+    """Used by run_cycle's "flatten everything now" path to clear out any
+    still-resting entry trigger along with open positions - _cancel_stop
+    despite its name is generic (find a broker order by id, cancel it), so
+    it works equally well on a resting entry-trigger order."""
+    _cancel_stop(ib, trig.get("broker_order_id"))
+    db.resolve_price_trigger(account_id, mode, trig["id"], "cancelled")
+    log_decision(account_id, mode, {"event": "price_trigger_cancelled", "symbol": trig["symbol"], "side": trig["side"], "reason": "flatten_request"})
+
+
 def _orb_watchlist_filters(detail: dict, rules: dict) -> dict:
     """Maps orb.evaluate_orb_entry's raw diagnostic detail (see its own
     docstring) into the same per-filter boolean shape the classic
@@ -1850,6 +1926,8 @@ def run_cycle(account_id: int, mode: str):
             force_close_all(account_id, mode, ib, positions)
             for po in db.get_pending_orders(account_id, mode, "pending"):
                 _cancel_pending_touch_turn_order(account_id, mode, ib, po, "cancelled")
+            for trig in db.get_price_triggers(account_id, mode, "pending"):
+                _cancel_price_trigger(account_id, mode, ib, trig)
             db.record_cycle_run(account_id, mode, "flattened_on_request")
             return "flattened_on_request"
 
@@ -1860,6 +1938,7 @@ def run_cycle(account_id: int, mode: str):
             for p in positions
         ]  # Step 4
         positions = check_pending_touch_turn_orders(account_id, mode, ib, positions)  # Step 4.5 - fills/expiry, always runs
+        positions = check_price_triggers(account_id, mode, ib, positions)  # Step 4.6 - user-set buy/sell line fills, always runs
 
         if status == "force_close":  # Step 6
             force_close_all(account_id, mode, ib, positions)

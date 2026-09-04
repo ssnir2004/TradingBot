@@ -361,6 +361,37 @@ CREATE TABLE IF NOT EXISTS pending_orders (
     expires_at TEXT NOT NULL,
     PRIMARY KEY (account_id, mode, symbol, placed_date)
 );
+
+-- User-defined "buy line"/"sell line" entry triggers, set from the
+-- dashboard's chart screen (see web/app.py's POST /api/price_triggers).
+-- Each row's real native IBKR STP order is already live at the broker by
+-- the time the row is inserted (see place_price_trigger.py) - this bot
+-- never polls price itself and fires an order on a match, IBKR's own
+-- server-side stop order does the triggering. side is the RESULTING
+-- position's side once filled ('long' for a buy-stop entry, 'short' for
+-- a sell-stop entry) - the same long/short vocabulary db.positions.side
+-- already uses, not a raw BUY/SELL action. stop_price is the protective
+-- stop to place on the resulting position the instant it fills (see
+-- cycle.check_price_triggers) - required up front so a fill is never
+-- left unprotected even for one cycle tick. status stays 'filled'/
+-- 'cancelled' after resolution (not deleted), same audit-trail reasoning
+-- as pending_orders above.
+CREATE TABLE IF NOT EXISTS price_triggers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'paper',
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    trigger_price REAL NOT NULL,
+    stop_price REAL NOT NULL,
+    qty INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    broker_order_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT '',
+    filled_at TEXT,
+    fill_price REAL
+);
 """
 
 # Created after the mode-column migrations run below — an older DB's
@@ -376,6 +407,7 @@ CREATE INDEX IF NOT EXISTS idx_trade_telemetry_account_strategy ON trade_telemet
 -- Blank ('') is the "no key set yet" default and can repeat across many
 -- rows - only an actually-chosen key (e.g. "L1", "S1") needs to be unique.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_strategies_key ON strategies(key) WHERE key != '';
+CREATE INDEX IF NOT EXISTS idx_price_triggers_account_mode_status ON price_triggers(account_id, mode, status);
 """
 
 # Two extra presets seeded alongside the conservative default (rules.json),
@@ -3841,6 +3873,60 @@ def resolve_pending_order(account_id: int, mode: str, symbol: str, placed_date: 
         conn.execute(
             "UPDATE pending_orders SET status = ? WHERE account_id = ? AND mode = ? AND symbol = ? AND placed_date = ?",
             (status, account_id, mode, symbol, placed_date),
+        )
+
+
+def create_price_trigger(account_id: int, mode: str, trig: dict) -> int:
+    """Records a user-set "buy line"/"sell line" AFTER its real STP order
+    is already live at the broker (see place_price_trigger.py) - unlike
+    pending_orders/create_pending_order, there's no race to guard against
+    here (a dashboard button click, not a scheduler tick that could run
+    twice), so this is a plain INSERT, not an INSERT OR IGNORE. `trig`
+    needs symbol, side ('long'/'short'), trigger_price, stop_price, qty,
+    broker_order_id, created_at, created_by. Returns the new row's id."""
+    _check_mode(mode)
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO price_triggers (account_id, mode, symbol, side, trigger_price, stop_price, qty, "
+            "broker_order_id, created_at, created_by) VALUES "
+            "(:account_id, :mode, :symbol, :side, :trigger_price, :stop_price, :qty, :broker_order_id, "
+            ":created_at, :created_by)",
+            {**trig, "account_id": account_id, "mode": mode},
+        )
+        return cur.lastrowid
+
+
+def get_price_triggers(account_id: int, mode: str, status: str = "pending") -> list[dict]:
+    _check_mode(mode)
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM price_triggers WHERE account_id = ? AND mode = ? AND status = ? ORDER BY id",
+            (account_id, mode, status),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_price_trigger(account_id: int, mode: str, trigger_id: int) -> dict | None:
+    _check_mode(mode)
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM price_triggers WHERE account_id = ? AND mode = ? AND id = ?",
+            (account_id, mode, trigger_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def resolve_price_trigger(account_id: int, mode: str, trigger_id: int, status: str, filled_at: str | None = None, fill_price: float | None = None):
+    """status: 'filled' or 'cancelled' - the row is kept (not deleted),
+    same audit-trail reasoning as resolve_pending_order. filled_at/
+    fill_price are only ever passed for status='filled' (cycle.
+    check_price_triggers' own caller); left NULL for a cancel."""
+    _check_mode(mode)
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE price_triggers SET status = ?, filled_at = ?, fill_price = ? "
+            "WHERE account_id = ? AND mode = ? AND id = ?",
+            (status, filled_at, fill_price, account_id, mode, trigger_id),
         )
 
 

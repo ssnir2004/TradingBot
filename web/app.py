@@ -715,6 +715,83 @@ async def api_open_position(request: Request, mode: str = Depends(require_mode),
     return {"ok": True, "stdout": proc.stdout}
 
 
+# Placing a real STP order that, once triggered, hands the resulting
+# position to the bot for ongoing management gets the same speed bump as
+# every other LIVE-affecting action here.
+PRICE_TRIGGER_LIVE_CONFIRM_PHRASE = "ok"
+
+
+@app.post("/api/price_triggers")
+async def api_create_price_trigger(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    """User-set "buy line"/"sell line" from the chart screen - see
+    place_price_trigger.py's own docstring for the full mechanics. A real
+    native IBKR STP order is placed immediately; the resulting position
+    (once it fills) becomes a normal bot-managed position exactly like a
+    strategy-opened one - see cycle.check_price_triggers."""
+    body = await request.json()
+    symbol = str(body.get("symbol", "")).strip().upper()
+    side = body.get("side")
+    if not symbol or side not in ("long", "short"):
+        raise HTTPException(status_code=400, detail="symbol and side ('long' for a buy line, 'short' for a sell line) are required")
+    try:
+        trigger_price = float(body.get("trigger_price"))
+        stop_price = float(body.get("stop_price"))
+        qty = int(body.get("qty"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="trigger_price, stop_price, and qty must be numbers")
+    if qty <= 0 or trigger_price <= 0 or stop_price <= 0:
+        raise HTTPException(status_code=400, detail="trigger_price, stop_price, and qty must be positive")
+    if side == "long" and stop_price >= trigger_price:
+        raise HTTPException(status_code=400, detail="for a buy line, stop_price must be below trigger_price")
+    if side == "short" and stop_price <= trigger_price:
+        raise HTTPException(status_code=400, detail="for a sell line, stop_price must be above trigger_price")
+
+    if mode == "live" and body.get("confirm") != PRICE_TRIGGER_LIVE_CONFIRM_PHRASE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Type '{PRICE_TRIGGER_LIVE_CONFIRM_PHRASE}' to confirm placing a real LIVE order.",
+        )
+
+    proc = subprocess.run(
+        [sys.executable, str(PROJECT_DIR / "place_price_trigger.py"), "--mode", mode,
+         "--account-id", str(account_id), "--symbol", symbol, "--side", side,
+         "--trigger-price", str(trigger_price), "--stop-price", str(stop_price), "--qty", str(qty),
+         "--created-by", user],
+        capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
+    )
+    db.log_decision(account_id, mode, "dashboard_control", user=user, action="create_price_trigger",
+                     symbol=symbol, side=side, trigger_price=trigger_price, stop_price=stop_price, qty=qty,
+                     stdout=proc.stdout, returncode=proc.returncode)
+    if proc.returncode != 0:
+        raise HTTPException(status_code=400, detail=proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "Order failed")
+    return {"ok": True, "stdout": proc.stdout}
+
+
+@app.get("/api/price_triggers")
+def api_get_price_triggers(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    """Still-pending buy/sell lines, for the chart's price-line overlay and
+    the dashboard's pending-triggers list."""
+    return db.get_price_triggers(account_id, mode, "pending")
+
+
+@app.delete("/api/price_triggers/{trigger_id}")
+def api_cancel_price_trigger(trigger_id: int, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    trig = db.get_price_trigger(account_id, mode, trigger_id)
+    if trig is None or trig["status"] != "pending":
+        raise HTTPException(status_code=404, detail="No pending trigger with that id")
+
+    proc = subprocess.run(
+        [sys.executable, str(PROJECT_DIR / "cancel_price_trigger.py"), "--mode", mode,
+         "--account-id", str(account_id), "--trigger-id", str(trigger_id)],
+        capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
+    )
+    db.log_decision(account_id, mode, "dashboard_control", user=user, action="cancel_price_trigger",
+                     symbol=trig["symbol"], trigger_id=trigger_id, stdout=proc.stdout, returncode=proc.returncode)
+    if proc.returncode != 0:
+        raise HTTPException(status_code=400, detail=proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "Cancel failed")
+    return {"ok": True, "stdout": proc.stdout}
+
+
 @app.get("/api/positions")
 def api_positions(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     positions = db.get_open_positions(account_id, mode)
