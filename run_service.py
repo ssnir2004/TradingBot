@@ -79,15 +79,31 @@ def main():
 
     scheduler = BlockingScheduler(timezone=ET)
 
+    # Was 5 minutes. Tightened to catch ORB "breakout" entries (src/orb.py's
+    # own evaluate_orb_entry) that only ever fire on the EXACT bar where
+    # price first closes past the opening-range high/low - once that single
+    # bar is no longer the latest one, the signal can never re-trigger that
+    # day (see cycle.entry_scan's own investigation, 2026-09-03/04: TSLA
+    # broke out cleanly under ORB Long v4.2 but the confirming bar had
+    # already rolled past by the time the 5-minute-cadence scan reached it,
+    # and price never pulled back to retest afterward). A single job (not a
+    # second, faster one added alongside this) is deliberate - APScheduler's
+    # default max_instances=1 per job means a still-running tick simply
+    # delays/skips the next one rather than ever overlapping it, so this
+    # can't race entry_scan's own day/position caps against itself the way
+    # two independently-scheduled jobs could. Real cost: ~5x more yfinance
+    # calls and IBKR Gateway connect/disconnect cycles - watch for
+    # rate-limiting; dial back to 2-3 minutes if that becomes a problem.
+    CYCLE_INTERVAL_MINUTES = 1
     scheduler.add_job(
         lambda: _run_cycle_job(scheduler, account_id, mode),
-        IntervalTrigger(minutes=5),
+        IntervalTrigger(minutes=CYCLE_INTERVAL_MINUTES),
         id="cycle", misfire_grace_time=60,
     )
     # BlockingScheduler doesn't compute next_run_time until .start() runs, so
     # seed an estimate now (accurate the moment start() actually happens, a
     # few lines below) — _run_cycle_job self-corrects it after every firing.
-    db.set_next_cycle_at(account_id, mode, (datetime.now(ET) + timedelta(minutes=5)).isoformat())
+    db.set_next_cycle_at(account_id, mode, (datetime.now(ET) + timedelta(minutes=CYCLE_INTERVAL_MINUTES)).isoformat())
 
     scheduler.add_job(
         lambda: _guarded(mode, "emergency_check", account_id, cycle.emergency_check, account_id, mode),

@@ -3606,8 +3606,9 @@ def set_next_cycle_at(account_id: int, mode: str, next_run_iso: str):
     account+mode (see run_service.py), so the dashboard can show a
     countdown. This is the scheduler's own next firing time, independent of
     whether that firing will actually do anything (run_cycle() self-gates
-    on market hours) — it always fires every 5 minutes, so the countdown is
-    accurate even outside trading hours."""
+    on market hours) — it always fires on the job's own fixed interval (see
+    run_service.py's CYCLE_INTERVAL_MINUTES), so the countdown is accurate
+    even outside trading hours."""
     set_setting(_scope_key(account_id, mode, "next_cycle_at"), next_run_iso)
 
 

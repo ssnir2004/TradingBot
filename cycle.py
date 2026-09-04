@@ -1,6 +1,9 @@
 """One tick of the trading cycle, for a given mode ('paper' or 'live'). Runs
-every 5 minutes from the always-on service (see run_service.py) — one
-scheduler instance per mode, each connecting to its own IB Gateway process.
+on run_service.py's own "cycle" job interval (CYCLE_INTERVAL_MINUTES there
+— 1 minute as of 2026-09-04, tightened from 5 to catch ORB "breakout"
+entries that only fire on one exact bar, see that constant's own comment)
+from the always-on service — one scheduler instance per mode, each
+connecting to its own IB Gateway process.
 On each tick: checks market hours, handles any pending emergency
 flatten-all request from the dashboard, reconciles stop-outs, manages open
 positions (breakeven flip, partial profit, swing trailing stop) — always,
@@ -1753,7 +1756,9 @@ def scan_watchlist_filters(account_id: int):
 # -------------------------------------------------------------------- main
 def run_cycle(account_id: int, mode: str):
     """Runs one tick of the trading cycle for the given account+mode. Safe
-    to call every 5 minutes all day — it self-gates on market hours."""
+    to call as often as run_service.py's own "cycle" job interval allows
+    (currently every 1 minute — see that constant's own comment) all day —
+    it self-gates on market hours."""
     status = time_gate()
     if status in ("weekend", "too_early", "closed"):
         return status
