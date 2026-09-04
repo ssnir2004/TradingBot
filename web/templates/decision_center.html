@@ -51,6 +51,12 @@
     <button id="tab-live" class="btn btn-outline-danger mode-tab fw-bold">LIVE — real money</button>
   </div>
 
+  <div class="d-flex flex-wrap align-items-center gap-3 mb-3 p-2 px-3 bg-white rounded shadow-sm small">
+    <span class="text-muted">Last cycle: <span id="dc-last-cycle" class="mono">-</span></span>
+    <span class="text-muted">Next cycle in: <span id="dc-next-cycle-countdown" class="mono">-</span></span>
+    <span id="dc-yfinance-status-badge" class="badge bg-secondary" title="Consecutive market-data fetch failures across different symbols">...</span>
+  </div>
+
   <div class="row g-3 mb-3">
     <div class="col-lg-6">
       <div class="card h-100">
@@ -155,10 +161,43 @@ function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp
 
 let selectedSymbol = null;
 let overviewRows = [];
+let nextCycleAtMs = null;
 
 async function refreshAll() {
-  await Promise.all([refreshActiveStrategies(), refreshOverview(), refreshReplayPicker()]);
+  await Promise.all([refreshActiveStrategies(), refreshOverview(), refreshReplayPicker(), refreshCycleStatus()]);
 }
+
+// Same /api/status db.get_cycle_status backs bot.html's own header - shown
+// here too so the effect of run_service.py's own CYCLE_INTERVAL_MINUTES
+// (tightened 5 -> 1 minute on 2026-09-04, see that constant's own comment)
+// is directly visible on this read-only screen as well, not just on /bot.
+async function refreshCycleStatus() {
+  try {
+    const s = await modeApi("/api/status");
+    document.getElementById("dc-last-cycle").textContent =
+      s.last_cycle_timestamp ? `${s.last_cycle_timestamp} (${s.last_cycle_status})` : "no cycle data yet";
+    nextCycleAtMs = s.next_cycle_at ? new Date(s.next_cycle_at).getTime() : null;
+    updateCycleCountdown();
+  } catch (e) { /* non-fatal - this line is informational only */ }
+  try {
+    const y = await modeApi("/api/yfinance_status");
+    const badge = document.getElementById("dc-yfinance-status-badge");
+    if (y.degraded) { badge.textContent = `Data: degraded (${y.streak}x)`; badge.className = "badge bg-danger"; }
+    else if (y.streak > 0) { badge.textContent = `Data: OK (${y.streak} recent fail${y.streak === 1 ? "" : "s"})`; badge.className = "badge bg-warning text-dark"; }
+    else { badge.textContent = "Data: OK"; badge.className = "badge bg-success"; }
+  } catch (e) { /* non-fatal */ }
+}
+
+function updateCycleCountdown() {
+  const el = document.getElementById("dc-next-cycle-countdown");
+  if (!nextCycleAtMs) { el.textContent = "-"; return; }
+  const remainingSec = Math.round((nextCycleAtMs - Date.now()) / 1000);
+  if (remainingSec <= 0) { el.textContent = "any moment…"; return; }
+  const mm = Math.floor(remainingSec / 60);
+  const ss = remainingSec % 60;
+  el.textContent = `${mm}:${String(ss).padStart(2, "0")}`;
+}
+setInterval(updateCycleCountdown, 1000);
 
 async function refreshActiveStrategies() {
   try {
@@ -575,6 +614,7 @@ window.addEventListener("resize", () => { if (replayData) drawReplayFrame(); });
 
 setMode("paper");
 setInterval(refreshOverview, 15000);
+setInterval(refreshCycleStatus, 15000);
 </script>
 </body>
 </html>
