@@ -451,7 +451,7 @@ async function refreshActiveStrategyParams() {
             <tr><td class="text-muted">Entry models</td><td colspan="3">${models}</td></tr>
             <tr><td class="text-muted">Risk/trade</td><td>${r.risk.max_risk_per_trade_pct}%</td><td class="text-muted">Max size</td><td>${r.risk.max_position_size_pct_of_portfolio}%</td></tr>
             <tr><td class="text-muted">Max positions</td><td>${r.risk.max_concurrent_positions}</td><td class="text-muted">OR window</td><td>${r.opening_range.session_open_et} +${r.opening_range.or_timeframe}</td></tr>
-            <tr><td class="text-muted">Confluence gate</td><td colspan="3">${r.entry_confluence ? "on" : "off"}</td></tr>
+            <tr><td class="text-muted">Entry window</td><td>${r.time_filter ? `${r.time_filter.earliest_entry_et}-${r.time_filter.latest_entry_et}` : "none"}</td><td class="text-muted">Confluence gate</td><td>${r.entry_confluence ? "on" : "off"}</td></tr>
           </tbody>
         </table>
       </div>`;
