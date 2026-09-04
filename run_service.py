@@ -140,10 +140,22 @@ def main():
         # morning_prefilter itself) and maintenance is account-agnostic
         # housekeeping, so only the admin's live instance runs these, not
         # every account's, to avoid re-scanning yfinance N times over.
+        # Was every 30 minutes (minute="25,55"). Tightened to every 5 -
+        # investigated live on 2026-09-04: KLAC only entered the watchlist
+        # at the 09:55 rescan (its own gap only became qualifying between
+        # 09:25 and 09:55), by which point its own ORB breakout bar (see
+        # run_service.py's own CYCLE_INTERVAL_MINUTES comment for that
+        # mechanism) had already passed - the fast entry-scan cadence alone
+        # can't help a symbol the watchlist itself doesn't know about yet.
+        # Cheap to run this often: morning_prefilter.run_scan is a single
+        # batched yf.download() over ~500 daily bars (2 days each, no
+        # intraday data), not 500 separate per-symbol calls - a few seconds
+        # per run, nothing like entry_scan's own per-candidate intraday
+        # fetches.
         scheduler.add_job(
             lambda: _guarded(mode, "prefilter", account_id, morning_prefilter.run_scan,
                               morning_prefilter.DEFAULT_MIN_GAP_PCT, morning_prefilter.DEFAULT_MIN_PRICE, False),
-            CronTrigger(day_of_week="mon-fri", hour="9-12", minute="25,55", timezone=ET),
+            CronTrigger(day_of_week="mon-fri", hour="9-12", minute="*/5", timezone=ET),
             id="prefilter", misfire_grace_time=120,
         )
         scheduler.add_job(

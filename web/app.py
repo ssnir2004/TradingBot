@@ -1341,11 +1341,12 @@ def api_watchlist_filters(mode: str = Depends(require_mode), account_id: int = D
 
 @app.post("/api/prefilter/run")
 def api_run_prefilter(account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
-    """On-demand gap scan — the same scan the scheduler runs at :25/:55 past
-    the hour (9:25-12:55 ET), triggered right now instead of waiting for
-    the next scheduled slot. Mode-agnostic like the scan itself: writes the
-    same watchlist to both paper and live. Takes a while (scans the whole
-    S&P 500 via yfinance) — the request blocks until it's done."""
+    """On-demand gap scan — the same scan the scheduler runs every 5
+    minutes (9:00-12:55 ET, see run_service.py's "prefilter" job),
+    triggered right now instead of waiting for the next scheduled slot.
+    Mode-agnostic like the scan itself: writes the same watchlist to both
+    paper and live. Takes a while (scans the whole S&P 500 via yfinance) —
+    the request blocks until it's done."""
     result = morning_prefilter.run_scan(morning_prefilter.DEFAULT_MIN_GAP_PCT, morning_prefilter.DEFAULT_MIN_PRICE, False)
     if result.get("success"):
         cycle.scan_watchlist_filters(account_id)
