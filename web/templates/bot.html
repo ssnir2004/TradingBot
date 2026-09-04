@@ -107,7 +107,7 @@
           </div>
         </div>
         <div class="small text-muted px-3 pt-2">
-          Sorted by how many of the 6 entry filters currently pass (best candidates first). The gap scan itself runs on a schedule (9:00-12:55 ET, every 5 min) — "Run scan now" triggers it on demand instead of waiting. Only shows candidates for a direction with an active strategy — a symbol can show a full pass without the bot actually buying it (daily trade/position caps, or the bot being paused).
+          Sorted by how many of the independent sub-checks currently pass (best candidates first). <strong>The "Passed" badge counts sub-checks, not a live buy trigger</strong> — a green "✓ READY" badge means entry_scan's own trigger is active THIS scan tick (the exact breakout bar, or a retest hit - see src/orb.py); an orange badge means every independent sub-check passed but that trigger moment hasn't lined up (it's fleeting and can flicker tick to tick, even when everything else stays green). The gap scan itself runs on a schedule (9:00-12:55 ET, every 5 min) — "Run scan now" triggers it on demand instead of waiting. Only shows candidates for a direction with an active strategy — even a "✓ READY" symbol can go unbought (daily trade/position caps, or the bot being paused).
         </div>
         <div id="prefilter-error" class="text-danger small px-3"></div>
         <div id="watchlist-active-params" class="row g-2 px-3 pb-2"></div>
@@ -116,7 +116,7 @@
             <thead><tr>
               <th>Symbol</th>
               <th data-bs-toggle="tooltip" title="Long או Short">Side</th>
-              <th data-bs-toggle="tooltip" title="כמה מתנאי האסטרטגיה הפעילה עברו">Passed</th>
+              <th data-bs-toggle="tooltip" title="כמה מהבדיקות העצמאיות עברו - זה עדיין לא אומר שהבוט יקנה עכשיו! גם כשכולן ירוקות, חסר עדיין התנאי הסופי (הבר המדויק של הפריצה, או פגיעת retest) - ירוק מלא = זה כן מתקיים ברגע זה, כתום = רק הבדיקות העצמאיות">Passed</th>
               <th data-col="classic" data-bs-toggle="tooltip" title="מעל שיא אתמול (Long) / מתחת לשפל אתמול (Short)">D1</th>
               <th data-col="classic" data-bs-toggle="tooltip" title="סגירת אתמול מול SMA200">D2</th>
               <th data-col="classic" data-bs-toggle="tooltip" title="gap מסגירת אתמול">D3</th>
@@ -531,9 +531,20 @@ async function refreshWatchlist() {
 
   body.innerHTML = withCount.map(r => {
     const total = r._relevantKeys.length;
+    // r.pass is the SAME field cycle.entry_scan itself gates a real buy on -
+    // the independent sub-checks (V1/V2/Confirmed/Confluence, or D1-I3) can
+    // all show green without r.pass being true, since the entry MODEL still
+    // needs its own trigger moment (the exact breakout bar, or a retest hit
+    // - see src/orb.py's evaluate_orb_entry) on top of them, and that
+    // trigger is fleeting: a symbol can flicker in and out of a full pass
+    // from one scan tick to the next. Spelling this out in the badge text
+    // itself (not just its color) - real trading investigations this same
+    // day found the color-only distinction alone easy to miss at a glance.
     const passedBadge = !total
       ? `<span class="badge bg-secondary" title="${r.error || 'no data'}">n/a</span>`
-      : `<span class="badge ${r.pass ? "bg-success" : r._passedCount >= Math.ceil(total * 0.66) ? "bg-warning text-dark" : "bg-secondary"}">${r._passedCount}/${total}</span>`;
+      : r.pass
+      ? `<span class="badge bg-success" title="Live entry trigger is active right now - this is what entry_scan itself sees">${r._passedCount}/${total} ✓ READY</span>`
+      : `<span class="badge ${r._passedCount >= Math.ceil(total * 0.66) ? "bg-warning text-dark" : "bg-secondary"}" title="Sub-checks only - NOT the same as a live buy trigger. Still needs the entry model's own trigger moment (exact breakout bar or a retest hit), which is fleeting and can come and go tick to tick.">${r._passedCount}/${total} (not triggered)</span>`;
     return `<tr>
       <td class="fw-bold">${symbolLink(r.symbol)}</td>
       <td>${sideBadge(r.side)}</td>
