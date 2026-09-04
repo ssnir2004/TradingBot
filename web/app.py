@@ -422,6 +422,17 @@ async def api_set_es_filter_status(request: Request, mode: str = Depends(require
     return {"enabled": enabled}
 
 
+@app.get("/api/yfinance_status")
+def api_yfinance_status(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    """Real-time readout of cycle._track_yfinance_fetch_failure's own
+    rolling counter (see that function's docstring) - the dashboard's
+    early-warning that entry scanning is going blind (Yahoo rate-limiting/
+    blocking this server), without waiting for the rate-limited Telegram
+    alert (cycle.YFINANCE_DEGRADED_NOTIFY_COOLDOWN_MINUTES) to fire."""
+    streak = int(db.get_setting(f"{account_id}:{mode}:yfinance_failure_streak", "0") or "0")
+    return {"streak": streak, "degraded": streak >= cycle.YFINANCE_FAILURE_STREAK_THRESHOLD}
+
+
 @app.get("/api/account")
 def api_account(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     return db.get_account_info(account_id, mode)

@@ -1172,12 +1172,14 @@ def _evaluate_entry_filters(account_id: int, mode: str, ticker: str, rules: dict
         intraday = yf.Ticker(yahoo_symbol).history(period=f"{INTRADAY_FETCH_LOOKBACK_DAYS}d", interval="5m", prepost=True)
         if not intraday.empty:
             intraday.index = intraday.index.tz_convert(ET)
+        _track_yfinance_fetch_success(account_id, mode)
         detail = _evaluate_filters_from_bars(daily, intraday, rules, side, signal_side=rules.get("signal_side"))
         detail["side"] = side
         event = "filter_eval" if "error" not in detail else "filter_eval_error"
         log_decision(account_id, mode, {"event": event, "symbol": ticker, **detail})
         return detail
     except Exception as exc:  # noqa: BLE001 - one bad ticker must not kill the scan
+        _track_yfinance_fetch_failure(account_id, mode, ticker, exc)
         log_decision(account_id, mode, {"event": "filter_eval_error", "symbol": ticker, "side": side, "error": str(exc)})
         return {"pass": False, "side": side, "error": str(exc)}
 
@@ -1197,12 +1199,14 @@ def _evaluate_orb_entry(account_id: int, mode: str, ticker: str, rules: dict, si
         intraday = yf.Ticker(yahoo_symbol).history(period=f"{INTRADAY_FETCH_LOOKBACK_DAYS}d", interval="5m", prepost=True)
         if not intraday.empty:
             intraday.index = intraday.index.tz_convert(ET)
+        _track_yfinance_fetch_success(account_id, mode)
         detail = orb.evaluate_orb_entry(daily, intraday, rules, side, signal_side=rules.get("signal_side"))
         detail["side"] = side
         event = "orb_filter_eval" if "error" not in detail else "orb_filter_eval_error"
         log_decision(account_id, mode, {"event": event, "symbol": ticker, **detail})
         return detail
     except Exception as exc:  # noqa: BLE001 - one bad ticker must not kill the scan
+        _track_yfinance_fetch_failure(account_id, mode, ticker, exc)
         log_decision(account_id, mode, {"event": "orb_filter_eval_error", "symbol": ticker, "side": side, "error": str(exc)})
         return {"pass": False, "side": side, "error": str(exc)}
 
@@ -1220,11 +1224,13 @@ def _evaluate_touch_turn_entry(account_id: int, mode: str, ticker: str, rules: d
         intraday = yf.Ticker(yahoo_symbol).history(period=f"{INTRADAY_FETCH_LOOKBACK_DAYS}d", interval="5m", prepost=True)
         if not intraday.empty:
             intraday.index = intraday.index.tz_convert(ET)
+        _track_yfinance_fetch_success(account_id, mode)
         detail = touch_turn.evaluate_touch_turn_entry(daily, intraday, rules, side)
         event = "touch_turn_eval" if "error" not in detail else "touch_turn_eval_error"
         log_decision(account_id, mode, {"event": event, "symbol": ticker, **detail})
         return detail
     except Exception as exc:  # noqa: BLE001 - one bad ticker must not kill the scan
+        _track_yfinance_fetch_failure(account_id, mode, ticker, exc)
         log_decision(account_id, mode, {"event": "touch_turn_eval_error", "symbol": ticker, "side": side, "error": str(exc)})
         return {"side": side, "error": str(exc)}
 
@@ -1303,6 +1309,59 @@ def _maybe_notify_es_data_unavailable(account_id: int, mode: str):
         "Couldn't read ES futures price/VWAP (no market data, or a Gateway issue) - "
         "gated strategies are failing OPEN (trading unfiltered) until this clears. "
         "Confirm this account has CME futures market-data entitlements if this persists.",
+        "high",
+    )
+
+
+# How many CONSECUTIVE real fetch exceptions (network error, HTTP 429,
+# timeout - the `except Exception` branch of _evaluate_entry_filters/
+# _evaluate_orb_entry/_evaluate_touch_turn_entry, never _evaluate_filters_
+# from_bars/orb.evaluate_orb_entry's own "insufficient data" early-return,
+# which is a normal per-symbol condition, not a data-source problem)
+# across DIFFERENT tickers before this is treated as systemic (Yahoo
+# rate-limiting/blocking this server) rather than one bad symbol. Reset to
+# 0 by _track_yfinance_fetch_success on every successful fetch, so a
+# single flaky ticker mixed in among otherwise-healthy scans never trips
+# this - only a genuine unbroken run does. Tightened cycle cadence (see
+# run_service.py's CYCLE_INTERVAL_MINUTES) means ~5x more yfinance calls
+# per hour than before, which is exactly the scenario this exists to
+# catch early.
+YFINANCE_FAILURE_STREAK_THRESHOLD = 5
+YFINANCE_DEGRADED_NOTIFY_COOLDOWN_MINUTES = 30
+
+
+def _track_yfinance_fetch_success(account_id: int, mode: str):
+    db.set_setting(f"{account_id}:{mode}:yfinance_failure_streak", "0")
+
+
+def _track_yfinance_fetch_failure(account_id: int, mode: str, ticker: str, exc: Exception):
+    key = f"{account_id}:{mode}:yfinance_failure_streak"
+    streak = int(db.get_setting(key, "0") or "0") + 1
+    db.set_setting(key, str(streak))
+    if streak >= YFINANCE_FAILURE_STREAK_THRESHOLD:
+        _maybe_notify_yfinance_degraded(account_id, mode, streak, ticker, exc)
+
+
+def _maybe_notify_yfinance_degraded(account_id: int, mode: str, streak: int, ticker: str, exc: Exception):
+    """Rate-limited the same way _maybe_notify_es_data_unavailable is - a
+    genuinely rate-limited/blocked yfinance would otherwise fail every
+    single scan tick indefinitely, flooding the user's phone."""
+    key = f"{account_id}:{mode}:yfinance_degraded_last_notify"
+    last = db.get_setting(key, "")
+    now = datetime.now(ET)
+    if last:
+        try:
+            if (now - datetime.fromisoformat(last)).total_seconds() < YFINANCE_DEGRADED_NOTIFY_COOLDOWN_MINUTES * 60:
+                return
+        except ValueError:
+            pass
+    db.set_setting(key, now.isoformat(timespec="seconds"))
+    notify(
+        f"[{mode.upper()}] Market data fetch degraded",
+        f"{streak} consecutive yfinance failures across different symbols (latest: {ticker} - {exc}) - "
+        "likely Yahoo rate-limiting or blocking this server. Entry scanning is effectively blind while "
+        "this persists - if it doesn't clear on its own, consider raising run_service.py's own "
+        "CYCLE_INTERVAL_MINUTES back up.",
         "high",
     )
 

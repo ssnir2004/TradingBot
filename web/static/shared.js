@@ -68,6 +68,24 @@ async function refreshStatus() {
   nextCycleAtMs = s.next_cycle_at ? new Date(s.next_cycle_at).getTime() : null;
   updateCountdown();
   refreshEsFilterStatus();
+  refreshYfinanceStatus();
+}
+
+// -------------------------------------------------------- market data ---
+async function refreshYfinanceStatus() {
+  const badge = document.getElementById("yfinance-status-badge");
+  if (!badge) return;
+  const s = await modeApi("/api/yfinance_status");
+  if (s.degraded) {
+    badge.textContent = `Data: degraded (${s.streak}x)`;
+    badge.className = "badge bg-danger";
+  } else if (s.streak > 0) {
+    badge.textContent = `Data: OK (${s.streak} recent fail${s.streak === 1 ? "" : "s"})`;
+    badge.className = "badge bg-warning text-dark";
+  } else {
+    badge.textContent = "Data: OK";
+    badge.className = "badge bg-success";
+  }
 }
 
 // ------------------------------------------------------- ES VWAP filter ---
