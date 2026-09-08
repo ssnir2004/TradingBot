@@ -1,0 +1,114 @@
+// This Pine Script code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=6
+strategy("Daily SMA(15) Crossover Strategy",
+     shorttitle    = "SMA15 Cross",
+     overlay       = true,
+     initial_capital     = 10000,
+     default_qty_type    = strategy.percent_of_equity,
+     default_qty_value   = 100,
+     commission_type     = strategy.commission.percent,
+     commission_value    = 0,
+     pyramiding           = 0,
+     max_bars_back        = 5000,
+     calc_on_every_tick   = false,
+     process_orders_on_close = true)
+
+// ---------------------------------------------------------------------------
+// Inputs
+// ---------------------------------------------------------------------------
+smaLength   = input.int(15, title = "SMA Length", minval = 1)
+maxTrades   = input.int(100, title = "Max Historical Trades (evaluation window)", minval = 1)
+
+// ---------------------------------------------------------------------------
+// Daily SMA (works correctly even when the chart is on an intraday timeframe,
+// by pulling the SMA value from the Daily timeframe via request.security)
+// ---------------------------------------------------------------------------
+dailyClose = request.security(syminfo.tickerid, "D", close[1], lookahead = barmerge.lookahead_off)
+dailySma   = request.security(syminfo.tickerid, "D", ta.sma(close, smaLength), lookahead = barmerge.lookahead_off)
+
+// On an actual Daily chart, request.security with close[1]/D returns the same
+// series as the native daily SMA; use the native calculation when the chart
+// timeframe already is Daily to avoid any repainting on the current bar.
+isDailyChart = timeframe.isdaily and timeframe.multiplier == 1
+sma15 = isDailyChart ? ta.sma(close, smaLength) : dailySma
+
+// ---------------------------------------------------------------------------
+// Signals
+// ---------------------------------------------------------------------------
+longCondition  = ta.crossover(close, sma15)
+exitCondition  = ta.crossunder(close, sma15)
+
+// Only take new trades while inside the max-trades evaluation window
+withinTradeLimit = strategy.closedtrades < maxTrades
+
+// ---------------------------------------------------------------------------
+// Strategy orders
+// ---------------------------------------------------------------------------
+if longCondition and strategy.position_size == 0 and withinTradeLimit
+    strategy.entry("Long", strategy.long, comment = "BUY")
+
+if exitCondition and strategy.position_size > 0
+    strategy.close("Long", comment = "SELL")
+
+// ---------------------------------------------------------------------------
+// Chart plots
+// ---------------------------------------------------------------------------
+smaColor = close >= sma15 ? color.new(color.teal, 0) : color.new(color.orange, 0)
+plot(sma15, title = "15-Day SMA", color = smaColor, linewidth = 2)
+
+plotshape(longCondition, title = "Buy Signal", style = shape.triangleup,
+     location = location.belowbar, color = color.new(color.green, 0),
+     size = size.small, text = "BUY", textcolor = color.green)
+
+plotshape(exitCondition, title = "Sell Signal", style = shape.triangledown,
+     location = location.abovebar, color = color.new(color.red, 0),
+     size = size.small, text = "SELL", textcolor = color.red)
+
+// ---------------------------------------------------------------------------
+// Backtest summary table (Total Return %, Net Profit $, # Trades, Win Rate %,
+// Profit Factor, Max Drawdown %, Average Trade Return %)
+// ---------------------------------------------------------------------------
+var table summaryTable = table.new(position.top_right, 2, 8,
+     bgcolor = color.new(color.black, 70), border_width = 1, border_color = color.gray)
+
+f_cell(_table, _col, _row, _txt, _bg, _txtColor) =>
+    table.cell(_table, _col, _row, _txt, bgcolor = _bg, text_color = _txtColor, text_size = size.small)
+
+if barstate.islast
+    netProfit      = strategy.netprofit
+    totalReturnPct = strategy.initial_capital != 0 ? (netProfit / strategy.initial_capital) * 100 : 0.0
+    totalTrades    = strategy.closedtrades
+    winTrades      = strategy.wintrades
+    winRatePct     = totalTrades > 0 ? (winTrades / totalTrades) * 100 : 0.0
+    grossProfit    = strategy.grossprofit
+    grossLoss      = strategy.grossloss
+    profitFactor   = grossLoss != 0 ? grossProfit / math.abs(grossLoss) : na
+    maxDrawdownPct = strategy.initial_capital != 0 ? (strategy.max_drawdown / strategy.initial_capital) * 100 : 0.0
+    avgTradePct    = totalTrades > 0 ? (strategy.netprofit / totalTrades) / strategy.initial_capital * 100 : 0.0
+
+    headerBg = color.new(color.blue, 60)
+    rowBg    = color.new(color.black, 80)
+
+    f_cell(summaryTable, 0, 0, "Backtest Report", headerBg, color.white)
+    f_cell(summaryTable, 1, 0, "", headerBg, color.white)
+
+    f_cell(summaryTable, 0, 1, "Total Return (%)", rowBg, color.white)
+    f_cell(summaryTable, 1, 1, str.tostring(totalReturnPct, "#.##") + "%", rowBg, color.white)
+
+    f_cell(summaryTable, 0, 2, "Net Profit ($)", rowBg, color.white)
+    f_cell(summaryTable, 1, 2, str.tostring(netProfit, "#.##"), rowBg, color.white)
+
+    f_cell(summaryTable, 0, 3, "Number of Trades", rowBg, color.white)
+    f_cell(summaryTable, 1, 3, str.tostring(totalTrades), rowBg, color.white)
+
+    f_cell(summaryTable, 0, 4, "Win Rate (%)", rowBg, color.white)
+    f_cell(summaryTable, 1, 4, str.tostring(winRatePct, "#.##") + "%", rowBg, color.white)
+
+    f_cell(summaryTable, 0, 5, "Profit Factor", rowBg, color.white)
+    f_cell(summaryTable, 1, 5, na(profitFactor) ? "n/a" : str.tostring(profitFactor, "#.##"), rowBg, color.white)
+
+    f_cell(summaryTable, 0, 6, "Max Drawdown (%)", rowBg, color.white)
+    f_cell(summaryTable, 1, 6, str.tostring(maxDrawdownPct, "#.##") + "%", rowBg, color.white)
+
+    f_cell(summaryTable, 0, 7, "Avg Trade Return (%)", rowBg, color.white)
+    f_cell(summaryTable, 1, 7, str.tostring(avgTradePct, "#.##") + "%", rowBg, color.white)
