@@ -568,7 +568,13 @@ async function refreshPriceTriggers(symbol) {
   }
 }
 
-document.getElementById("pt-body").addEventListener("click", async (e) => {
+// Optional chaining - pt-body/pt-submit only exist on bot.html's chart
+// modal (not trading.html's, which shares this same script file). A
+// straight getElementById().addEventListener() would throw on trading.html
+// (null has no addEventListener), which - being a top-level script error -
+// aborts the ENTIRE rest of this file's execution, silently breaking
+// every other feature on that page (mode tabs, status refresh, etc.).
+document.getElementById("pt-body")?.addEventListener("click", async (e) => {
   const btn = e.target.closest(".pt-cancel-btn");
   if (!btn || !pendingChartSymbol) return;
   btn.disabled = true;
@@ -581,7 +587,7 @@ document.getElementById("pt-body").addEventListener("click", async (e) => {
   }
 });
 
-document.getElementById("pt-submit").addEventListener("click", async () => {
+document.getElementById("pt-submit")?.addEventListener("click", async () => {
   const errorEl = document.getElementById("pt-error");
   errorEl.textContent = "";
   if (!pendingChartSymbol) return;
