@@ -459,6 +459,17 @@ function openChart(symbol) {
   document.getElementById("chart-modal-title").textContent = `${symbol} — ${currentMode.toUpperCase()}`;
   pendingChartSymbol = symbol;
   currentChartInterval = "5m";
+  // Clear any unsubmitted price-trigger form values left over from a
+  // previous chart session - openQuickTrigger (bot.html) re-fills
+  // pt-trigger-price right after calling this, so this only matters for a
+  // plain symbol-link open, where a stale value would otherwise get drawn
+  // as a misleading draggable line on an unrelated symbol's chart.
+  const ptTriggerPrice = document.getElementById("pt-trigger-price");
+  const ptStopPrice = document.getElementById("pt-stop-price");
+  const ptQty = document.getElementById("pt-qty");
+  if (ptTriggerPrice) ptTriggerPrice.value = "";
+  if (ptStopPrice) ptStopPrice.value = "";
+  if (ptQty) ptQty.value = "";
   document.querySelectorAll(".chart-interval-btn").forEach(btn => btn.classList.toggle("active", btn.dataset.interval === currentChartInterval));
   updateChartCaption();
   if (!chartModal) chartModal = new bootstrap.Modal(document.getElementById("chart-modal"));
@@ -514,6 +525,7 @@ document.getElementById("chart-modal").addEventListener("shown.bs.modal", () => 
 
   loadChartData(symbol);
   refreshPriceTriggers(symbol);
+  syncNewTriggerLine();
   if (chartRefreshTimer) clearInterval(chartRefreshTimer);
   chartRefreshTimer = setInterval(() => { loadChartData(symbol); refreshPriceTriggers(symbol); }, 30000);
   chartResizeHandler = () => chartInstance && chartInstance.applyOptions({ width: container.clientWidth });
@@ -531,6 +543,8 @@ document.getElementById("chart-modal").addEventListener("hidden.bs.modal", () =>
   sma200LineSeries = null;
   chartSmaLines = [];
   priceTriggerLines = [];
+  newTriggerLine = null;
+  draggingNewTriggerLine = false;
   pendingChartSymbol = null;
 });
 
@@ -613,10 +627,78 @@ document.getElementById("pt-submit")?.addEventListener("click", async () => {
     document.getElementById("pt-trigger-price").value = "";
     document.getElementById("pt-stop-price").value = "";
     document.getElementById("pt-qty").value = "";
+    syncNewTriggerLine();
     refreshPriceTriggers(pendingChartSymbol);
   } catch (e) {
     errorEl.textContent = "שליחת ההוראה נכשלה: " + e.message;
   }
+});
+
+// ------------------------------------------- draggable new-trigger line ---
+// Lets the "מחיר טריגר" field be set by dragging a price line on the chart
+// instead of typing a number - a separate line handle from priceTriggerLines
+// above (those are already-submitted pending orders; this one previews the
+// trigger the user is still filling in, before "הוסף הוראה" is clicked).
+let newTriggerLine = null;
+let draggingNewTriggerLine = false;
+let chartPanStateBeforeDrag = null;
+
+function syncNewTriggerLine() {
+  if (!candleSeries) return;
+  const raw = document.getElementById("pt-trigger-price")?.value;
+  const price = raw ? Number(raw) : NaN;
+  if (!raw || Number.isNaN(price)) {
+    if (newTriggerLine) { candleSeries.removePriceLine(newTriggerLine); newTriggerLine = null; }
+    return;
+  }
+  if (newTriggerLine) {
+    newTriggerLine.applyOptions({ price });
+  } else {
+    newTriggerLine = candleSeries.createPriceLine({
+      price, color: "#f1c40f", lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible: true, title: "טריגר חדש (גרור)",
+    });
+  }
+}
+
+document.getElementById("pt-trigger-price")?.addEventListener("input", syncNewTriggerLine);
+
+document.getElementById("chart-container")?.addEventListener("mousedown", (e) => {
+  if (!candleSeries || !newTriggerLine || !chartInstance) return;
+  const raw = document.getElementById("pt-trigger-price")?.value;
+  if (!raw) return;
+  const lineY = candleSeries.priceToCoordinate(Number(raw));
+  if (lineY === null) return;
+  const containerRect = e.currentTarget.getBoundingClientRect();
+  const clickY = e.clientY - containerRect.top;
+  if (Math.abs(clickY - lineY) > 6) return;  // not close enough to the line - let the chart pan/zoom normally
+
+  draggingNewTriggerLine = true;
+  // Disable the chart's own pan/scroll/scale while dragging the line, so
+  // moving the mouse doesn't also scroll the chart underneath it - restored
+  // on mouseup below.
+  chartPanStateBeforeDrag = { handleScroll: true, handleScale: true };
+  chartInstance.applyOptions({ handleScroll: false, handleScale: false });
+  e.preventDefault();
+
+  const onMove = (moveEvent) => {
+    if (!draggingNewTriggerLine || !candleSeries) return;
+    const y = moveEvent.clientY - containerRect.top;
+    const newPrice = candleSeries.coordinateToPrice(y);
+    if (newPrice === null) return;
+    newTriggerLine.applyOptions({ price: newPrice });
+    const input = document.getElementById("pt-trigger-price");
+    if (input) input.value = newPrice.toFixed(2);
+  };
+  const onUp = () => {
+    draggingNewTriggerLine = false;
+    if (chartInstance && chartPanStateBeforeDrag) chartInstance.applyOptions(chartPanStateBeforeDrag);
+    chartPanStateBeforeDrag = null;
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+  };
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
 });
 
 document.addEventListener("click", (e) => {
