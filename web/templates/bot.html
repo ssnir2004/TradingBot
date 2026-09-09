@@ -132,8 +132,9 @@
               <th data-col="orb" data-bs-toggle="tooltip" title="ORB: טווח תנודתיות יומי (ATR%)">ATR%</th>
               <th data-col="classic-rsi" data-bs-toggle="tooltip" title="RSI(14) בנרות 5 דק' - מוצג רק כשה-I2 של האסטרטגיה מבוסס RSI">RSI</th>
               <th data-bs-toggle="tooltip" title="מחיר נוכחי">Price</th>
+              <th data-bs-toggle="tooltip" title="הזמנת STOP אמיתית ב-IBKR שמתמלאת כשהמחיר מגיע ליעד - הבוט מנהל את הפוזיציה אחרי המילוי">Quick trade</th>
             </tr></thead>
-            <tbody id="watchlist-body"><tr><td colspan="18" class="text-center text-muted">Loading…</td></tr></tbody>
+            <tbody id="watchlist-body"><tr><td colspan="19" class="text-center text-muted">Loading…</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -546,7 +547,7 @@ async function refreshWatchlist() {
   const rows = data.results || [];
   const body = document.getElementById("watchlist-body");
   const table = document.getElementById("watchlist-table");
-  if (!rows.length) { body.innerHTML = '<tr><td colspan="18" class="text-center text-muted">Empty</td></tr>'; return; }
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="19" class="text-center text-muted">Empty</td></tr>'; return; }
 
   // Whole columns only exist when SOME currently active strategy (either
   // side) actually needs them - each row already carries which model
@@ -597,9 +598,31 @@ async function refreshWatchlist() {
       <td data-col="orb">${r.atr_pct !== undefined && r.atr_pct !== null ? Number(r.atr_pct).toFixed(2) + "%" : "-"}</td>
       <td data-col="classic-rsi">${r.rsi !== undefined && r.rsi !== null ? Number(r.rsi).toFixed(1) : "-"}</td>
       <td>${fmtMoney(r.price)}</td>
+      <td><button type="button" class="btn btn-sm btn-outline-primary quick-trigger-btn"
+        data-symbol="${r.symbol}" data-side="${r.side}" data-price="${r.price ?? ""}">${r.side === "short" ? "מכירה" : "קניה"} ⚡</button></td>
     </tr>`;
   }).join("");
 }
+
+// Watchlist row's "Quick trade" button - opens the same chart modal + buy/
+// sell-line form (see shared.js's refreshPriceTriggers/pt-submit) that
+// already exists for the STOP-trigger feature, just pre-filled with this
+// row's own side and current price so placing the order needs only a stop
+// price and quantity instead of typing everything from scratch.
+function openQuickTrigger(symbol, side, price) {
+  openChart(symbol);
+  const sideEl = document.getElementById("pt-side");
+  const priceEl = document.getElementById("pt-trigger-price");
+  if (sideEl) sideEl.value = side === "short" ? "short" : "long";
+  if (priceEl) priceEl.value = price ? Number(price).toFixed(2) : "";
+  document.getElementById("pt-qty")?.focus();
+}
+
+document.getElementById("watchlist-body")?.addEventListener("click", (e) => {
+  const btn = e.target.closest(".quick-trigger-btn");
+  if (!btn) return;
+  openQuickTrigger(btn.dataset.symbol, btn.dataset.side, btn.dataset.price);
+});
 
 document.getElementById("btn-run-prefilter").addEventListener("click", async () => {
   const btn = document.getElementById("btn-run-prefilter");
