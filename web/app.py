@@ -617,12 +617,11 @@ async def api_gateway_disconnect(request: Request, mode: str = Depends(require_m
                 ),
             )
         forced_open_positions = True
-    if mode == "live":
-        if body.get("confirm") != DISCONNECT_LIVE_CONFIRM_PHRASE:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Type '{DISCONNECT_LIVE_CONFIRM_PHRASE}' to confirm disconnecting LIVE.",
-            )
+    if body.get("confirm") != DISCONNECT_LIVE_CONFIRM_PHRASE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Type '{DISCONNECT_LIVE_CONFIRM_PHRASE}' to confirm disconnecting LIVE.",
+        )
     try:
         gateway_control.disconnect(mode)
     except gateway_control.GatewayControlError as exc:
@@ -2225,10 +2224,10 @@ async def api_delete_backtests(request: Request, account_id: int = Depends(requi
 # registration-order reason as strategy_report/calendar above.
 @app.get("/api/backtest_data_fetch/status")
 def api_backtest_data_fetch_status(
-    mode: str = Query("paper"), account_id: int = Depends(require_account), user: str = Depends(require_user)
+    mode: str = Query("live"), account_id: int = Depends(require_account), user: str = Depends(require_user)
 ):
-    if mode not in ("paper", "live"):
-        raise HTTPException(status_code=400, detail="mode must be 'paper' or 'live'.")
+    if mode not in db.MODES:
+        raise HTTPException(status_code=400, detail=f"mode must be one of {db.MODES}.")
     return {
         "gateway": gateway_control.status(mode, _env()),
         "latest": db.get_latest_backtest_data_fetch(account_id),
@@ -2262,9 +2261,9 @@ def api_backtest_data_fetch_report(user: str = Depends(require_user)):
 @app.post("/api/backtest_data_fetch")
 async def api_create_backtest_data_fetch(request: Request, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     body = await request.json() if await request.body() else {}
-    mode = body.get("mode", "paper")
-    if mode not in ("paper", "live"):
-        raise HTTPException(status_code=400, detail="mode must be 'paper' or 'live'.")
+    mode = body.get("mode", "live")
+    if mode not in db.MODES:
+        raise HTTPException(status_code=400, detail=f"mode must be one of {db.MODES}.")
     # start_date/end_date (both or neither) request the "Add Backtest Data"
     # explicit date-range fetch instead of the default "top up from now"
     # one - see fetch_backtest_data.run_fetch_range/db.create_backtest_data_

@@ -1,14 +1,17 @@
-"""Shared paper/live mode helpers — kept dependency-light (no pandas/yfinance)
-so trade.py and bot.py can import it without pulling in cycle.py's heavier
+"""Shared mode helpers — kept dependency-light (no pandas/yfinance) so
+trade.py and bot.py can import it without pulling in cycle.py's heavier
 imports. `db` itself only needs sqlite3/bcrypt, so importing it here doesn't
 add any heavy dependency.
+
+Paper trading has been removed (see db.MODES' own comment) - `mode` is
+always "live" now, but every function here still takes it explicitly
+rather than dropping the parameter, matching every other mode-aware
+function in this codebase.
 """
 from src import db
 
-# Gateway ports (paper/live are separate IB Gateway processes on this box —
-# see DEPLOY.md). Client ids are shared across modes since each mode talks
-# to a different Gateway process, so there's no collision between them.
-GATEWAY_PORT_BY_MODE = {"paper": "4002", "live": "4001"}
+# The one IB Gateway process this box runs (see DEPLOY.md).
+GATEWAY_PORT_BY_MODE = {"live": "4001"}
 
 # key -> (.env suffix, cast, hardcoded fallback if neither DB nor .env has it)
 RISK_PARAM_SPECS = {
@@ -28,7 +31,7 @@ def ibkr_port(env: dict, account_id: int, mode: str) -> int:
         key = f"{mode.upper()}_IBKR_PORT"
         return int(env.get(key, GATEWAY_PORT_BY_MODE[mode]))
     ports = db.get_or_assign_gateway_ports(account_id)
-    return ports["paper_port"] if mode == "paper" else ports["live_port"]
+    return ports["live_port"]
 
 
 def ibkr_account(env: dict, account_id: int, mode: str) -> str | None:

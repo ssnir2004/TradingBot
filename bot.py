@@ -30,7 +30,7 @@ def log(message: str):
 def main():
     db.init_db(seed_rules_path=PROJECT_DIR / "rules.json")
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=db.MODES, default="paper")
+    parser.add_argument("--mode", choices=db.MODES, default="live")
     parser.add_argument("--account-id", type=int, default=None,
                          help="Defaults to the admin account when omitted (manual/dev use).")
     parser.add_argument("--symbol", required=True)

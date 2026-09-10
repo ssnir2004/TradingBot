@@ -82,7 +82,7 @@ def fetch_es(ib, initial_duration: str = DEFAULT_INITIAL_DURATION) -> dict:
     }
 
 
-def run_fetch(account_id: int, duration: str = DEFAULT_INITIAL_DURATION, mode: str = "paper") -> dict:
+def run_fetch(account_id: int, duration: str = DEFAULT_INITIAL_DURATION, mode: str = "live") -> dict:
     env = dotenv_values(PROJECT_DIR / ".env")
     ibkr = IBKRClient(
         env.get("IBKR_HOST", "127.0.0.1"),
@@ -109,7 +109,7 @@ def main():
                          help="Defaults to the admin account when omitted.")
     parser.add_argument("--duration", default=DEFAULT_INITIAL_DURATION,
                          help="Initial backfill depth if ES has no cache yet, e.g. '2 Y'")
-    parser.add_argument("--mode", choices=["paper", "live"], default="paper",
+    parser.add_argument("--mode", choices=db.MODES, default="live",
                          help="Which IBKR Gateway to connect through (read-only, never places an order).")
     args = parser.parse_args()
     account_id = args.account_id if args.account_id is not None else db.get_default_account_id()

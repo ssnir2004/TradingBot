@@ -269,12 +269,8 @@ def fetch_symbol(ib, symbol: str, initial_duration: str) -> dict:
 def _connect_ibkr(account_id: int, mode: str) -> IBKRClient:
     """Shared by run_fetch/run_fetch_range - connects to IBKR with its own
     dedicated client ID (never collides with the cycle's own connection or
-    trade.py's). `mode` defaults to "paper" (this is backtest/historical
-    data, not real trading) but can be set to "live" - this only ever calls
-    qualifyContracts/reqHistoricalData, never places an order, so pointing
-    it at the live Gateway is safe; useful when paper's data farms are
-    degraded (confirmed via live A/B testing: paper timed out while live
-    answered the identical request in ~11s) but live's are fine."""
+    trade.py's). This only ever calls qualifyContracts/reqHistoricalData,
+    never places an order."""
     env = dotenv_values(PROJECT_DIR / ".env")
     ibkr = IBKRClient(
         env.get("IBKR_HOST", "127.0.0.1"),
@@ -340,7 +336,7 @@ def _run_fetch_loop(ibkr: IBKRClient, symbols: list[str], fetch_fn) -> dict:
 
 
 def run_fetch(
-    account_id: int, symbols: list[str], duration: str = DEFAULT_INITIAL_DURATION, mode: str = "paper"
+    account_id: int, symbols: list[str], duration: str = DEFAULT_INITIAL_DURATION, mode: str = "live"
 ) -> dict:
     """The actual fetch-everything routine — importable so run_service.py's
     scheduler can call it directly on a weekly cadence, same pattern as
@@ -357,7 +353,7 @@ def run_fetch(
 
 
 def run_fetch_range(
-    account_id: int, symbols: list[str], start_date: date, end_date: date, mode: str = "paper"
+    account_id: int, symbols: list[str], start_date: date, end_date: date, mode: str = "live"
 ) -> dict:
     """The "Add Backtest Data" routine (dashboard's Backtest Data card) -
     same connect/loop/disconnect shape as run_fetch, but every symbol is
@@ -393,10 +389,9 @@ def main():
     parser.add_argument("--duration", default=DEFAULT_INITIAL_DURATION,
                          help="Initial backfill depth for a symbol with no cache yet, e.g. '2 Y'")
     parser.add_argument("--limit", type=int, default=None, help="Cap symbols fetched (testing only)")
-    parser.add_argument("--mode", choices=["paper", "live"], default="paper",
+    parser.add_argument("--mode", choices=db.MODES, default="live",
                          help="Which IBKR Gateway to connect through for this read-only historical-data "
-                              "fetch (never places an order either way) - 'live' if paper's data farms "
-                              "are degraded and live's aren't.")
+                              "fetch (never places an order either way).")
     parser.add_argument("--start-date", type=str, default=None,
                          help="ISO date (YYYY-MM-DD) - with --end-date, fetches this explicit "
                               "[start_date, end_date] window instead of --duration back from now "

@@ -34,7 +34,7 @@ def run(account_id: int, mode: str):
 if __name__ == "__main__":
     db.init_db(seed_rules_path=Path(__file__).resolve().parent / "rules.json")
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=db.MODES, default="paper")
+    parser.add_argument("--mode", choices=db.MODES, default="live")
     parser.add_argument("--account-id", type=int, default=None,
                          help="Defaults to the admin account when omitted (manual/dev use).")
     args = parser.parse_args()

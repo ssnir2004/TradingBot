@@ -1,9 +1,9 @@
-"""One tick of the trading cycle, for a given mode ('paper' or 'live'). Runs
-on run_service.py's own "cycle" job interval (CYCLE_INTERVAL_MINUTES there
-— 1 minute as of 2026-09-04, tightened from 5 to catch ORB "breakout"
-entries that only fire on one exact bar, see that constant's own comment)
-from the always-on service — one scheduler instance per mode, each
-connecting to its own IB Gateway process.
+"""One tick of the trading cycle (mode is always 'live' - see db.MODES'
+own comment, paper trading has been removed). Runs on run_service.py's
+own "cycle" job interval (CYCLE_INTERVAL_MINUTES there — 1 minute as of
+2026-09-04, tightened from 5 to catch ORB "breakout" entries that only
+fire on one exact bar, see that constant's own comment) from the
+always-on service.
 On each tick: checks market hours, handles any pending emergency
 flatten-all request from the dashboard, reconciles stop-outs, manages open
 positions (breakeven flip, partial profit, swing trailing stop) — always,
@@ -2492,12 +2492,9 @@ def scan_watchlist_filters(account_id: int):
     comment, src/db.py), and stores a snapshot for the dashboard's
     Watchlist table — independent of entry_scan, which stops early once
     the day's trade/position caps are hit and so doesn't necessarily check
-    every symbol. Pure yfinance, no IBKR connection needed. Mode-agnostic
-    like morning_prefilter (paper and live share the same watchlist and
-    market data), so this runs once and writes the same snapshot to both
-    modes — see run_service.py, which schedules it from the live instance
-    only. A strategy_run that's 'off' is skipped - there's no criteria to
-    check its candidates against.
+    every symbol. Pure yfinance, no IBKR connection needed. A strategy_run
+    that's 'off' is skipped - there's no criteria to check its candidates
+    against.
 
     Dispatches per strategy to the classic D1-D3/I1-I3 evaluator, the ORB
     one, or Touch & Turn's own, depending on THAT strategy's own rules
@@ -2530,18 +2527,18 @@ def scan_watchlist_filters(account_id: int):
         # its own comment) - a fade strategy's candidates come from its
         # signal direction's gap-scan survivors, not its trade side's.
         watchlist_direction = rules.get("signal_side") or side
-        for row in db.get_watchlist(account_id, "paper", direction=watchlist_direction, universe=_strategy_universe(rules)):
+        for row in db.get_watchlist(account_id, "live", direction=watchlist_direction, universe=_strategy_universe(rules)):
             if is_touch_turn:
-                detail = _evaluate_touch_turn_entry(account_id, "paper", row["symbol"], rules, side)
+                detail = _evaluate_touch_turn_entry(account_id, "live", row["symbol"], rules, side)
                 results.append({"symbol": row["symbol"], "gap_pct": row["gap_pct"], "model": "touch_turn", "strategy_id": strategy_id, **detail})
             elif is_orb:
-                detail = _evaluate_orb_entry(account_id, "paper", row["symbol"], rules, side)
+                detail = _evaluate_orb_entry(account_id, "live", row["symbol"], rules, side)
                 results.append({
                     "symbol": row["symbol"], "gap_pct": row["gap_pct"], "model": "orb", "strategy_id": strategy_id,
                     **detail, **_orb_watchlist_filters(detail, rules),
                 })
             else:
-                detail = _evaluate_entry_filters(account_id, "paper", row["symbol"], rules, side)
+                detail = _evaluate_entry_filters(account_id, "live", row["symbol"], rules, side)
                 results.append({"symbol": row["symbol"], "gap_pct": row["gap_pct"], "model": "classic", "strategy_id": strategy_id, **detail})
 
     for mode in db.MODES:
@@ -2922,7 +2919,7 @@ def emergency_check(account_id: int, mode: str):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=db.MODES, default="paper")
+    parser.add_argument("--mode", choices=db.MODES, default="live")
     parser.add_argument("--account-id", type=int, default=None,
                          help="Defaults to the admin account when omitted (manual/dev use).")
     args = parser.parse_args()

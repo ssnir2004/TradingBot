@@ -32,7 +32,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 FETCH_UNIVERSE = list(SP500_TICKERS) + ["SPY", "QQQ"]
 
 
-def run(fetch_id: int, mode: str = "paper"):
+def run(fetch_id: int, mode: str = "live"):
     record = db.get_backtest_data_fetch(fetch_id)
     if record is None:
         print(f"backtest data fetch {fetch_id}: not found")
@@ -66,7 +66,7 @@ def main():
     db.init_db(seed_rules_path=PROJECT_DIR / "rules.json")
     parser = argparse.ArgumentParser()
     parser.add_argument("--fetch-id", type=int, required=True)
-    parser.add_argument("--mode", choices=["paper", "live"], default="paper")
+    parser.add_argument("--mode", choices=db.MODES, default="live")
     args = parser.parse_args()
     run(args.fetch_id, args.mode)
 

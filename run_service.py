@@ -1,15 +1,17 @@
-"""The always-on trading engine process for one mode ('paper' or 'live') —
-run TWO instances of this (see deploy/trading-bot-paper.service and
-deploy/trading-bot-live.service), each connecting to its own IB Gateway
-process. Replaces Windows Task Scheduler with an internal APScheduler
-running cycle.py/daily_summary.py on their cadences for this mode. The
+"""The always-on trading engine process (see deploy/trading-bot-live.service),
+connecting to IB Gateway. Replaces Windows Task Scheduler with an internal
+APScheduler running cycle.py/daily_summary.py on their cadences. The
 dashboard (run_dashboard.py) is a separate process that only reads/writes
 the shared SQLite DB; it never talks to IBKR directly.
 
-The premarket prefilter scan and DB maintenance are mode-agnostic (the scan
-is market data, not account data, and writes both modes' watchlists in one
-pass — see morning_prefilter.py) so only the live instance runs them, to
-avoid doing the same yfinance scan twice in parallel.
+Paper trading has been removed entirely (see db.MODES' own comment) - this
+used to run as TWO instances (paper + live, each its own IB Gateway), with
+the premarket prefilter scan/DB maintenance mode-agnostic and gated to only
+the live instance to avoid double-running them. Now there's only ever one
+instance, so `mode` is always "live" - kept as an explicit local (not
+collapsed away) since cycle.run_cycle/daily_summary.run/db's own logging
+calls all still take it positionally, same as every other mode-aware
+function in this codebase.
 """
 import argparse
 import logging
@@ -66,12 +68,11 @@ def _run_cycle_job(scheduler: BlockingScheduler, account_id: int, mode: str):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=db.MODES, default="paper")
     parser.add_argument("--account-id", type=int, default=None,
                          help="Which account this process serves. Defaults to the admin account "
                               "until real per-account engines exist (see the multi-account plan).")
     args = parser.parse_args()
-    mode = args.mode
+    mode = "live"
 
     db.init_db(seed_rules_path=PROJECT_DIR / "rules.json")
     account_id = args.account_id if args.account_id is not None else db.get_default_account_id()
@@ -124,17 +125,16 @@ def main():
         next_run_time=datetime.now(ET),  # fire once immediately, then every 5 min
     )
 
-    if mode == "live":
-        # watchlist_filters reflects THIS account's own active strategy
-        # rules against the shared candidate list, so every account's own
-        # live instance runs it for itself.
-        scheduler.add_job(
-            lambda: _guarded(mode, "watchlist_filters", account_id, cycle.scan_watchlist_filters, account_id),
-            IntervalTrigger(minutes=5),
-            id="watchlist_filters", misfire_grace_time=60,
-        )
+    # watchlist_filters reflects THIS account's own active strategy rules
+    # against the shared candidate list, so every account's own instance
+    # runs it for itself.
+    scheduler.add_job(
+        lambda: _guarded(mode, "watchlist_filters", account_id, cycle.scan_watchlist_filters, account_id),
+        IntervalTrigger(minutes=5),
+        id="watchlist_filters", misfire_grace_time=60,
+    )
 
-    if mode == "live" and account_id == db.get_default_account_id():
+    if account_id == db.get_default_account_id():
         # True shared/account-agnostic jobs — the gap scan is plain market
         # data (fanned out to every account's own watchlist by
         # morning_prefilter itself) and maintenance is account-agnostic

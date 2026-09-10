@@ -1,16 +1,17 @@
 """Provisions and controls a non-admin account's own IB Gateway + trading
-engine — the instantiated systemd units (deploy/ibgateway-paper@.service
-etc), one pair of processes per account, keyed by account_id (%i in the
-unit name). The admin's own Gateway stays on the original fixed units
-(see web/gateway_control.py) and is never touched by this module.
+engine — the instantiated systemd unit (deploy/ibgateway-live@.service),
+one process pair per account, keyed by account_id (%i in the unit name).
+The admin's own Gateway stays on the original fixed units (see
+web/gateway_control.py) and is never touched by this module.
 
-"Connect" (provision_and_connect) only starts the Gateway processes, not
-the trading engine — mirrors gateway_control.py's own
-reconnect_gateway()/resume_engine() split: IBKR may need a fresh 2FA
-approval on THIS account's own phone before the Gateway actually logs in,
-so the engine should only start once status() shows port_listening=True
-for both modes.
-"""
+"Connect" (provision_and_connect) only starts the Gateway process, not the
+trading engine — mirrors gateway_control.py's own reconnect_gateway()/
+resume_engine() split: IBKR may need a fresh 2FA approval on THIS
+account's own phone before the Gateway actually logs in, so the engine
+should only start once status() shows port_listening=True.
+
+Paper trading has been removed (see db.MODES' own comment) - this used to
+provision a paper+live pair per account; now just live."""
 from pathlib import Path
 
 from src import db, secrets_store, systemd_util
@@ -18,8 +19,8 @@ from src import db, secrets_store, systemd_util
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 IBC_DIR = PROJECT_DIR / "deploy" / "ibc"
 
-GATEWAY_UNIT = {"paper": "ibgateway-paper@{account_id}.service", "live": "ibgateway-live@{account_id}.service"}
-ENGINE_UNIT = {"paper": "trading-bot-paper@{account_id}.service", "live": "trading-bot-live@{account_id}.service"}
+GATEWAY_UNIT = "ibgateway-live@{account_id}.service"
+ENGINE_UNIT = "trading-bot-live@{account_id}.service"
 
 ProvisioningError = systemd_util.SystemctlError
 
@@ -83,11 +84,11 @@ LogComponents=open
 
 
 def provision_and_connect(account_id: int):
-    """Writes this account's IBC config (paper + live) from their saved
-    credentials and starts their Gateway processes. Raises
-    CredentialsNotSetError if they haven't saved IBKR credentials yet, or
-    ProvisioningError if starting a unit fails (most likely the sudoers
-    rules for @-instances haven't been installed on this server yet)."""
+    """Writes this account's IBC config from their saved credentials and
+    starts their Gateway process. Raises CredentialsNotSetError if they
+    haven't saved IBKR credentials yet, or ProvisioningError if starting
+    the unit fails (most likely the sudoers rules for @-instances haven't
+    been installed on this server yet)."""
     _check_not_admin(account_id)
     creds = db.get_ibkr_credentials(account_id)
     if creds is None:
@@ -98,43 +99,34 @@ def provision_and_connect(account_id: int):
     ports = db.get_or_assign_gateway_ports(account_id)
 
     IBC_DIR.mkdir(parents=True, exist_ok=True)
-    _write_ibc_config(account_id, "paper", ibkr_username, ibkr_password, ports["paper_port"])
     _write_ibc_config(account_id, "live", ibkr_username, ibkr_password, ports["live_port"])
 
-    for mode in ("paper", "live"):
-        unit = GATEWAY_UNIT[mode].format(account_id=account_id)
-        systemd_util.run_privileged("start", unit)
+    systemd_util.run_privileged("start", GATEWAY_UNIT.format(account_id=account_id))
 
 
 def resume_engines(account_id: int):
-    """Starts this account's trading engines — call only after status()
-    shows port_listening=True for both modes (i.e. 2FA has actually been
-    approved and the Gateway is really up)."""
+    """Starts this account's trading engine — call only after status()
+    shows port_listening=True (i.e. 2FA has actually been approved and
+    the Gateway is really up)."""
     _check_not_admin(account_id)
-    for mode in ("paper", "live"):
-        unit = ENGINE_UNIT[mode].format(account_id=account_id)
-        systemd_util.run_privileged("start", unit)
+    systemd_util.run_privileged("start", ENGINE_UNIT.format(account_id=account_id))
 
 
 def disconnect(account_id: int):
-    """Stops this account's engines first, then their Gateway — so the
+    """Stops this account's engine first, then its Gateway — so the
     engine never sees its Gateway disappear out from under it mid-cycle."""
     _check_not_admin(account_id)
-    for mode in ("paper", "live"):
-        systemd_util.run_privileged("stop", ENGINE_UNIT[mode].format(account_id=account_id))
-    for mode in ("paper", "live"):
-        systemd_util.run_privileged("stop", GATEWAY_UNIT[mode].format(account_id=account_id))
+    systemd_util.run_privileged("stop", ENGINE_UNIT.format(account_id=account_id))
+    systemd_util.run_privileged("stop", GATEWAY_UNIT.format(account_id=account_id))
 
 
 def status(account_id: int) -> dict:
     _check_not_admin(account_id)
     ports = db.get_or_assign_gateway_ports(account_id)
-    result = {}
-    for mode in ("paper", "live"):
-        port = ports["paper_port"] if mode == "paper" else ports["live_port"]
-        result[mode] = {
-            "gateway_active": systemd_util.is_active(GATEWAY_UNIT[mode].format(account_id=account_id)),
-            "engine_active": systemd_util.is_active(ENGINE_UNIT[mode].format(account_id=account_id)),
-            "port_listening": systemd_util.port_listening(port),
+    return {
+        "live": {
+            "gateway_active": systemd_util.is_active(GATEWAY_UNIT.format(account_id=account_id)),
+            "engine_active": systemd_util.is_active(ENGINE_UNIT.format(account_id=account_id)),
+            "port_listening": systemd_util.port_listening(ports["live_port"]),
         }
-    return result
+    }

@@ -156,9 +156,9 @@ def run_scan(min_gap: float, min_price: float, dry_run: bool) -> dict:
         WATCHLIST_PATH.write_text("\n".join(lines) + "\n")
 
         # The scan itself is market data, not account-specific — the same
-        # survivors feed both the paper and live engines AND every account
-        # (one yfinance scan, run once, fanned out to everyone's own
-        # watchlist rows) rather than re-running it per account.
+        # survivors feed every account (one yfinance scan, run once, fanned
+        # out to everyone's own watchlist rows) rather than re-running it
+        # per account.
         watchlist_entries = [
             {"symbol": s["ticker"], "direction": "long", "gap_pct": s["gap_pct"],
              "open_price": s["open"], "prev_close": s["prev_close"], "universes": s["universes"]}

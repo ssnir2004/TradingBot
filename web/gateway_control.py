@@ -9,8 +9,8 @@ touches the admin's original, fixed unit names.
 """
 from src import db, mode_config, systemd_util
 
-GATEWAY_UNIT = {"paper": "ibgateway-paper.service", "live": "ibgateway-live.service"}
-ENGINE_UNIT = {"paper": "trading-bot-paper.service", "live": "trading-bot-live.service"}
+GATEWAY_UNIT = {"live": "ibgateway-live.service"}
+ENGINE_UNIT = {"live": "trading-bot-live.service"}
 
 # Kept as an alias so existing callers catching this name keep working.
 GatewayControlError = systemd_util.SystemctlError

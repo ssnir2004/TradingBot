@@ -37,7 +37,7 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = PROJECT_DIR / "data" / "trading_bot.db"
 ET = ZoneInfo("America/New_York")
 
-MODES = ("paper", "live")
+MODES = ("live",)  # paper trading removed - see MODES' own git history; 'paper' rows/tables/columns are left in place, never read going forward
 RISK_RATINGS = ("conservative", "moderate", "aggressive")
 
 
@@ -3095,8 +3095,12 @@ def _migrate_settings_to_per_account(conn, account_id: int):
     watchlist/broker-position snapshots, etc). Copy those to
     '<account_id>:<mode>:<key>' — covers every such key regardless of
     suffix — so existing state isn't lost when multi-account support lands.
-    Old keys are left in place, harmless."""
-    for mode in MODES:
+    Old keys are left in place, harmless. Iterates the historical
+    ('paper', 'live') pair explicitly, not the current MODES - this is a
+    one-time migration for keys any old deployment could have written
+    under either mode, independent of which modes are still supported
+    going forward (see MODES' own comment)."""
+    for mode in ("paper", "live"):
         rows = conn.execute("SELECT key, value FROM settings WHERE key LIKE ?", (f"{mode}:%",)).fetchall()
         for row in rows:
             new_key = f"{account_id}:{row['key']}"
@@ -5304,7 +5308,7 @@ def cancel_optimization(optimization_id: int, account_id: int) -> bool:
 # dashboard process spawns and tracks rather than running fetch_backtest_
 # data.py's long, IBKR-connected fetch in-process.
 def create_backtest_data_fetch(
-    account_id: int, mode: str = "paper", start_date: str | None = None, end_date: str | None = None
+    account_id: int, mode: str = "live", start_date: str | None = None, end_date: str | None = None
 ) -> int:
     """start_date/end_date (ISO date strings) are only set for an explicit
     "Add Backtest Data" date-range fetch (see this table's own start_date/
