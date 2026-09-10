@@ -477,9 +477,18 @@ function configCellHtml(s) {
     <div class="text-muted small run-off-hint ${s.run_mode === "off" ? "" : "d-none"}">—</div>`;
 }
 
-async function refreshStrategyRuns() {
-  const rows = await loadMergedStrategyRuns();
+async function refreshStrategyRuns(force = false) {
+  // Skip while the user is actively editing a row here (mode select,
+  // virtual capital / live budget / max positions inputs) — same reasoning
+  // as refreshRiskParams above: the periodic auto-refresh would otherwise
+  // overwrite an in-progress edit with the still-old server value before
+  // Save is even clicked. force=true (after a save/delete actually
+  // completes) bypasses this, since at that point the click that triggered
+  // it left focus inside this same table and we DO want the fresh state.
   const body = document.getElementById("strategy-runs-body");
+  if (!force && document.activeElement && body.contains(document.activeElement)) return;
+
+  const rows = await loadMergedStrategyRuns();
   body.innerHTML = rows.map(s => `<tr data-strategy-id="${s.id}">
     <td>${s.key ? `<span class="badge bg-light text-dark border">${escapeHtml(s.key)}</span>` : '<span class="text-muted small">—</span>'}</td>
     <td>${s.name} ${s.description ? `<button class="btn btn-sm btn-link p-0 ms-1 strategy-info-btn" data-id="${s.id}" title="הצג הסבר מלא">&#8505;&#65039;</button>` : ""}</td>
@@ -521,7 +530,7 @@ document.getElementById("strategy-runs-body").addEventListener("click", async (e
     const row = deleteBtn.closest("tr");
     const id = row.dataset.strategyId;
     if (!confirm("Delete this strategy?")) return;
-    try { await api(`/api/strategies/${id}`, { method: "DELETE" }); refreshStrategyRuns(); }
+    try { await api(`/api/strategies/${id}`, { method: "DELETE" }); refreshStrategyRuns(true); }
     catch (err) { alert("Could not delete: " + err.message); }
     return;
   }
@@ -555,7 +564,7 @@ document.getElementById("strategy-runs-body").addEventListener("click", async (e
     await api(`/api/strategy_runs/${id}`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
     });
-    await refreshStrategyRuns();
+    await refreshStrategyRuns(true);
   } catch (err) {
     alert("Save failed: " + err.message);
   } finally {
