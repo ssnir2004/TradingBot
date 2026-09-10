@@ -12,7 +12,7 @@ import re
 import subprocess
 import sys
 import zipfile
-from datetime import date
+from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
 
@@ -1083,6 +1083,18 @@ def api_broker_positions(mode: str = Depends(require_mode), account_id: int = De
     for o in db.get_broker_orders(account_id, mode)["orders"]:
         orders_by_symbol.setdefault(o["symbol"], []).append(o)
 
+    # For "Daily P&L"/the Last Price column's $ figure below: a position the
+    # bot opened TODAY has no meaningful "yesterday's close" reference - the
+    # move from yesterday's close to now includes the overnight gap and
+    # whatever the symbol did before the position even existed, which can
+    # show a phantom gain (or hide a real loss) that has nothing to do with
+    # what was actually bought/sold. Use the bot's own entry_price as the
+    # reference instead whenever entry_time_iso falls on today's date;
+    # otherwise (a position already open before today) yesterday's close is
+    # still the right "how much today" reference, same as before.
+    open_positions_by_symbol = {p["symbol"]: p for p in db.get_open_positions(account_id, mode)}
+    today_et = datetime.now(cycle.ET).date()
+
     for pos in data["positions"]:
         price = None
         prior_close = None
@@ -1095,8 +1107,19 @@ def api_broker_positions(mode: str = Depends(require_mode), account_id: int = De
         except Exception:
             pass
         pos["current_price"] = price
+
+        daily_ref, daily_ref_label = prior_close, "yesterday's close"
+        bot_pos = open_positions_by_symbol.get(pos["symbol"])
+        if bot_pos:
+            try:
+                entry_date = datetime.fromisoformat(bot_pos["entry_time_iso"]).astimezone(cycle.ET).date()
+                if entry_date == today_et:
+                    daily_ref, daily_ref_label = bot_pos["entry_price"], "entry"
+            except Exception:
+                pass
+
         pos["unrealized_pnl"] = ((price - pos["avg_cost"]) * pos["qty"]) if price is not None else None
-        pos["daily_pnl"] = ((price - prior_close) * pos["qty"]) if price is not None and prior_close is not None else None
+        pos["daily_pnl"] = ((price - daily_ref) * pos["qty"]) if price is not None and daily_ref is not None else None
 
         try:
             eh = cycle.get_extended_hours_quote(pos["symbol"])
@@ -1117,12 +1140,23 @@ def api_broker_positions(mode: str = Depends(require_mode), account_id: int = De
             lp = cycle.get_last_price_quote(pos["symbol"])
         except Exception:
             lp = {"price": None, "change_pct": None, "ref_price": None}
+        # Same today-opened override as daily_pnl above, and for the same
+        # reason - lp["ref_price"] otherwise defaults to yesterday's close
+        # regardless of when the position was actually entered. ref_label
+        # tells the dashboard which one is being shown so the "vs ..." text
+        # next to it doesn't call an entry price "yesterday's close".
+        lp["ref_price"] = daily_ref
+        lp["ref_label"] = daily_ref_label
+        lp["change_pct"] = (
+            (lp["price"] - daily_ref) / daily_ref * 100
+            if lp.get("price") is not None and daily_ref else None
+        )
         # Same direction-aware treatment as extended_hours above - lp's
         # change_pct is the symbol's raw move, so the dollar figure shown
         # must go through the signed qty, not the raw price direction.
         lp["pnl"] = (
-            (lp["price"] - lp["ref_price"]) * pos["qty"]
-            if lp.get("price") is not None and lp.get("ref_price") is not None else None
+            (lp["price"] - daily_ref) * pos["qty"]
+            if lp.get("price") is not None and daily_ref is not None else None
         )
         pos["last_price_quote"] = lp
 

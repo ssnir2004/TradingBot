@@ -254,7 +254,7 @@ function inlineOrderForm() {
 function lastPriceCell(lp, eh) {
   if (!lp || lp.price === null || lp.price === undefined) return '<span class="text-muted">-</span>';
   const pctText = (lp.change_pct === null || lp.change_pct === undefined) ? "" : ` (${lp.change_pct >= 0 ? "+" : ""}${lp.change_pct.toFixed(2)}%)`;
-  const refText = (lp.ref_price === null || lp.ref_price === undefined) ? "" : ` vs yesterday's close ${fmtMoney(lp.ref_price)}`;
+  const refText = (lp.ref_price === null || lp.ref_price === undefined) ? "" : ` vs ${lp.ref_label || "yesterday's close"} ${fmtMoney(lp.ref_price)}`;
   const sessionTag = eh && eh.session === "pre" ? ' <span class="badge bg-light text-dark border">pre-market</span>'
     : eh && eh.session === "post" ? ' <span class="badge bg-light text-dark border">after-hours</span>' : "";
   let extra = "";
