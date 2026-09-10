@@ -630,16 +630,129 @@ def _trailing_stop_decision(pos: dict, swing_stop_candidate: float | None) -> di
     return {"action": "hold"}
 
 
-def manage_position(account_id: int, mode: str, ib, pos: dict, rules: dict) -> dict:
-    """rules must be the exit config for pos["side"] — see run_cycle, which
-    picks the right (long or short) active strategy per position, falling
-    back to a safe default if that side no longer has an active strategy
-    (a position stays managed even if its strategy was deactivated or
-    deleted after it was opened). The two stages below are deliberately
-    separate `if`s, not `if`/`elif` — a breakeven flip and a trailing-stop
-    check can both fire on the same tick, since the state mutates in
-    between (see _breakeven_decision/_trailing_stop_decision,
-    the pure decision logic both stages and backtest_engine.py share)."""
+class _PositionOps:
+    """Execution side of position management - the shared DECISION logic
+    (branch selection, r_multiple/MFE/MAE math, and calls into the pure
+    _breakeven_decision/_trailing_stop_decision/orb.fixed_target_decision
+    functions) lives in _manage_position_core below and is IDENTICAL for a
+    real or virtual position; only what happens when a decision says
+    "reposition the stop" or "close the position" differs - a real
+    position touches IBKR, a virtual one only ever touches the DB. This
+    split exists specifically so a live-money incident class (subtly
+    different behavior between two independently-maintained copies of
+    this logic) can't happen - there is exactly one copy of the decision
+    logic, and this class's two subclasses are the only thing that
+    changes between managing a real vs. a virtual position."""
+
+    def reposition_stop(self, pos: dict, new_stop_price: float, side: str) -> int | None:
+        raise NotImplementedError
+
+    def close_position(self, pos: dict) -> bool:
+        raise NotImplementedError
+
+    def save(self, pos: dict):
+        raise NotImplementedError
+
+    def notify(self, title: str, body: str, priority: str = "default"):
+        raise NotImplementedError
+
+    def log(self, event: str, **fields):
+        raise NotImplementedError
+
+
+class _RealPositionOps(_PositionOps):
+    """Unchanged real-money behavior - every call here is byte-identical
+    to what manage_position itself used to do directly before this
+    refactor (see test_no_stop_delayed_trail_live.py, which still passes
+    unmodified against this class)."""
+
+    def __init__(self, account_id: int, mode: str, ib):
+        self.account_id, self.mode, self.ib = account_id, mode, ib
+
+    def reposition_stop(self, pos, new_stop_price, side):
+        _cancel_stop(self.ib, pos.get("stop_order_id"))
+        return _place_stop(self.ib, pos["symbol"], pos["qty"], new_stop_price, side)
+
+    def close_position(self, pos: dict) -> bool:
+        side = pos.get("side", "long")
+        _cancel_stop(self.ib, pos.get("stop_order_id"))
+        closed = _market_close(self.account_id, self.mode, self.ib, pos["symbol"], pos["qty"], side)
+        if not closed:
+            closed = _broker_position(self.ib, pos["symbol"]) is None
+        if closed:
+            db.remove_position(self.account_id, self.mode, pos["symbol"])
+        else:
+            # Same delayed-fill race force_close_all already handles: the
+            # stop was just cancelled to make way for the close attempt,
+            # so re-arm it immediately rather than leaving the position
+            # unprotected, and let the next cycle retry the close.
+            pos["stop_order_id"] = _place_stop(self.ib, pos["symbol"], pos["qty"], pos["stop_price"], side)
+        return closed
+
+    def save(self, pos):
+        db.upsert_position(self.account_id, self.mode, pos)
+
+    def notify(self, title, body, priority="default"):
+        notify(f"[{self.mode.upper()}] {title}", body, priority)
+
+    def log(self, event, **fields):
+        log_decision(self.account_id, self.mode, {"event": event, **fields})
+
+
+class _VirtualPositionOps(_PositionOps):
+    """Fully simulated (no IBKR connection, no real order ever placed) -
+    see virtual_positions' own schema comment (src/db.py) for why. A stop
+    reposition here just means the new level IS the simulated stop
+    (pos["stop_price"] itself, set by the shared core same as for a real
+    position) - there's no broker order id to track, so reposition_stop
+    always returns None. close_position always succeeds immediately (no
+    delayed-fill race to retry - a simulated fill happens the instant the
+    decision logic says it should) and records the closed trade to
+    virtual_trades before removing the open virtual_positions row."""
+
+    def __init__(self, account_id: int, strategy_id: int, strategy_label: str):
+        self.account_id, self.strategy_id, self.strategy_label = account_id, strategy_id, strategy_label
+
+    def reposition_stop(self, pos, new_stop_price, side):
+        return None
+
+    def close_position(self, pos: dict) -> bool:
+        side = pos.get("side", "long")
+        exit_price = pos["target_price"]
+        pnl = ((exit_price - pos["entry_price"]) if side == "long" else (pos["entry_price"] - exit_price)) * pos["qty"]
+        db.record_virtual_trade(self.account_id, self.strategy_id, {
+            "symbol": pos["symbol"], "side": side, "entry_price": pos["entry_price"],
+            "entry_time_iso": pos["entry_time_iso"], "exit_price": exit_price,
+            "exit_time_iso": datetime.now(ET).isoformat(timespec="seconds"), "qty": pos["qty"],
+            "final_r": pos.get("r_multiple"), "pnl_dollars": pnl, "exit_reason": "target",
+        })
+        db.remove_virtual_position(self.account_id, self.strategy_id, pos["symbol"])
+        return True
+
+    def save(self, pos):
+        db.upsert_virtual_position(self.account_id, self.strategy_id, pos)
+
+    def notify(self, title, body, priority="default"):
+        notify(f"[VIRTUAL] {self.strategy_label}: {title}", body, priority)
+
+    def log(self, event, **fields):
+        log_decision(self.account_id, "live", {"event": event, "strategy_id": self.strategy_id, "virtual": True, **fields})
+
+
+def _manage_position_core(pos: dict, rules: dict, ops: _PositionOps) -> dict:
+    """The full decision logic for managing one open position - shared
+    verbatim between a real position (manage_position) and a simulated
+    one (manage_virtual_position); see _PositionOps' own docstring for
+    why this split exists. rules must be the exit config for pos["side"]
+    — see run_cycle, which picks the right (long or short) active
+    strategy per position, falling back to a safe default if that side no
+    longer has an active strategy (a position stays managed even if its
+    strategy was deactivated or deleted after it was opened). The two
+    breakeven/trailing stages below are deliberately separate `if`s, not
+    `if`/`elif` — a breakeven flip and a trailing-stop check can both fire
+    on the same tick, since the state mutates in between (see
+    _breakeven_decision/_trailing_stop_decision, the pure decision logic
+    both stages and backtest_engine.py share)."""
     exit_cfg = rules["exit"]
     side = pos.get("side", "long")
     price = _current_price(pos["symbol"])
@@ -672,24 +785,15 @@ def manage_position(account_id: int, mode: str, ib, pos: dict, rules: dict) -> d
         # orb.fixed_target_decision) and exits the WHOLE position there.
         decision = orb.fixed_target_decision(pos, price, side)
         if decision["action"] == "close_target":
-            _cancel_stop(ib, pos.get("stop_order_id"))
-            closed = _market_close(account_id, mode, ib, pos["symbol"], pos["qty"], side)
-            if not closed:
-                closed = _broker_position(ib, pos["symbol"]) is None
+            closed = ops.close_position(pos)
             if closed:
-                notify(f"[{mode.upper()}] TARGET {pos['symbol']}", f"closed @ target ~${pos['target_price']:.2f}", "default")
-                log_decision(account_id, mode, {"event": "target_close", "symbol": pos["symbol"], "side": side, "target": pos["target_price"]})
-                db.remove_position(account_id, mode, pos["symbol"])
+                ops.notify(f"TARGET {pos['symbol']}", f"closed @ target ~${pos['target_price']:.2f}", "default")
+                ops.log("target_close", symbol=pos["symbol"], side=side, target=pos["target_price"])
                 pos["qty"] = 0
             else:
-                # Same delayed-fill race force_close_all already handles: the
-                # stop was just cancelled to make way for the close attempt,
-                # so re-arm it immediately rather than leaving the position
-                # unprotected, and let the next cycle retry the close.
-                pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], pos["stop_price"], side)
-                notify(f"[{mode.upper()}] TARGET CLOSE FAILED: {pos['symbol']}", "still holding after target-close attempt - stop re-armed, will retry next cycle", "high")
+                ops.notify(f"TARGET CLOSE FAILED: {pos['symbol']}", "still holding after target-close attempt - stop re-armed, will retry next cycle", "high")
         if pos["qty"] > 0:
-            db.upsert_position(account_id, mode, pos)
+            ops.save(pos)
         return pos
 
     if exit_cfg.get("management_style") == "staged_trail":
@@ -706,12 +810,11 @@ def manage_position(account_id: int, mode: str, ib, pos: dict, rules: dict) -> d
         if pos["state"] == "pre_breakeven":
             decision = _breakeven_decision(pos, exit_cfg, r_multiple)
             if decision["action"] == "breakeven_flip":
-                _cancel_stop(ib, pos.get("stop_order_id"))
-                pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], decision["new_stop_price"], side)
+                pos["stop_order_id"] = ops.reposition_stop(pos, decision["new_stop_price"], side)
                 pos["stop_price"] = decision["new_stop_price"]
                 pos["state"] = decision["new_state"]
-                notify(f"[{mode.upper()}] BE {pos['symbol']}", f"stop -> ${entry:.2f}", "default")
-                log_decision(account_id, mode, {"event": "breakeven_flip", "symbol": pos["symbol"], "side": side, "new_stop": entry})
+                ops.notify(f"BE {pos['symbol']}", f"stop -> ${entry:.2f}", "default")
+                ops.log("breakeven_flip", symbol=pos["symbol"], side=side, new_stop=entry)
 
         trailing_trigger_r = exit_cfg.get("trailing_trigger_R", 3.0)
         if pos["state"].startswith("post_breakeven") and r_multiple >= trailing_trigger_r:
@@ -721,15 +824,14 @@ def manage_position(account_id: int, mode: str, ib, pos: dict, rules: dict) -> d
                 candidate = orb.low_of_last_n_bars(bars, 2) if side == "long" else orb.high_of_last_n_bars(bars, 2)
             decision = _trailing_stop_decision(pos, candidate)
             if decision["action"] == "trail_stop":
-                _cancel_stop(ib, pos.get("stop_order_id"))
-                pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], decision["new_stop_price"], side)
+                pos["stop_order_id"] = ops.reposition_stop(pos, decision["new_stop_price"], side)
                 old_stop = pos.get("stop_price", pos["initial_stop"])
                 pos["stop_price"] = decision["new_stop_price"]
-                notify(f"[{mode.upper()}] TRAIL {pos['symbol']}", f"stop ${old_stop:.2f} -> ${decision['new_stop_price']:.2f}", "default")
-                log_decision(account_id, mode, {"event": "trail_stop", "symbol": pos["symbol"], "side": side, "old": old_stop, "new": decision["new_stop_price"]})
+                ops.notify(f"TRAIL {pos['symbol']}", f"stop ${old_stop:.2f} -> ${decision['new_stop_price']:.2f}", "default")
+                ops.log("trail_stop", symbol=pos["symbol"], side=side, old=old_stop, new=decision["new_stop_price"])
 
         if pos["qty"] > 0:
-            db.upsert_position(account_id, mode, pos)
+            ops.save(pos)
         return pos
 
     if exit_cfg.get("management_style") == "no_stop_delayed_trail":
@@ -759,16 +861,15 @@ def manage_position(account_id: int, mode: str, ib, pos: dict, rules: dict) -> d
             if hard_stop_r is not None:
                 backfilled_hard_stop = (entry + hard_stop_r * initial_risk) if side == "short" else (entry - hard_stop_r * initial_risk)
                 old_stop = pos.get("stop_price", pos["initial_stop"])
-                _cancel_stop(ib, pos.get("stop_order_id"))
-                pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], backfilled_hard_stop, side)
+                pos["stop_order_id"] = ops.reposition_stop(pos, backfilled_hard_stop, side)
                 pos["hard_stop_price"] = backfilled_hard_stop
                 pos["stop_price"] = backfilled_hard_stop
-                notify(
-                    f"[{mode.upper()}] STOP CORRECTED {pos['symbol']}",
+                ops.notify(
+                    f"STOP CORRECTED {pos['symbol']}",
                     f"opened before this strategy's real hard-stop tracking existed - repositioning stop ${old_stop:.2f} -> ${backfilled_hard_stop:.2f} to match its intended {hard_stop_r}R hard stop",
                     "high",
                 )
-                log_decision(account_id, mode, {"event": "hard_stop_backfilled", "symbol": pos["symbol"], "side": side, "old": old_stop, "new": backfilled_hard_stop})
+                ops.log("hard_stop_backfilled", symbol=pos["symbol"], side=side, old=old_stop, new=backfilled_hard_stop)
             else:
                 pos["hard_stop_price"] = None
         if pos.get("mfe_price") is None:
@@ -789,12 +890,11 @@ def manage_position(account_id: int, mode: str, ib, pos: dict, rules: dict) -> d
                 candidate = orb.low_of_last_n_bars(bars, 2) if side == "long" else orb.high_of_last_n_bars(bars, 2)
             decision = _trailing_stop_decision(pos, candidate)
             if decision["action"] == "trail_stop":
-                _cancel_stop(ib, pos.get("stop_order_id"))
-                pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], decision["new_stop_price"], side)
+                pos["stop_order_id"] = ops.reposition_stop(pos, decision["new_stop_price"], side)
                 old_stop = pos.get("stop_price", pos["initial_stop"])
                 pos["stop_price"] = decision["new_stop_price"]
-                notify(f"[{mode.upper()}] TRAIL {pos['symbol']}", f"stop ${old_stop:.2f} -> ${decision['new_stop_price']:.2f}", "default")
-                log_decision(account_id, mode, {"event": "trail_stop", "symbol": pos["symbol"], "side": side, "old": old_stop, "new": decision["new_stop_price"]})
+                ops.notify(f"TRAIL {pos['symbol']}", f"stop ${old_stop:.2f} -> ${decision['new_stop_price']:.2f}", "default")
+                ops.log("trail_stop", symbol=pos["symbol"], side=side, old=old_stop, new=decision["new_stop_price"])
         else:
             mfe_r = ((entry - pos["mfe_price"]) if side == "short" else (pos["mfe_price"] - entry)) / initial_risk
             trailing_trigger_r = exit_cfg.get("trailing_trigger_R", 1.20)
@@ -808,26 +908,24 @@ def manage_position(account_id: int, mode: str, ib, pos: dict, rules: dict) -> d
                 decision = _trailing_stop_decision(pos, candidate)
                 new_stop_note = pos.get("stop_price", pos["initial_stop"])
                 if decision["action"] == "trail_stop":
-                    _cancel_stop(ib, pos.get("stop_order_id"))
-                    pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], decision["new_stop_price"], side)
+                    pos["stop_order_id"] = ops.reposition_stop(pos, decision["new_stop_price"], side)
                     pos["stop_price"] = decision["new_stop_price"]
                     new_stop_note = decision["new_stop_price"]
-                notify(f"[{mode.upper()}] TRAILING ACTIVATED {pos['symbol']}", f"MFE cleared {trailing_trigger_r}R, stop -> ${new_stop_note:.2f}", "default")
-                log_decision(account_id, mode, {"event": "trail_activated", "symbol": pos["symbol"], "side": side, "at_r": trailing_trigger_r, "stop": new_stop_note})
+                ops.notify(f"TRAILING ACTIVATED {pos['symbol']}", f"MFE cleared {trailing_trigger_r}R, stop -> ${new_stop_note:.2f}", "default")
+                ops.log("trail_activated", symbol=pos["symbol"], side=side, at_r=trailing_trigger_r, stop=new_stop_note)
 
         if pos["qty"] > 0:
-            db.upsert_position(account_id, mode, pos)
+            ops.save(pos)
         return pos
 
     if pos["state"] == "pre_breakeven":
         decision = _breakeven_decision(pos, exit_cfg, r_multiple)
         if decision["action"] == "breakeven_flip":
-            _cancel_stop(ib, pos.get("stop_order_id"))
-            pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], decision["new_stop_price"], side)
+            pos["stop_order_id"] = ops.reposition_stop(pos, decision["new_stop_price"], side)
             pos["stop_price"] = decision["new_stop_price"]
             pos["state"] = decision["new_state"]
-            notify(f"[{mode.upper()}] BE {pos['symbol']}", f"stop -> ${entry:.2f}", "default")
-            log_decision(account_id, mode, {"event": "breakeven_flip", "symbol": pos["symbol"], "side": side, "new_stop": entry})
+            ops.notify(f"BE {pos['symbol']}", f"stop -> ${entry:.2f}", "default")
+            ops.log("breakeven_flip", symbol=pos["symbol"], side=side, new_stop=entry)
 
     if pos["state"].startswith("post_breakeven"):
         bars = _get_5min_bars(pos["symbol"])
@@ -838,16 +936,31 @@ def manage_position(account_id: int, mode: str, ib, pos: dict, rules: dict) -> d
                 swing_stop_candidate = (swing + 0.01) if side == "short" else (swing - 0.01)
         decision = _trailing_stop_decision(pos, swing_stop_candidate)
         if decision["action"] == "trail_stop":
-            _cancel_stop(ib, pos.get("stop_order_id"))
-            pos["stop_order_id"] = _place_stop(ib, pos["symbol"], pos["qty"], decision["new_stop_price"], side)
+            pos["stop_order_id"] = ops.reposition_stop(pos, decision["new_stop_price"], side)
             old_stop = pos.get("stop_price", pos["initial_stop"])
             pos["stop_price"] = decision["new_stop_price"]
-            notify(f"[{mode.upper()}] TRAIL {pos['symbol']}", f"stop ${old_stop:.2f} -> ${decision['new_stop_price']:.2f}", "default")
-            log_decision(account_id, mode, {"event": "trail_stop", "symbol": pos["symbol"], "side": side, "old": old_stop, "new": decision["new_stop_price"]})
+            ops.notify(f"TRAIL {pos['symbol']}", f"stop ${old_stop:.2f} -> ${decision['new_stop_price']:.2f}", "default")
+            ops.log("trail_stop", symbol=pos["symbol"], side=side, old=old_stop, new=decision["new_stop_price"])
 
     if pos["qty"] > 0:
-        db.upsert_position(account_id, mode, pos)
+        ops.save(pos)
     return pos
+
+
+def manage_position(account_id: int, mode: str, ib, pos: dict, rules: dict) -> dict:
+    """Manages one real, broker-backed position - see _manage_position_core
+    for the actual decision logic (identical to manage_virtual_position's,
+    just executed against IBKR instead of the DB alone)."""
+    return _manage_position_core(pos, rules, _RealPositionOps(account_id, mode, ib))
+
+
+def manage_virtual_position(account_id: int, strategy_id: int, strategy_label: str, pos: dict, rules: dict) -> dict:
+    """Manages one simulated position for a 'virtual' strategy_run - same
+    decision logic as manage_position (see _manage_position_core), just
+    never touches IBKR: a stop "reposition" only ever updates pos itself,
+    and a close is always immediate (no delayed-fill race to retry, since
+    nothing was ever actually sent to a broker to fill)."""
+    return _manage_position_core(pos, rules, _VirtualPositionOps(account_id, strategy_id, strategy_label))
 
 
 # ---------------------------------------------------------------- Step 6 ---
