@@ -1,5 +1,5 @@
 [Unit]
-Description=TradingBot trading engine - LIVE for account %i (run_service.py --mode live --account-id %i)
+Description=TradingBot trading engine - LIVE for account %i (run_service.py --account-id %i)
 After=ibgateway-live@%i.service network-online.target
 Wants=network-online.target
 Requires=ibgateway-live@%i.service
@@ -9,7 +9,7 @@ Type=simple
 User=tradingbot
 WorkingDirectory=/opt/tradingbot
 # always, not on-failure - see trading-bot-live.service's own comment.
-ExecStart=/opt/tradingbot/.venv/bin/python /opt/tradingbot/run_service.py --mode live --account-id %i
+ExecStart=/opt/tradingbot/.venv/bin/python /opt/tradingbot/run_service.py --account-id %i
 Restart=always
 RestartSec=15
 

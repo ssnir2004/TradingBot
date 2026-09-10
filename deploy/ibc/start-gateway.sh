@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# Launches ONE mode's IB Gateway headlessly via IBC + Xvfb (Gateway needs a
+# Launches the IB Gateway headlessly via IBC + Xvfb (Gateway needs a
 # display even when nobody's watching it). Called by
-# deploy/ibgateway-paper.service / deploy/ibgateway-live.service (the
-# admin's own Gateway, $1=mode only) and by the instantiated
-# deploy/ibgateway-paper@.service / deploy/ibgateway-live@.service (one per
-# other account, $1=mode $2=account_id — %i in the unit file).
+# deploy/ibgateway-live.service (the admin's own Gateway, $1=mode only)
+# and by the instantiated deploy/ibgateway-live@.service (one per other
+# account, $1=mode $2=account_id — %i in the unit file). $1 is always
+# "live" now (paper trading has been removed - see db.MODES' own
+# comment), kept as an explicit arg rather than hardcoded so the
+# per-account settings/log dir naming below stays unchanged.
 #
-# Paper and live run as two separate, simultaneous IB Gateway processes,
-# and every account (admin or not) is its own separate pair on top of that
-# — each needs its own settings dir (so login sessions never clobber each
-# other), its own log dir, and its own copy of IBC's gatewaystart.sh (IBC's
+# Every account (admin or not) is its own separate Gateway process — each
+# needs its own settings dir (so login sessions never clobber each other),
+# its own log dir, and its own copy of IBC's gatewaystart.sh (IBC's
 # gatewaystart.sh does not read environment variables — it has a block of
 # `VAR=value` assignments at the top of the file that's meant to be edited
 # directly; instances patching the SAME physical file at once would race
@@ -18,8 +19,8 @@ set -euo pipefail
 
 MODE="${1:-}"
 ACCOUNT_ID="${2:-}"   # empty = the admin's original single-account setup
-if [ "$MODE" != "paper" ] && [ "$MODE" != "live" ]; then
-    echo "Usage: $0 <paper|live> [account_id]" >&2
+if [ "$MODE" != "live" ]; then
+    echo "Usage: $0 live [account_id]" >&2
     exit 1
 fi
 

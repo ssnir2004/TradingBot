@@ -1,39 +1,63 @@
-# IBC configuration for the LIVE-mode headless IB Gateway — real money.
-# Copy this to config-live.ini, fill in your real credentials, and NEVER
-# commit that file. (deploy/ibc/config-live.ini is already in .gitignore.)
+# IBC (https://github.com/IbcAlpha/IBC) configuration for the headless IB
+# Gateway — real money. Copy this to config-live.ini, fill in your real
+# credentials, and NEVER commit that file — it holds your IBKR password in
+# plain text. (deploy/ibc/config-live.ini is already in .gitignore.)
 #
-# See config-paper.ini.example for the full commentary on every setting
-# below — this file only calls out where it differs.
+# See deploy/ibgateway-live.service / ibgateway-live@.service and
+# DEPLOY.md for how this is launched.
+#
+# This covers the settings that matter for this project. IBC ships its own
+# reference config.ini with the full, authoritative list of every option —
+# read that one too before you rely on this in production; IBC's own
+# settings can change between releases.
 
 # ---- credentials ----
-# Often identical to config-paper.ini, but not always — some accounts have
-# a genuinely separate paper username/password rather than sharing the live
-# login. Verify which applies to you rather than assuming (see
-# config-paper.ini.example's fuller note); using the wrong credentials here
-# doesn't fail loudly at startup, it silently breaks every real request
-# once connected.
 IbLoginId=your_ibkr_username
 IbPassword=your_ibkr_password
 TradingMode=live
 
 # ---- unattended operation ----
+# Accept the various one-time dialogs IBC would otherwise need a human to
+# click through.
 AcceptIncomingConnectionAction=accept
 AllowBlindTrading=no
 ReadOnlyLogin=no
 AcceptNonBrokerageAccountWarning=yes
 DismissPasswordExpiryWarning=yes
 DismissNSEComplianceNotice=yes
+
+# If a session is already open elsewhere (e.g. you logged into TWS on your
+# laptop to check something), take over rather than failing to start.
 ExistingSessionDetectedAction=primary
 
-# ---- the 2FA reality check (same caveat as paper — see config-paper.ini.example) ----
+# ---- the 2FA reality check ----
+# IBC can automate the username/password fields, but it CANNOT tap "Approve"
+# on your phone for an IBKR Mobile push challenge — only you can do that.
+# This just tells IBC how long to wait for you to do it, instead of giving
+# up immediately.
 SecondFactorAuthenticationTimeout=180
 
-# Staggered a few minutes from the paper instance's restart so both don't
-# reconnect (and both potentially need 2FA approval) at the exact same
-# moment. Same server-timezone caveat as config-paper.ini.example's fuller
-# note applies here too - this fires in the server's own system timezone,
-# not ET, unless the server's timezone is set to America/New_York.
-AutoRestartTime=11:50 PM
+# AutoRestartTime is interpreted in the SERVER's system timezone, not ET -
+# IBC has no separate timezone setting for it. If the server runs UTC (the
+# usual default on cloud VMs, confirmed via `timedatectl`), "11:55 PM" here
+# fires at 23:55 UTC (~7:55pm ET, mid-session), not near IBKR's own ~11:45pm
+# ET reset as intended. Either convert this value to ET's current UTC
+# offset yourself and accept it drifting an hour off twice a year at DST
+# transitions, or (recommended) set the server's system timezone to
+# America/New_York (`sudo timedatectl set-timezone America/New_York`) so
+# this value and every server timestamp/log/cron just means ET directly and
+# DST is handled automatically - verify with `timedatectl` before relying
+# on either approach.
+#
+# AutoRestartTime makes IBC restart the Gateway session gracefully once a
+# day (near IBKR's own server reset, ~11:45pm ET) WITHOUT a full logout, so
+# in practice this avoids needing 2FA every single day. It does not
+# guarantee IBKR will never ask again — expect to occasionally need to
+# approve the push notification yourself, especially right after you first
+# start the service. Don't design the rest of this deployment around "zero
+# touch forever"; design it around "rare enough that a Telegram alert with
+# no cycle data for a while is your signal to go check."
+AutoRestartTime=11:55 PM
 
 # ---- logging ----
 LogComponents=open

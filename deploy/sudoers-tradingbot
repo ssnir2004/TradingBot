@@ -14,10 +14,6 @@
 # The admin's own fixed Gateway/engine (see web/gateway_control.py) — lets
 # you free up your IBKR session for a manual TWS/Mobile login without
 # needing SSH access every time.
-tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl start ibgateway-paper.service
-tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl stop ibgateway-paper.service
-tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl start trading-bot-paper.service
-tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl stop trading-bot-paper.service
 tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl start ibgateway-live.service
 tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl stop ibgateway-live.service
 tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl start trading-bot-live.service
@@ -27,10 +23,6 @@ tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl stop trading-bot-live.service
 # account_id (%i), started/stopped from the dashboard's "Connect" button
 # (see src/gateway_provisioning.py). The account_id in the unit name is a
 # plain integer (this account's own users.id) — never user-supplied text.
-tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl start ibgateway-paper@*.service
-tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl stop ibgateway-paper@*.service
-tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl start trading-bot-paper@*.service
-tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl stop trading-bot-paper@*.service
 tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl start ibgateway-live@*.service
 tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl stop ibgateway-live@*.service
 tradingbot ALL=(root) NOPASSWD: /usr/bin/systemctl start trading-bot-live@*.service
