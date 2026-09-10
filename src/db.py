@@ -121,6 +121,96 @@ CREATE TABLE IF NOT EXISTS account_active_strategy (
     PRIMARY KEY (account_id, direction)
 );
 
+-- Superseder of account_active_strategy above - that table can only ever
+-- hold ONE active strategy per direction (its own primary key enforces
+-- it), which is exactly the limit the multi-strategy feature removes: any
+-- number of strategies can run at once, each independently 'off',
+-- 'virtual' (fully simulated, no broker order - see virtual_positions
+-- below), or 'live' (real orders, own budget). _migrate_account_active_
+-- strategy_to_strategy_runs copies every existing account_active_strategy
+-- row in here (as run_mode='live') the first time this runs; nothing
+-- reads account_active_strategy going forward, but it's left in place
+-- rather than dropped, same as every other superseded table/column in
+-- this file (see _migrate_settings_to_per_mode's own reasoning) - harmless
+-- once unused, and dropping it buys nothing but risk.
+-- live_budget/live_max_positions are BOTH optional and, when both are set,
+-- BOTH enforced - whichever limit a strategy would hit first blocks its
+-- next entry (see cycle.py's _strategy_can_enter). virtual_capital is only
+-- meaningful for run_mode='virtual' (the starting balance new virtual
+-- trades are measured against - see virtual_positions/virtual_trades).
+CREATE TABLE IF NOT EXISTS strategy_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    strategy_id INTEGER NOT NULL,
+    run_mode TEXT NOT NULL DEFAULT 'off',
+    virtual_capital REAL,
+    live_budget REAL,
+    live_max_positions INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(account_id, strategy_id)
+);
+
+-- A strategy_run's simulated positions when run_mode='virtual' - fully
+-- software-tracked against real market prices (yfinance, same feed
+-- cycle.py already uses), never a real IBKR order, so this needs no
+-- Gateway/broker connection at all. Deliberately mirrors positions' own
+-- management columns (entry/stop/trailing/MFE/MAE) so the same decision
+-- math can be reused, but drops the broker-only ones (stop_order_id,
+-- broker_missing_streak) that make no sense without a real order.
+-- PRIMARY KEY is (account_id, strategy_id, symbol) - NOT
+-- (account_id, mode, symbol) like positions - deliberately, so two
+-- different virtual strategies can each hold the same symbol at the same
+-- time: there's no real share supply to compete over, unlike a live
+-- position (see positions.strategy_id's own comment for that contrast).
+-- Closing a virtual position deletes its row here (same convention
+-- positions itself already uses on a real close) and writes a summary row
+-- to virtual_trades below.
+CREATE TABLE IF NOT EXISTS virtual_positions (
+    account_id INTEGER NOT NULL,
+    strategy_id INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL DEFAULT 'long',
+    entry_price REAL NOT NULL,
+    entry_time_iso TEXT NOT NULL,
+    qty INTEGER NOT NULL,
+    initial_stop REAL NOT NULL,
+    stop_price REAL NOT NULL,
+    state TEXT NOT NULL,
+    r_multiple REAL DEFAULT 0.0,
+    target_price REAL,
+    hard_stop_price REAL,
+    mfe_price REAL,
+    trail_activated INTEGER NOT NULL DEFAULT 0,
+    trail_activated_at_r REAL,
+    mae_price REAL,
+    PRIMARY KEY (account_id, strategy_id, symbol)
+);
+
+-- One row per CLOSED virtual trade (see virtual_positions above) - feeds a
+-- strategy's own virtual equity curve / win-rate history on its dashboard
+-- sheet. Deliberately its own small table rather than folded into trades
+-- (which is real-fill-only) or trade_telemetry (backtest-only, requires a
+-- backtest_id) - same "don't mix synthetic data into a real-money table"
+-- reasoning as those two.
+CREATE TABLE IF NOT EXISTS virtual_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    strategy_id INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    entry_price REAL NOT NULL,
+    entry_time_iso TEXT NOT NULL,
+    exit_price REAL NOT NULL,
+    exit_time_iso TEXT NOT NULL,
+    qty INTEGER NOT NULL,
+    final_r REAL,
+    pnl_dollars REAL,
+    exit_reason TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_virtual_trades_account_strategy ON virtual_trades(account_id, strategy_id);
+
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -2981,6 +3071,26 @@ def _migrate_settings_to_per_account(conn, account_id: int):
                 conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (new_key, row["value"]))
 
 
+def _migrate_account_active_strategy_to_strategy_runs(conn):
+    """One-time copy of every account_active_strategy row into strategy_runs
+    (as run_mode='live', no budget/cap - unlimited, matching the unthrottled
+    behavior that table's own single-active-strategy-per-direction model
+    always had) - see strategy_runs' own schema comment for why this
+    exists. INSERT OR IGNORE on strategy_runs' UNIQUE(account_id,
+    strategy_id) means this is safe to run on every startup: already-
+    migrated rows (or a strategy_run a user has since reconfigured) are
+    left untouched, only a genuinely new account_active_strategy row (e.g.
+    restored from an old backup) would ever insert something new here."""
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    rows = conn.execute("SELECT account_id, strategy_id FROM account_active_strategy").fetchall()
+    for row in rows:
+        conn.execute(
+            "INSERT OR IGNORE INTO strategy_runs (account_id, strategy_id, run_mode, created_at, updated_at) "
+            "VALUES (?, ?, 'live', ?, ?)",
+            (row["account_id"], row["strategy_id"], now, now),
+        )
+
+
 def init_db(seed_rules_path: Path | None = None):
     with get_conn() as conn:
         conn.executescript(SCHEMA)
@@ -3048,6 +3158,13 @@ def init_db(seed_rules_path: Path | None = None):
         # /api/decision_center) and backtest_engine's own live-parity
         # dynamic_recovery replay (mae_r).
         _migrate_add_column(conn, "positions", "mae_price", "REAL")
+        # NULL for every position predating multi-strategy support (or one
+        # opened while unattributed - see cycle.py's entry logic). Purely an
+        # attribution tag for budget accounting and routing a position to
+        # the right dashboard sheet - primary key stays (account_id, mode,
+        # symbol) unchanged, so "one real position per symbol" is still
+        # enforced by the table itself, same as before this column existed.
+        _migrate_add_column(conn, "positions", "strategy_id", "INTEGER")
         _migrate_add_column(conn, "watchlist", "universe", "TEXT NOT NULL DEFAULT ',default,'")
         _migrate_add_column(conn, "watchlist", "direction", "TEXT NOT NULL DEFAULT 'long'")
         # NULL for trades recorded the old way (trade.py/close_position.py's
@@ -3548,6 +3665,18 @@ def init_db(seed_rules_path: Path | None = None):
                 (_new_text, _name, _old_text),
             )
 
+        # NULL for every decision_log row predating multi-strategy support,
+        # and for every event that was never about one specific strategy in
+        # the first place (a cycle-level notice, a dry-run toggle, etc). Set
+        # for filter_eval/orb_filter_eval/would_enter/price_trigger_* rows
+        # going forward so concurrent strategies evaluating the same symbol
+        # on the same side don't have their results indistinguishably mixed
+        # together - see strategy_runs' own schema comment for the full
+        # multi-strategy picture this is part of.
+        _migrate_add_column(conn, "decision_log", "strategy_id", "INTEGER")
+
+        _migrate_account_active_strategy_to_strategy_runs(conn)
+
 
 # -------------------------------------------------------------- settings ---
 def get_setting(key: str, default: str = "") -> str:
@@ -3791,6 +3920,101 @@ def remove_position(account_id: int, mode: str, symbol: str):
         conn.execute(
             "DELETE FROM positions WHERE account_id = ? AND mode = ? AND symbol = ?", (account_id, mode, symbol)
         )
+
+
+# --------------------------------------------------------- virtual positions ---
+# Simulated (no broker order) positions for a strategy_run in 'virtual'
+# mode - see virtual_positions' own schema comment for why this is a
+# separate table, keyed differently from positions itself. Mirrors
+# get_open_positions/upsert_position/remove_position above closely, on
+# purpose, so cycle.py's virtual-position management stays a close parallel
+# to its real-position counterpart rather than a from-scratch design.
+def get_virtual_positions(account_id: int, strategy_id: int | None = None) -> list[dict]:
+    """strategy_id=None returns every virtual position across every
+    strategy for this account (what the engine loop needs, since it walks
+    all active strategy_runs itself); passing it scopes to one strategy's
+    own dashboard sheet instead."""
+    with get_conn() as conn:
+        if strategy_id is None:
+            rows = conn.execute(
+                "SELECT * FROM virtual_positions WHERE account_id = ?", (account_id,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM virtual_positions WHERE account_id = ? AND strategy_id = ?",
+                (account_id, strategy_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def upsert_virtual_position(account_id: int, strategy_id: int, pos: dict):
+    # Same field-default convention as upsert_position - every caller that
+    # isn't the "no_stop_delayed_trail" management_style leaves these at
+    # their default.
+    pos = {
+        "side": "long", "target_price": None, "hard_stop_price": None,
+        "mfe_price": None, "trail_activated": False, "trail_activated_at_r": None,
+        "mae_price": None,
+        **pos,
+    }
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO virtual_positions (account_id, strategy_id, symbol, side, entry_price, entry_time_iso, "
+            "qty, initial_stop, stop_price, state, r_multiple, target_price, hard_stop_price, mfe_price, "
+            "trail_activated, trail_activated_at_r, mae_price) VALUES "
+            "(:account_id, :strategy_id, :symbol, :side, :entry_price, :entry_time_iso, :qty, :initial_stop, "
+            ":stop_price, :state, :r_multiple, :target_price, :hard_stop_price, :mfe_price, "
+            ":trail_activated, :trail_activated_at_r, :mae_price) "
+            "ON CONFLICT(account_id, strategy_id, symbol) DO UPDATE SET "
+            "qty=excluded.qty, initial_stop=excluded.initial_stop, stop_price=excluded.stop_price, "
+            "state=excluded.state, r_multiple=excluded.r_multiple, target_price=excluded.target_price, "
+            "hard_stop_price=excluded.hard_stop_price, mfe_price=excluded.mfe_price, "
+            "trail_activated=excluded.trail_activated, trail_activated_at_r=excluded.trail_activated_at_r, "
+            "mae_price=excluded.mae_price",
+            {**pos, "account_id": account_id, "strategy_id": strategy_id},
+        )
+
+
+def remove_virtual_position(account_id: int, strategy_id: int, symbol: str):
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM virtual_positions WHERE account_id = ? AND strategy_id = ? AND symbol = ?",
+            (account_id, strategy_id, symbol),
+        )
+
+
+def record_virtual_trade(account_id: int, strategy_id: int, trade: dict) -> int:
+    """Called once a virtual position closes (see remove_virtual_position,
+    always paired with this by the caller) - trade must carry symbol/side/
+    entry_price/entry_time_iso/exit_price/exit_time_iso/qty, plus the
+    optional final_r/pnl_dollars/exit_reason. Feeds a strategy's own
+    virtual equity curve / win-rate history on its dashboard sheet."""
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO virtual_trades (account_id, strategy_id, symbol, side, entry_price, entry_time_iso, "
+            "exit_price, exit_time_iso, qty, final_r, pnl_dollars, exit_reason, created_at) VALUES "
+            "(:account_id, :strategy_id, :symbol, :side, :entry_price, :entry_time_iso, :exit_price, "
+            ":exit_time_iso, :qty, :final_r, :pnl_dollars, :exit_reason, :created_at)",
+            {"final_r": None, "pnl_dollars": None, "exit_reason": None, **trade,
+             "account_id": account_id, "strategy_id": strategy_id, "created_at": now},
+        )
+        return cur.lastrowid
+
+
+def get_virtual_trades(account_id: int, strategy_id: int | None = None, limit: int = 200) -> list[dict]:
+    with get_conn() as conn:
+        if strategy_id is None:
+            rows = conn.execute(
+                "SELECT * FROM virtual_trades WHERE account_id = ? ORDER BY id DESC LIMIT ?",
+                (account_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM virtual_trades WHERE account_id = ? AND strategy_id = ? ORDER BY id DESC LIMIT ?",
+                (account_id, strategy_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def mark_position_seen_at_broker(account_id: int, mode: str, symbol: str):
@@ -4308,7 +4532,90 @@ def delete_strategy(strategy_id: int):
         ).fetchone()
         if active:
             raise ValueError("Cannot delete a strategy that's active on at least one account; deactivate it there first")
+        # strategy_runs' own 'off' rows are harmless to delete under (same
+        # as never having been run at all) - only a still virtual/live run
+        # blocks deletion, same reasoning as the account_active_strategy
+        # check above.
+        running = conn.execute(
+            "SELECT 1 FROM strategy_runs WHERE strategy_id = ? AND run_mode != 'off' LIMIT 1", (strategy_id,)
+        ).fetchone()
+        if running:
+            raise ValueError("Cannot delete a strategy that's virtual or live on at least one account; set it to off first")
         conn.execute("DELETE FROM strategies WHERE id = ?", (strategy_id,))
+
+
+# ---------------------------------------------------------- strategy runs ---
+# See strategy_runs' own schema comment (top of this file) for why this
+# supersedes account_active_strategy: any number of strategies can run at
+# once, each independently 'off'/'virtual'/'live', instead of one per
+# direction. cycle.py's engine loop reads list_strategy_runs to know what
+# to scan each tick.
+RUN_MODES = ("off", "virtual", "live")
+
+
+def _check_run_mode(run_mode: str):
+    if run_mode not in RUN_MODES:
+        raise ValueError(f"run_mode must be one of {RUN_MODES}, got {run_mode!r}")
+
+
+def list_strategy_runs(account_id: int, run_mode: str | None = None) -> list[dict]:
+    """Every strategy_runs row for this account, joined with its strategy's
+    own name/direction/risk_rating for display - run_mode=None (default)
+    returns all of them (including 'off' ones, for the "add strategy"
+    picker); passing a run_mode filters to just that (e.g. 'virtual' or
+    'live', for the engine loop - see cycle.py)."""
+    with get_conn() as conn:
+        query = (
+            "SELECT r.*, s.name AS strategy_name, s.direction, s.risk_rating "
+            "FROM strategy_runs r JOIN strategies s ON s.id = r.strategy_id "
+            "WHERE r.account_id = ?"
+        )
+        params: list = [account_id]
+        if run_mode is not None:
+            _check_run_mode(run_mode)
+            query += " AND r.run_mode = ?"
+            params.append(run_mode)
+        query += " ORDER BY s.direction, s.id"
+        rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_strategy_run(account_id: int, strategy_id: int) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT r.*, s.name AS strategy_name, s.direction, s.risk_rating "
+            "FROM strategy_runs r JOIN strategies s ON s.id = r.strategy_id "
+            "WHERE r.account_id = ? AND r.strategy_id = ?",
+            (account_id, strategy_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def set_strategy_run(account_id: int, strategy_id: int, run_mode: str,
+                      virtual_capital: float | None = None,
+                      live_budget: float | None = None,
+                      live_max_positions: int | None = None):
+    """Upserts this account's mode/budget for one strategy. Switching to
+    'off' deliberately leaves any already-open real/virtual position
+    alone - it just stops the engine from evaluating new entries for this
+    strategy_run (see cycle.py); existing positions are still managed to
+    their own exit exactly as before, same as deactivate_strategy's own
+    "a position stays managed even if its strategy was deactivated"
+    behavior today."""
+    _check_run_mode(run_mode)
+    if get_strategy(strategy_id) is None:
+        raise ValueError(f"Strategy {strategy_id} not found")
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO strategy_runs (account_id, strategy_id, run_mode, virtual_capital, live_budget, "
+            "live_max_positions, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(account_id, strategy_id) DO UPDATE SET "
+            "run_mode=excluded.run_mode, virtual_capital=excluded.virtual_capital, "
+            "live_budget=excluded.live_budget, live_max_positions=excluded.live_max_positions, "
+            "updated_at=excluded.updated_at",
+            (account_id, strategy_id, run_mode, virtual_capital, live_budget, live_max_positions, now, now),
+        )
 
 
 # -------------------------------------------------------------- backtests ---
@@ -5431,6 +5738,18 @@ def create_user(username: str, password: str, is_admin: bool = False, role: str 
             conn.execute(
                 "INSERT OR IGNORE INTO account_active_strategy (account_id, direction, strategy_id) VALUES (?, 'long', ?)",
                 (account_id, default_row["id"]),
+            )
+            # Also seed strategy_runs directly here, not just via init_db's
+            # one-time _migrate_account_active_strategy_to_strategy_runs -
+            # that migration only runs on the NEXT init_db() call (the next
+            # service restart), which would leave a brand new account's
+            # default strategy invisible to the multi-strategy engine loop
+            # until then. Same run_mode='live', no budget/cap - unlimited.
+            now = datetime.now(ET).isoformat(timespec="seconds")
+            conn.execute(
+                "INSERT OR IGNORE INTO strategy_runs (account_id, strategy_id, run_mode, created_at, updated_at) "
+                "VALUES (?, ?, 'live', ?, ?)",
+                (account_id, default_row["id"], now, now),
             )
     return account_id
 
