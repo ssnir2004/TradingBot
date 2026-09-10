@@ -396,6 +396,29 @@ def api_disable(mode: str = Depends(require_mode), account_id: int = Depends(req
     return {"bot_enabled": False}
 
 
+# Per-side dry-run: the scanner still evaluates that side's entry filters
+# exactly as it does live (same real-time trigger timing) and logs a
+# 'would_enter' decision instead of ever calling trade.py / placing a
+# resting Touch&Turn order - see cycle.entry_scan/touch_turn_entry_scan's
+# own comments on this same check. Independent of bot_enabled (which skips
+# entry scanning for BOTH sides entirely, no filter evaluation at all).
+@app.get("/api/dry_run")
+def api_get_dry_run(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    return {"long": db.is_dry_run(account_id, mode, "long"), "short": db.is_dry_run(account_id, mode, "short")}
+
+
+@app.post("/api/dry_run")
+async def api_set_dry_run(request: Request, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    body = await request.json()
+    side = body.get("side")
+    if side not in ("long", "short"):
+        raise HTTPException(status_code=400, detail="side must be 'long' or 'short'")
+    enabled = bool(body.get("enabled"))
+    db.set_dry_run(account_id, mode, side, enabled)
+    db.log_decision(account_id, mode, "dashboard_control", action="set_dry_run", side=side, enabled=enabled, user=user)
+    return {"side": side, "enabled": enabled}
+
+
 @app.post("/api/control/flatten")
 def api_flatten(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     db.request_flatten_now(account_id, mode)

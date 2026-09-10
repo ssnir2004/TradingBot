@@ -1366,6 +1366,19 @@ def _maybe_notify_yfinance_degraded(account_id: int, mode: str, streak: int, tic
     )
 
 
+def _already_logged_would_enter_today(account_id: int, mode: str, symbol: str, side: str) -> bool:
+    """Dry-run mode's own de-dup guard (see entry_scan) - without this, a
+    symbol that keeps qualifying would get a fresh 'would_enter' log line
+    every single cycle tick all day, instead of once - mirroring how a
+    REAL entry only ever happens once per symbol per day (entry_scan's own
+    held_symbols check)."""
+    today = datetime.now(ET).date().isoformat()
+    for row in db.get_decision_log_for_symbol(account_id, mode, symbol):
+        if row["event"] == "would_enter" and row["timestamp_iso"].startswith(today) and row["payload"].get("side") == side:
+            return True
+    return False
+
+
 def _log_es_rejection(account_id: int, mode: str, strategy_name: str, side: str, ticker: str, gate: dict):
     """Structured decision-log entry for a trade the ES VWAP filter
     blocked - see db.log_decision (auto-stamps its own timestamp_iso, so
@@ -1474,6 +1487,24 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
             if not gate["allowed"]:
                 _log_es_rejection(account_id, mode, rules.get("strategy_name", "?"), side, ticker, gate)
                 continue
+
+        # Dry run: everything up to here ran exactly as it would for a real
+        # entry (same filters, same ES gate, same computed stop/size) - this
+        # is the one point that decides whether trade.py actually gets
+        # called. Skipping straight to the next candidate (no
+        # held_symbols/day-cap/side_positions bookkeeping) is deliberate -
+        # nothing was actually risked, so nothing should be capped the way a
+        # real entry would be; the goal is seeing every qualifying signal,
+        # not simulating position-count limits.
+        if db.is_dry_run(account_id, mode, side):
+            if not _already_logged_would_enter_today(account_id, mode, ticker, side):
+                notify(
+                    f"[{mode.upper()}] DRY RUN {action} {ticker}",
+                    f"@ ${price:.2f}, stop ${initial_stop:.2f}, qty {size} - would have entered, no order placed (dry-run mode)",
+                    "default",
+                )
+                log_decision(account_id, mode, {"event": "would_enter", "symbol": ticker, "side": side, "price": price, "stop": initial_stop, "qty": size})
+            continue
 
         proc = subprocess.run(
             [sys.executable, str(PROJECT_DIR / "trade.py"), "--mode", mode, "--account-id", str(account_id),
@@ -1633,6 +1664,19 @@ def touch_turn_entry_scan(account_id: int, mode: str, ib, rules: dict, env: dict
                 _log_es_rejection(account_id, mode, rules.get("strategy_name", "?"), side, ticker, gate)
                 continue
 
+        # Dry run - see entry_scan's own comment on the same check. Touch &
+        # Turn's real order is the resting limit placed below; skip that
+        # (and its DB bookkeeping) the same way.
+        if db.is_dry_run(account_id, mode, side):
+            if not _already_logged_would_enter_today(account_id, mode, ticker, side):
+                notify(
+                    f"[{mode.upper()}] DRY RUN Touch&Turn {ticker}",
+                    f"{side} limit @ ${limit_price:.2f}, stop ${initial_stop:.2f}, qty {size} - would have placed a resting order, none placed (dry-run mode)",
+                    "default",
+                )
+                log_decision(account_id, mode, {"event": "would_enter", "symbol": ticker, "side": side, "price": limit_price, "stop": initial_stop, "qty": size})
+            continue
+
         inserted = db.create_pending_order(account_id, mode, {
             "symbol": ticker, "placed_date": placed_date, "side": side,
             "limit_price": limit_price, "target_price": signal["target_price"], "initial_stop": initial_stop,
@@ -1750,16 +1794,43 @@ def check_price_triggers(account_id: int, mode: str, ib, positions: list[dict]) 
     A trigger order that's no longer live at the broker (cancelled from
     within TWS/IBKR directly, or auto-cancelled some other way) is
     resolved 'cancelled' here too, so it stops being offered for
-    cancellation on the dashboard and its chart line disappears."""
-    for trig in db.get_price_triggers(account_id, mode, "pending"):
-        trade = next((t for t in ib.trades() if t.order.orderId == trig["broker_order_id"]), None)
-        if trade is None:
-            continue  # not visible on this connection yet - re-checked next tick
-        status = trade.orderStatus.status
-        if status == "Filled":
+    cancellation on the dashboard and its chart line disappears.
+
+    Fill/open-order lookups use ib.reqExecutions()/ib.reqAllOpenOrders(),
+    NOT ib.trades()/ib.openTrades() - those only ever reflect orders THIS
+    connection's own client id placed or was told about, but the real
+    entry-trigger order is placed by a DIFFERENT client id
+    (place_price_trigger.py's own connection). A real, live-money incident
+    (2026-09-09/10) found exactly this: a UNH/TSCO trigger each filled for
+    real at the broker but sat "pending" in our own DB for 12+ minutes
+    with no stop ever placed (ib.trades() never saw the fill on this
+    connection), until a stale dashboard cancel click wrongly marked one
+    'cancelled' - leaving both positions completely untracked and
+    unprotected. reqExecutions/reqAllOpenOrders are account-wide (same
+    reasoning sync_broker_fills already relies on for the same class of
+    problem), so this now finds a fill or a genuine cancel regardless of
+    which client id placed the order."""
+    pending = db.get_price_triggers(account_id, mode, "pending")
+    if not pending:
+        return positions
+
+    fills_by_order_id: dict[int, list] = {}
+    for fill in ib.reqExecutions():
+        if not belongs_to_account(ib, fill.execution.acctNumber):
+            continue
+        fills_by_order_id.setdefault(fill.execution.orderId, []).append(fill)
+    ib.reqAllOpenOrders()
+    ib.sleep(1)
+    open_order_ids = {t.order.orderId for t in ib.openTrades() if belongs_to_account(ib, t.order.account)}
+
+    for trig in pending:
+        order_id = trig["broker_order_id"]
+        matched_fills = fills_by_order_id.get(order_id)
+        if matched_fills:
             symbol, side = trig["symbol"], trig["side"]
-            fill_qty = int(trade.orderStatus.filled) or trig["qty"]
-            fill_price = trade.orderStatus.avgFillPrice or trig["trigger_price"]
+            fill_qty = sum(int(f.execution.shares) for f in matched_fills)
+            total_value = sum(f.execution.shares * f.execution.price for f in matched_fills)
+            fill_price = (total_value / fill_qty) if fill_qty else trig["trigger_price"]
             stop_order_id = _place_stop(ib, symbol, fill_qty, trig["stop_price"], side)
             now_iso = datetime.now(ET).isoformat(timespec="seconds")
             new_position = {
@@ -1781,19 +1852,44 @@ def check_price_triggers(account_id: int, mode: str, ib, positions: list[dict]) 
                 "event": "price_trigger_fill", "symbol": symbol, "side": side,
                 "trigger_price": trig["trigger_price"], "price": fill_price, "qty": fill_qty, "stop": trig["stop_price"],
             })
-        elif status in ("Cancelled", "ApiCancelled", "Inactive"):
+        elif order_id not in open_order_ids:
+            # No fill found AND no longer among the account's real open
+            # orders - genuinely gone (cancelled directly in TWS, rejected,
+            # or some other terminal state), not merely invisible to this
+            # connection.
             db.resolve_price_trigger(account_id, mode, trig["id"], "cancelled")
-            log_decision(account_id, mode, {"event": "price_trigger_cancelled", "symbol": trig["symbol"], "side": trig["side"], "reason": status})
+            log_decision(account_id, mode, {"event": "price_trigger_cancelled", "symbol": trig["symbol"], "side": trig["side"], "reason": "not_open_no_fill"})
 
     return positions
 
 
 def _cancel_price_trigger(account_id: int, mode: str, ib, trig: dict):
     """Used by run_cycle's "flatten everything now" path to clear out any
-    still-resting entry trigger along with open positions - _cancel_stop
-    despite its name is generic (find a broker order by id, cancel it), so
-    it works equally well on a resting entry-trigger order."""
-    _cancel_stop(ib, trig.get("broker_order_id"))
+    still-resting entry trigger along with open positions. Does NOT use
+    _cancel_stop's own ib.trades()-based _find_order - the trigger order
+    was placed by a DIFFERENT client id (place_price_trigger.py's own
+    connection), which ib.trades() on THIS connection never sees (see
+    check_price_triggers' own docstring for the real incident this class
+    of bug caused) - reqAllOpenOrders/openTrades are account-wide instead.
+
+    Checks for a fill FIRST, same reasoning: a trigger that already filled
+    for real must never be blindly marked 'cancelled' (that exact mistake
+    is what left the incident's positions untracked and unprotected) - if
+    found filled, this leaves it 'pending' so the next regular
+    check_price_triggers call promotes it properly (protective stop +
+    tracked position), which a later flatten cycle then closes out same as
+    any other open position."""
+    order_id = trig.get("broker_order_id")
+    if order_id is not None:
+        for fill in ib.reqExecutions():
+            if fill.execution.orderId == order_id and belongs_to_account(ib, fill.execution.acctNumber):
+                log_decision(account_id, mode, {"event": "price_trigger_already_filled_skip_cancel", "symbol": trig["symbol"], "side": trig["side"]})
+                return
+        ib.reqAllOpenOrders()
+        ib.sleep(1)
+        match = next((t for t in ib.openTrades() if t.order.orderId == order_id and belongs_to_account(ib, t.order.account)), None)
+        if match is not None:
+            ib.cancelOrder(match.order)
     db.resolve_price_trigger(account_id, mode, trig["id"], "cancelled")
     log_decision(account_id, mode, {"event": "price_trigger_cancelled", "symbol": trig["symbol"], "side": trig["side"], "reason": "flatten_request"})
 

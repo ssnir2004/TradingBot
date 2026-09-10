@@ -69,6 +69,7 @@ async function refreshStatus() {
   updateCountdown();
   refreshEsFilterStatus();
   refreshYfinanceStatus();
+  refreshDryRunStatus();
 }
 
 // -------------------------------------------------------- market data ---
@@ -113,6 +114,40 @@ if (document.getElementById("es-filter-toggle")) {
     }
   });
 }
+
+// ------------------------------------------------------------- dry run ---
+async function refreshDryRunStatus() {
+  const longToggle = document.getElementById("dry-run-long-toggle");
+  if (!longToggle) return;  // viewer role - _header.html's control cards aren't rendered
+  const s = await modeApi("/api/dry_run");
+  longToggle.checked = s.long;
+  document.getElementById("dry-run-long-toggle-label").textContent = "Long: " + (s.long ? "Dry run" : "Disabled");
+  const shortToggle = document.getElementById("dry-run-short-toggle");
+  shortToggle.checked = s.short;
+  document.getElementById("dry-run-short-toggle-label").textContent = "Short: " + (s.short ? "Dry run" : "Disabled");
+}
+
+function _wireDryRunToggle(elId, labelId, side, sideLabel) {
+  const toggle = document.getElementById(elId);
+  if (!toggle) return;
+  toggle.addEventListener("change", async (e) => {
+    const enabled = e.target.checked;
+    const errEl = document.getElementById("dry-run-error");
+    errEl.textContent = "";
+    try {
+      await modeApi("/api/dry_run", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ side, enabled }),
+      });
+      document.getElementById(labelId).textContent = `${sideLabel}: ` + (enabled ? "Dry run" : "Disabled");
+    } catch (err) {
+      e.target.checked = !enabled;  // revert the switch - the request failed
+      errEl.textContent = err.message || "Failed to update";
+    }
+  });
+}
+_wireDryRunToggle("dry-run-long-toggle", "dry-run-long-toggle-label", "long", "Long");
+_wireDryRunToggle("dry-run-short-toggle", "dry-run-short-toggle-label", "short", "Short");
 
 function updateCountdown() {
   const el = document.getElementById("next-cycle-countdown");
@@ -671,7 +706,19 @@ document.getElementById("chart-container")?.addEventListener("mousedown", (e) =>
   if (lineY === null) return;
   const containerRect = e.currentTarget.getBoundingClientRect();
   const clickY = e.clientY - containerRect.top;
-  if (Math.abs(clickY - lineY) > 6) return;  // not close enough to the line - let the chart pan/zoom normally
+  if (Math.abs(clickY - lineY) > 8) return;  // not close enough to the line - let the chart pan/zoom normally
+
+  // Stop the event HERE, in the capture phase, before it ever reaches
+  // lightweight-charts' own canvas element - that canvas has its own
+  // mousedown listener for chart panning attached directly to it (the
+  // event target), which always runs before a bubble-phase listener on
+  // this container (an ancestor). By the time a bubble-phase handler
+  // would run, the library's own pan-drag has already grabbed the
+  // gesture, and disabling handleScroll/handleScale at that point is too
+  // late to stop it - only a capture-phase stopPropagation prevents the
+  // library from ever seeing this mousedown at all.
+  e.preventDefault();
+  e.stopPropagation();
 
   draggingNewTriggerLine = true;
   // Disable the chart's own pan/scroll/scale while dragging the line, so
@@ -679,7 +726,6 @@ document.getElementById("chart-container")?.addEventListener("mousedown", (e) =>
   // on mouseup below.
   chartPanStateBeforeDrag = { handleScroll: true, handleScale: true };
   chartInstance.applyOptions({ handleScroll: false, handleScale: false });
-  e.preventDefault();
 
   const onMove = (moveEvent) => {
     if (!draggingNewTriggerLine || !candleSeries) return;
@@ -699,7 +745,7 @@ document.getElementById("chart-container")?.addEventListener("mousedown", (e) =>
   };
   document.addEventListener("mousemove", onMove);
   document.addEventListener("mouseup", onUp);
-});
+}, { capture: true });
 
 document.addEventListener("click", (e) => {
   const link = e.target.closest(".symbol-link");

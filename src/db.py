@@ -3594,6 +3594,21 @@ def set_bot_enabled(account_id: int, mode: str, enabled: bool):
     set_setting(_scope_key(account_id, mode, "bot_enabled"), "true" if enabled else "false")
 
 
+# Off by default (unlike bot_enabled) - lets ONE direction's real order
+# placement be disabled while the scanner keeps evaluating that side's
+# entry filters exactly as it does live, logging a 'would_enter' decision
+# instead of calling trade.py - see cycle.entry_scan. Independent from
+# bot_enabled: bot_enabled=false skips entry_scan for BOTH sides entirely
+# (no filter evaluation, no logging); dry_run=true for one side still
+# fully evaluates that side, it just never places the real order.
+def is_dry_run(account_id: int, mode: str, side: str) -> bool:
+    return get_setting(_scope_key(account_id, mode, f"dry_run_{side}"), "false") == "true"
+
+
+def set_dry_run(account_id: int, mode: str, side: str, enabled: bool):
+    set_setting(_scope_key(account_id, mode, f"dry_run_{side}"), "true" if enabled else "false")
+
+
 # Off by default (unlike bot_enabled) - src/es_filter.py needs real CME
 # futures market-data entitlement on this account's IBKR connection to do
 # anything useful; enabling it before that's confirmed just means every

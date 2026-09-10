@@ -2,6 +2,21 @@
 place_price_trigger.py), spawned as a subprocess by the dashboard
 (web/app.py's DELETE /api/price_triggers/{trigger_id}). Runs on its own
 IBKR client ID so it never collides with any other connection.
+
+Real live-money incident (2026-09-09/10): this script used to look the
+order up via ib.trades() and unconditionally mark it 'cancelled' in our
+DB regardless of what it found - but ib.trades() only ever reflects
+orders THIS connection's own client id placed or was told about, and the
+real trigger order was placed by place_price_trigger.py's own, DIFFERENT
+client id, so the lookup always found nothing. A UNH/TSCO trigger had
+each already filled for real at the broker by the time a stale cancel
+click ran this script; it silently marked them 'cancelled' anyway, which
+meant cycle.check_price_triggers' own fill-detection was never going to
+pick them up again either - both positions were left completely
+untracked and unprotected (no stop) with no record of what happened.
+Fixed to check for a real fill FIRST (via reqExecutions, account-wide,
+unlike ib.trades()) and refuse to cancel if one is found - see the error
+message below for what to do instead.
 """
 import argparse
 import sys
@@ -10,7 +25,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 from src import db, mode_config
-from src.ibkr_client import IBKRClient
+from src.ibkr_client import IBKRClient, belongs_to_account
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
@@ -39,9 +54,24 @@ def main():
     )
     try:
         ib = ibkr.ib
-        order = next((t.order for t in ib.trades() if t.order.orderId == trig["broker_order_id"]), None)
-        if order is not None:
-            ib.cancelOrder(order)
+        order_id = trig["broker_order_id"]
+
+        # Account-wide (reqExecutions, not ib.trades()) - see this file's
+        # own module docstring for why this check exists at all.
+        for fill in ib.reqExecutions():
+            if fill.execution.orderId == order_id and belongs_to_account(ib, fill.execution.acctNumber):
+                print(f"[{args.mode}] {trig['symbol']}: trigger {args.trigger_id} already filled at the broker "
+                      f"({fill.execution.shares} @ {fill.execution.price}) - refusing to cancel. "
+                      f"The bot's own cycle will pick up the fill and start managing it on its next tick.")
+                sys.exit(1)
+
+        # Account-wide (reqAllOpenOrders/openTrades, not ib.trades()) -
+        # same reasoning.
+        ib.reqAllOpenOrders()
+        ib.sleep(1)
+        match = next((t.order for t in ib.openTrades() if t.order.orderId == order_id and belongs_to_account(ib, t.order.account)), None)
+        if match is not None:
+            ib.cancelOrder(match)
             ib.sleep(1)
 
         db.resolve_price_trigger(account_id, args.mode, args.trigger_id, "cancelled")
