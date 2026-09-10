@@ -37,4 +37,4 @@ jobs:
           script_stop: true
           script: |
             sudo -iu tradingbot bash -c "cd /opt/tradingbot && git pull && .venv/bin/pip install -r requirements.txt"
-            sudo systemctl restart trading-bot-paper.service trading-bot-live.service dashboard.service
+            sudo systemctl restart trading-bot-live.service dashboard.service

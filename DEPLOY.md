@@ -1,24 +1,25 @@
 # Deploying to a free server (Oracle Cloud Always Free)
 
 This turns the bot from "runs on my laptop via Task Scheduler" into "runs
-24/7 on a server, controlled from a web dashboard." Paper and live run as
-two entirely separate, simultaneous pipelines — each is its own IB Gateway
-process plus its own trading engine, five systemd services in total:
+24/7 on a server, controlled from a web dashboard." Trading is always
+LIVE — real money (paper trading has been removed from this project, see
+`src/db.py`'s own `MODES` comment) — three systemd services in total:
 
-- **`ibgateway-paper.service`** / **`ibgateway-live.service`** — two separate IB Gateway processes, headless, each kept logged into its own trading mode by IBC
-- **`trading-bot-paper.service`** / **`trading-bot-live.service`** — two separate `run_service.py --mode paper|live` engines, each talking only to its own Gateway
-- **`dashboard.service`** — `run_dashboard.py`, the FastAPI web dashboard (a Paper/Live tab selector; only reads/writes the shared DB, never touches IBKR)
+- **`ibgateway-live.service`** — the IB Gateway process, headless, kept logged in by IBC
+- **`trading-bot-live.service`** — `run_service.py`, the trading engine, talking to that Gateway
+- **`dashboard.service`** — `run_dashboard.py`, the FastAPI web dashboard (only reads/writes the shared DB, never touches IBKR)
 
-All five read/write the same SQLite DB at `data/trading_bot.db`, tagged by
-mode, so the dashboard sees whatever either engine is doing in near-real-time
-without any direct connection between the processes.
+All three read/write the same SQLite DB at `data/trading_bot.db`, so the
+dashboard sees whatever the engine is doing in near-real-time without any
+direct connection between the processes.
 
-Running both modes at once roughly doubles the resource footprint (two IB
-Gateway JVMs) — see the RAM note in Step 1 before picking a shape.
-
-**Do this whole setup on paper trading first.** Nothing here is safer just
-because it's "on a server" — the same paper-first, 2-week soak, then-go-live
-guidance from the main README still applies.
+**Real money is on the line the moment `LIVE_PORTFOLIO_VALUE_USD` (or the
+dashboard's Risk Settings "Portfolio Value") is set above 0** — it starts
+at 0 by design (see Step 5 below), so the engine can only ever size a
+position to zero shares until you deliberately raise it. Test a new
+strategy via the dashboard's Backtest page, and consider running it in
+Dry Run mode for a while (see the "Dry Run" card at the top of the
+dashboard), before trusting it with a real position size.
 
 ## 1. Create the server
 
@@ -26,16 +27,13 @@ guidance from the main README still applies.
    card for verification, but the Always Free tier genuinely never charges).
 2. Create a compute instance:
    - Shape: **VM.Standard.A1.Flex** (Ampere ARM, Always Free) — 2-4 OCPUs /
-     12-24 GB RAM is comfortably enough for two IB Gateway processes + both
-     bot engines + the dashboard. If you hit "Out of host capacity" (a known
-     Oracle free-tier issue in busy regions), retry in a different
-     availability domain/region, or fall back to the smaller
-     **VM.Standard.E2.1.Micro** (AMD, also Always Free, 1 GB RAM). Running
-     BOTH paper and live Gateway processes on 1 GB is tight — each Gateway
-     JVM alone runs ~450-550 MB — expect to lean on swap heavily and to see
-     real memory pressure. It's workable but not comfortable; if you only
-     want one mode running, skip the `-live` services below entirely and
-     you're back to the single-Gateway footprint.
+     12-24 GB RAM is comfortably enough for the IB Gateway process + bot
+     engine + dashboard, with plenty of headroom. If you hit "Out of host
+     capacity" (a known Oracle free-tier issue in busy regions), retry in a
+     different availability domain/region, or fall back to the smaller
+     **VM.Standard.E2.1.Micro** (AMD, also Always Free, 1 GB RAM) — the
+     single Gateway JVM alone runs ~450-550 MB, so expect to lean on swap
+     somewhat, but it's workable.
    - Image: Ubuntu 24.04 (or 22.04).
    - Add your SSH key during creation.
 3. In the instance's **Virtual Cloud Network → Security List**, add ingress
@@ -95,10 +93,10 @@ sudo chmod +x /opt/ibc/scripts/*.sh
 ```
 
 Adjust `TWS_PATH`/`IBC_PATH` in `deploy/ibc/start-gateway.sh` if your install
-paths differ from `/opt/ibgateway` and `/opt/ibc`. One IB Gateway install is
-shared by both modes — `start-gateway.sh paper`/`start-gateway.sh live` each
-make their own copy of IBC's `gatewaystart.sh` and point it at separate
-settings/log directories, so the two running instances never collide.
+paths differ from `/opt/ibgateway` and `/opt/ibc`. `start-gateway.sh live`
+makes its own copy of IBC's `gatewaystart.sh` and points it at its own
+settings/log directory (per-account, if you're running more than one) so
+running instances never collide.
 
 ## 5. Deploy the bot's code
 
@@ -115,23 +113,14 @@ cp .env.example .env
 python3 -c "import secrets; print(secrets.token_hex(32))"   # paste into SESSION_SECRET in .env
 python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"   # paste into CREDENTIALS_ENCRYPTION_KEY
 nano .env   # fill in Telegram token/chat id, SESSION_SECRET, CREDENTIALS_ENCRYPTION_KEY; leave
-            # LIVE_PORTFOLIO_VALUE_USD at 0 until you've read "Going live" in README.md — at 0
-            # the live engine can only ever size a position to zero shares, so live orders are physically
-            # impossible until you deliberately set a real number there.
-
-cp deploy/ibc/config-paper.ini.example deploy/ibc/config-paper.ini
-nano deploy/ibc/config-paper.ini   # your real IBKR username/password
-chmod 600 deploy/ibc/config-paper.ini
+            # LIVE_PORTFOLIO_VALUE_USD at 0 until you're ready - at 0 the engine can only ever
+            # size a position to zero shares, so real orders are physically impossible until you
+            # deliberately set a real number there (see the note at the top of this file).
 
 cp deploy/ibc/config-live.ini.example deploy/ibc/config-live.ini
-nano deploy/ibc/config-live.ini    # verify whether your paper account shares the live login or has
-                                    # its own separate one (see config-paper.ini.example) - don't assume; TradingMode=live
+nano deploy/ibc/config-live.ini    # your real IBKR username/password; TradingMode=live
 chmod 600 deploy/ibc/config-live.ini
 ```
-
-Only setting up paper for now? Skip the `config-live.ini` step and don't
-enable the `-live` services below — everything else works the same with
-just the paper half running.
 
 ## 6. Install and start the services
 
@@ -139,43 +128,26 @@ just the paper half running.
 sudo cp /opt/tradingbot/deploy/*.service /etc/systemd/system/
 sudo systemctl daemon-reload
 
-sudo systemctl start ibgateway-paper.service
-# Deliberately `start`, not `enable --now` - paper's Gateway is meant to be
-# started manually (from here, or the dashboard's Gateway Connection
-# Reconnect control) only when you're actually about to paper-trade or
-# fetch backtest data through it, not always-on. Two Java Gateway
-# processes (paper + live) running around the clock on a small box is a
-# real memory/swap risk - `systemctl enable ibgateway-paper.service` too
-# if you'd rather it always comes back after a reboot instead.
-#
+sudo systemctl enable --now ibgateway-live.service
 # Watch it come up — the FIRST login needs you to approve the 2FA push on
 # your phone. Tail the log and wait for it:
-sudo journalctl -u ibgateway-paper.service -f
+sudo journalctl -u ibgateway-live.service -f
 ```
 
-Once paper's Gateway is logged in and stable, bring up live's the same way
-(skip this if you're only running paper):
+Then the engine and the dashboard:
 
 ```bash
-sudo systemctl enable --now ibgateway-live.service
-sudo journalctl -u ibgateway-live.service -f   # separate 2FA approval, same as paper
-```
-
-Then the engines and the dashboard:
-
-```bash
-sudo systemctl enable --now trading-bot-paper.service
-sudo systemctl enable --now trading-bot-live.service   # skip if not running live
+sudo systemctl enable --now trading-bot-live.service
 sudo systemctl enable --now dashboard.service
 
-sudo journalctl -u trading-bot-paper.service -f   # should show the scheduler starting its jobs
-sudo journalctl -u dashboard.service -f           # should show uvicorn listening on 127.0.0.1:8000
+sudo journalctl -u trading-bot-live.service -f   # should show the scheduler starting its jobs
+sudo journalctl -u dashboard.service -f          # should show uvicorn listening on 127.0.0.1:8000
 ```
 
-Optional: the dashboard's "Gateway Connection" control (Disconnect/Reconnect
-per mode, so you can log into TWS or IBKR Mobile with the bot's account
-without SSH) needs a narrowly-scoped sudo rule for the `tradingbot` user —
-it grants start/stop on exactly the 4 service units above, nothing else:
+Optional: the dashboard's "Gateway Connection" control (Disconnect/Reconnect,
+so you can log into TWS or IBKR Mobile with the bot's account without SSH)
+needs a narrowly-scoped sudo rule for the `tradingbot` user — it grants
+start/stop on exactly the 2 service units above, nothing else:
 
 ```bash
 which systemctl   # confirm this matches the path in the file below; edit it first if not
@@ -201,27 +173,25 @@ give it a minute.
 ## 8. First login
 
 Open `https://yoursubdomain.duckdns.org/` — it redirects to `/setup` since
-no dashboard account exists yet. Create your admin username/password there
-(this is the only account; there's no self-registration after that). You're
-now looking at the live dashboard: a PAPER/LIVE tab at the top selects
-which engine's status, positions, trades, R-histogram, and enable/pause/
-flatten controls you're looking at — they're independent (pausing one
-doesn't touch the other). Strategies are shared across both tabs.
+no dashboard account exists yet. Create your admin username/password there.
+You're now looking at the live dashboard - status, positions, trades,
+R-histogram, and the enable/pause/flatten controls all reflect the one
+LIVE engine.
 
 ## Day-to-day operations
 
 ```bash
-# Logs (repeat with -live for the live half)
-sudo journalctl -u trading-bot-paper.service -f
-sudo journalctl -u ibgateway-paper.service -f
+# Logs
+sudo journalctl -u trading-bot-live.service -f
+sudo journalctl -u ibgateway-live.service -f
 sudo journalctl -u dashboard.service -f
 
 # Restart after a config or code change
-sudo systemctl restart trading-bot-paper.service trading-bot-live.service dashboard.service
+sudo systemctl restart trading-bot-live.service dashboard.service
 
 # Deploy an update
 sudo -iu tradingbot bash -c "cd /opt/tradingbot && git pull && .venv/bin/pip install -r requirements.txt"
-sudo systemctl restart trading-bot-paper.service trading-bot-live.service dashboard.service
+sudo systemctl restart trading-bot-live.service dashboard.service
 ```
 
 ## Automatic deployment (GitHub Actions)
@@ -299,7 +269,7 @@ log there.
 A strategy can restrict itself to a fundamentals-screened universe (market
 cap, beta, analyst rating) narrower than the default S&P 500 scan — see
 `src/custom_universes.py`. `build_custom_universe.py` builds/refreshes the
-ticker list for one of these; `trading-bot-paper.service`'s scheduler
+ticker list for one of these; `trading-bot-live.service`'s scheduler
 already runs it automatically every Sunday 08:00 ET for every universe
 defined there, so this is normally hands-off. The one time it needs a
 manual run is right after this feature is first deployed — the cache
@@ -347,7 +317,7 @@ connection); the daily side is fetched directly by the dashboard process
 itself the first time a symbol is backtested (no broker connection
 needed for yfinance), so it needs no separate setup step. Only the
 intraday cache needs seeding before the Backtest page has anything to
-test against — `trading-bot-paper.service`'s scheduler already runs
+test against — `trading-bot-live.service`'s scheduler already runs
 `fetch_backtest_data.py` automatically every Sunday 09:00 ET for the full
 S&P 500 universe, but — same as the custom-universe builder — it needs
 one manual run right after this feature is first deployed, or the
@@ -360,17 +330,17 @@ sudo -iu tradingbot bash -c "cd /opt/tradingbot && .venv/bin/python fetch_backte
 Unlike the other two background jobs, this one needs a live IB Gateway
 connection (its own dedicated client ID, `IBKR_BACKTEST_CLIENT_ID` in
 `.env` — add it if upgrading from before this feature existed, see
-`.env.example`), so run it while `ibgateway-paper.service` is up.
+`.env.example`), so run it while `ibgateway-live.service` is up.
 
-IBKR takes paper accounts offline for extended weekend maintenance —
-observed starting right around Friday's session close (~00:00 ET
-Saturday) and not reliably back until Sunday evening or Monday. During
-that window every request hangs/fails with `Error 1100: Connectivity
-between IBKR and Trader Workstation has been lost` (and the IBC log under
-`~/ibc-logs-paper/` shows a "No Internet connection" dialog) no matter how
-many times the Gateway is restarted — this is expected and not a bug in
-this script or the Gateway config. Don't run (or debug failures of) this
-job over the weekend; retry once markets are back.
+IBKR takes accounts offline for extended weekend maintenance — observed
+starting right around Friday's session close (~00:00 ET Saturday) and not
+reliably back until Sunday evening or Monday. During that window every
+request hangs/fails with `Error 1100: Connectivity between IBKR and Trader
+Workstation has been lost` (and the IBC log under `~/ibc-logs-live/` shows
+a "No Internet connection" dialog) no matter how many times the Gateway is
+restarted — this is expected and not a bug in this script or the Gateway
+config. Don't run (or debug failures of) this job over the weekend; retry
+once markets are back.
 
 IBKR happily returns 6 months of 5-minute bars in a single
 `reqHistoricalData` request (~21.7k bars in under a minute), but reliably
@@ -382,8 +352,8 @@ paged backward in `CHUNK_DAYS`-sized (180-day / ~6-month) chunks — the
 largest span confirmed to work in one request — rather than asked for
 all at once. Don't shrink `CHUNK_DAYS` even if a request seems slow:
 many small requests is what caused the Gateway to drop the connection
-entirely the one time this was tried (IBKR's paper Gateway punishes
-request *count* over a short window, not request size); few large
+entirely the one time this was tried (IBKR's historical-data servers
+punish request *count* over a short window, not request size); few large
 chunks avoids that while still respecting the ~6-month per-request
 ceiling.
 
@@ -401,12 +371,9 @@ cache. At the default settings, expect on the order of a few GB total
 under `data/backtest_bars/` for the full S&P 500 — check available disk
 with `df -h` before kicking off a much deeper backfill than the default.
 
-If `ibgateway-paper.service` or `ibgateway-live.service` restarts (nightly
-`AutoRestartTime`, a crash, a server reboot) and IBKR forces a fresh 2FA
-challenge, the matching `trading-bot-*.service` will simply fail to connect
-until you approve it on your phone — that's why Telegram alerts and the
-dashboard's "last cycle" timestamp (per tab) matter: a long gap with no
-cycle activity on one tab is your signal to go check that mode's
-`journalctl -u ibgateway-<mode>.service`. The two config files' staggered
-`AutoRestartTime` (11:50pm vs 11:55pm live) means both don't demand 2FA at
-the exact same moment.
+If `ibgateway-live.service` restarts (nightly `AutoRestartTime`, a crash, a
+server reboot) and IBKR forces a fresh 2FA challenge, `trading-bot-live.
+service` will simply fail to connect until you approve it on your phone —
+that's why Telegram alerts and the dashboard's "last cycle" timestamp
+matter: a long gap with no cycle activity is your signal to go check
+`journalctl -u ibgateway-live.service`.

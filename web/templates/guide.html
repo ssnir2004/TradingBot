@@ -12,7 +12,6 @@
   h5 { margin-top: 1.75rem; }
   .card + .card { margin-top: 1rem; }
   .badge-live { background:#dc3545; }
-  .badge-paper { background:#0dcaf0; color:#000; }
 </style>
 </head>
 <body>
@@ -40,9 +39,8 @@
         מסחר ידני נוח על התיק האמיתי (Place Order, Account Holdings, גרף);
         <strong>Backtest</strong> - בדיקת ביצועי אסטרטגיה על נתונים
         היסטוריים (ראו כרטיס נפרד למטה). כרטיסים משותפים (חיבור IBKR,
-        טאבי PAPER/LIVE, סטטוס ה-Gateway, Account) מופיעים בראש Bot
-        ו-Trading בלבד - Backtest לא תלוי בהם, כי הוא לא מתחבר ל-IBKR
-        בזמן ריצה.
+        סטטוס ה-Gateway, Account) מופיעים בראש Bot ו-Trading בלבד -
+        Backtest לא תלוי בהם, כי הוא לא מתחבר ל-IBKR בזמן ריצה.
       </p>
     </div>
   </div>
@@ -94,19 +92,11 @@
 
   <div class="card">
     <div class="card-body">
-      <h4>PAPER מול LIVE</h4>
-      <p>
-        הבוט רץ פעמיים במקביל, כשני "עותקים" נפרדים לגמרי, כל אחד עם חיבור
-        משלו ל-IB Gateway וחשבון IBKR משלו:
-      </p>
-      <ul>
-        <li><span class="badge badge-paper">PAPER</span> - חשבון סימולציה. עסקאות "מזויפות", לצורך בדיקה של האסטרטגיה בלי סיכון כספי.</li>
-        <li><span class="badge badge-live">LIVE</span> - חשבון אמיתי. עסקאות אמיתיות בכסף אמיתי.</li>
-      </ul>
+      <h4><span class="badge badge-live">LIVE</span> - חשבון אמיתי, כסף אמיתי</h4>
       <p class="mb-0">
-        הם לגמרי בלתי תלויים: הפעלה/השהיה/Flatten בטאב אחד לא משפיעה על
-        השני, ולכל אחד יש רשימת פוזיציות, היסטוריית עסקאות ותקציב סיכון
-        (<span class="mono">PORTFOLIO_VALUE_USD</span>) נפרדים לגמרי בקובץ
+        הבוט מחובר תמיד לחשבון ה-IBKR האמיתי בלבד (מסחר paper/סימולציה הוסר
+        מהמערכת) - כל עסקה שהוא פותח היא עסקה אמיתית בכסף אמיתי. תקציב
+        הסיכון (<span class="mono">PORTFOLIO_VALUE_USD</span>) נקבע בקובץ
         ה-<span class="mono">.env</span> בשרת.
       </p>
     </div>
@@ -229,9 +219,9 @@
       <h4>כפתורי השליטה בדשבורד</h4>
       <table class="table table-sm mb-0">
         <tbody>
-          <tr><td style="width:180px;"><span class="btn btn-success btn-sm disabled">Enable trading</span></td><td>מפעיל את הכניסות החדשות של אותו טאב (paper/live). ניהול פוזיציות פתוחות רץ תמיד, גם כשזה כבוי.</td></tr>
-          <tr><td><span class="btn btn-warning btn-sm disabled">Pause new entries</span></td><td>עוצר כניסות חדשות באותו טאב, אבל ממשיך לנהל (stop/breakeven/trail) כל מה שכבר פתוח.</td></tr>
-          <tr><td><span class="btn btn-danger btn-sm disabled">Flatten all now</span></td><td>כפתור חירום - מוכר <strong>מיידית</strong> את כל הפוזיציות הפתוחות באותו טאב (תוך כ-20 שניות), בלי קשר לשעה.</td></tr>
+          <tr><td style="width:180px;"><span class="btn btn-success btn-sm disabled">Enable trading</span></td><td>מפעיל כניסות חדשות. ניהול פוזיציות פתוחות רץ תמיד, גם כשזה כבוי.</td></tr>
+          <tr><td><span class="btn btn-warning btn-sm disabled">Pause new entries</span></td><td>עוצר כניסות חדשות, אבל ממשיך לנהל (stop/breakeven/trail) כל מה שכבר פתוח.</td></tr>
+          <tr><td><span class="btn btn-danger btn-sm disabled">Flatten all now</span></td><td>כפתור חירום - מוכר <strong>מיידית</strong> את כל הפוזיציות הפתוחות (תוך כ-20 שניות), בלי קשר לשעה.</td></tr>
         </tbody>
       </table>
       <p class="text-muted small mb-0 mt-2">
@@ -250,10 +240,8 @@
         הכרטיס הראשון בדשבורד ("My IBKR Login") מיועד לכל משתמש להזין בו
         את שם המשתמש והסיסמה <strong>שלו</strong> ל-IBKR - כל אחד את הפרטים
         של החשבון שלו, ואף אחד (כולל האדמין) לא רואה את הסיסמה של אחר; היא
-        נשמרת מוצפנת. זה כרטיס אחד בלבד ומשותף לשני הטאבים (Paper/Live) -
-        כי ב-IBKR חשבון הפייפר תמיד צמוד לאותו login של חשבון הלייב. שים
-        לב: זה שלב <strong>הכנה</strong> בלבד - חיבור בפועל של Gateway
-        אישי לכל משתמש הוא פיצ'ר נפרד שעדיין בבנייה.
+        נשמרת מוצפנת. שים לב: זה שלב <strong>הכנה</strong> בלבד - חיבור
+        בפועל של Gateway אישי לכל משתמש הוא פיצ'ר נפרד שעדיין בבנייה.
       </p>
     </div>
   </div>
@@ -268,7 +256,7 @@
         מסודרת לעשות את זה מהדשבורד, בלי SSH:
       </p>
       <ol>
-        <li><strong>Disconnect</strong> - עוצר את מנוע המסחר ואת ה-Gateway של אותו טאב (paper/live), ומשחרר את ה-session כדי שתוכל להתחבר עם אותם פרטים ב-TWS/Mobile. אם יש פוזיציה פתוחה באותו מצב, מופיע <strong>אישור שני, נפרד</strong> (הקלדת <span class="mono">ok</span>) שמזהיר שבזמן שה-Gateway מנותק שום דבר לא מנהל אותה - בלי stop, בלי סגירה בסוף יום - ומאפשר להמשיך בכל זאת; עדיף לסגור אותה קודם אם אפשר. ב-LIVE נדרשת בנוסף גם הקלדת אישור נפרדת לניתוק עצמו (<span class="mono">ok</span>).</li>
+        <li><strong>Disconnect</strong> - עוצר את מנוע המסחר ואת ה-Gateway, ומשחרר את ה-session כדי שתוכל להתחבר עם אותם פרטים ב-TWS/Mobile. הניתוק דורש הקלדת אישור (<span class="mono">ok</span>) - כסף אמיתי מעורב. אם יש פוזיציה פתוחה, מופיע <strong>אישור שני, נפרד</strong> שמזהיר שבזמן שה-Gateway מנותק שום דבר לא מנהל אותה - בלי stop, בלי סגירה בסוף יום - ומאפשר להמשיך בכל זאת; עדיף לסגור אותה קודם אם אפשר.</li>
         <li>עכשיו תוכל להתחבר ל-TWS/Mobile עם פרטי החשבון הרגילים.</li>
         <li>כשסיימת - תתנתק מ-TWS/Mobile (Logout).</li>
         <li><strong>Reconnect Gateway</strong> - מעלה מחדש רק את ה-Gateway. ייתכן שתידרש לאשר 2FA בטלפון, בדיוק כמו בהתחברות הראשונה - התג למעלה יראה "Connecting..." עד שזה יאושר. מוצג רק אחרי שה-Gateway כבר נעצר (למשל ב-Disconnect שלמעלה).</li>
@@ -326,8 +314,7 @@
         אפשר לשמור כמה גרסאות של חוקי האסטרטגיה (למשל סף gap שונה, סף
         רווח חלקי שונה) ולעבור ביניהן בלחיצת כפתור ("Activate") - <strong>המעבר
         חל מיידית</strong>, כבר במחזור הבא (עד 5 דקות), בלי צורך להפעיל מחדש שום
-        שירות. האסטרטגיה הפעילה משותפת ל-paper ול-live גם יחד - כלומר אם
-        תחליף אסטרטגיה, שני הטאבים יעברו להשתמש בה. "New strategy" יוצר
+        שירות. "New strategy" יוצר
         גרסה חדשה שאפשר לערוך את חוקי ה-JSON שלה (אותם שדות D1-D3, I1-I3,
         exit, risk שמופיעים בטבלאות למעלה) ולהפעיל כשמוכנים. כל אסטרטגיה
         משויכת לכיוון (Long/Short) קבוע מרגע היצירה - לא ניתן לשנות כיוון
@@ -413,8 +400,10 @@
         - כי היא חלה על live באופן מיידי, ממש כמו עריכת Risk Settings.
         <strong>הביצועים של האסטרטגיות האלה לא נבדקו היסטורית</strong> - "פחות
         שמרן" אומר סף כניסה רופף יותר וסיכון גבוה יותר לעסקה, לא בהכרח
-        תוצאה טובה יותר; מומלץ לבדוק כל אסטרטגיה חדשה (במיוחד Short) במצב
-        PAPER לפרק זמן משמעותי לפני שמפעילים אותה על LIVE. אסטרטגיית
+        תוצאה טובה יותר; מומלץ לבדוק כל אסטרטגיה חדשה (במיוחד Short) בעמוד
+        Backtest, ולשקול להפעיל אותה קודם רק במצב Dry Run (ראו הכרטיס
+        המתאים בעמוד Bot) לפרק זמן משמעותי לפני שנותנים לה לפתוח פוזיציות
+        אמיתיות. אסטרטגיית
         ה-Short המובנית <strong>לא מופעלת אוטומטית</strong> - צריך ללחוץ
         "Activate" עליה בכוונה תחילה כדי שהבוט יתחיל לפתוח פוזיציות שורט.
       </p>
@@ -425,8 +414,7 @@
     <div class="card-body">
       <h4>Risk Settings - עריכת תקציב וגודל עסקה</h4>
       <p>
-        ה-widget "Risk Settings" בדשבורד (מתחת ל-Account) מאפשר לערוך, לכל
-        טאב בנפרד:
+        ה-widget "Risk Settings" בדשבורד (מתחת ל-Account) מאפשר לערוך:
       </p>
       <ul>
         <li><strong>Portfolio Value (USD)</strong> - התקציב שממנו מחושב גודל הפוזיציה.</li>
@@ -434,16 +422,14 @@
         <li><strong>Max Risk % / Trade</strong> - כמה אחוז מהתקציב מותר לסכן בעסקה בודדת.</li>
       </ul>
       <p>
-        עריכה בטאב <span class="badge badge-paper">PAPER</span> נשמרת מיד. עריכה
-        בטאב <span class="badge badge-live">LIVE</span> דורשת הקלדת אישור
-        (<span class="mono">ok</span>) בחלון שנפתח - זו הגנה
-        מכוונת, כי אלה בדיוק הערכים ששולטים כמה כסף אמיתי יסתכן בעסקה בודדת.
-        האישור נבדק גם בשרת עצמו, לא רק בדפדפן.
+        עריכה דורשת הקלדת אישור (<span class="mono">ok</span>) בחלון שנפתח -
+        זו הגנה מכוונת, כי אלה בדיוק הערכים ששולטים כמה כסף אמיתי יסתכן
+        בעסקה בודדת. האישור נבדק גם בשרת עצמו, לא רק בדפדפן.
       </p>
       <p class="mb-0">
-        <strong>ברירת המחדל ב-live היא Portfolio Value = 0</strong> - כך
+        <strong>ברירת המחדל היא Portfolio Value = 0</strong> - כך
         שגודל הפוזיציה יוצא 0 מניות וה<strong>בוט לא יכול לפתוח פוזיציה
-        חדשה ב-live</strong> עד שתעדכן את הערך הזה בכוונה תחילה, דרך המסך
+        חדשה</strong> עד שתעדכן את הערך הזה בכוונה תחילה, דרך המסך
         הזה (או ידנית ב-<span class="mono">.env</span> בשרת, שעדיין עובד
         כברירת מחדל לכל ערך שלא נערך מהדשבורד).
       </p>
