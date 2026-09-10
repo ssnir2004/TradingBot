@@ -3893,17 +3893,24 @@ def upsert_position(account_id: int, mode: str, pos: dict):
     pos = {
         "side": "long", "target_price": None, "hard_stop_price": None,
         "mfe_price": None, "trail_activated": False, "trail_activated_at_r": None,
-        "mae_price": None,
+        "mae_price": None, "strategy_id": None,
         **pos,
     }
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO positions (account_id, mode, symbol, side, entry_price, entry_time_iso, qty, initial_stop, "
             "stop_price, stop_order_id, state, r_multiple, target_price, hard_stop_price, mfe_price, "
-            "trail_activated, trail_activated_at_r, mae_price) VALUES "
+            "trail_activated, trail_activated_at_r, mae_price, strategy_id) VALUES "
             "(:account_id, :mode, :symbol, :side, :entry_price, :entry_time_iso, :qty, :initial_stop, :stop_price, "
             ":stop_order_id, :state, :r_multiple, :target_price, :hard_stop_price, :mfe_price, "
-            ":trail_activated, :trail_activated_at_r, :mae_price) "
+            ":trail_activated, :trail_activated_at_r, :mae_price, :strategy_id) "
+            # strategy_id is deliberately NOT in this DO UPDATE SET - it's
+            # attribution set once at entry (whichever strategy opened the
+            # position), never touched again by a later re-upsert (every
+            # other tick of manage_position re-upserting the same position
+            # for its whole life) - a caller that doesn't carry it forward
+            # (e.g. a legacy/manual upsert) must never be able to silently
+            # clear an existing position's strategy attribution back to NULL.
             "ON CONFLICT(account_id, mode, symbol) DO UPDATE SET "
             "qty=excluded.qty, initial_stop=excluded.initial_stop, stop_price=excluded.stop_price, "
             "stop_order_id=excluded.stop_order_id, state=excluded.state, r_multiple=excluded.r_multiple, "

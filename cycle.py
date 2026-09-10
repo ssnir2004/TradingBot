@@ -1505,14 +1505,48 @@ def _log_es_rejection(account_id: int, mode: str, strategy_name: str, side: str,
     })
 
 
-def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dict, env: dict, side: str) -> list[dict]:
+def _strategy_can_enter(strategy_run: dict, open_count: int, open_notional: float, new_notional: float) -> tuple[bool, str | None]:
+    """Both live_budget and live_max_positions are optional per strategy_run
+    and, when set, BOTH enforced together - whichever limit this candidate
+    would hit first blocks it (see strategy_runs' own schema comment,
+    src/db.py). Neither set (both None, matching every strategy_run
+    migrated from the old single-active-strategy-per-direction model)
+    means unlimited, same as before multi-strategy support existed."""
+    max_positions = strategy_run.get("live_max_positions")
+    if max_positions is not None and open_count >= max_positions:
+        return False, "strategy_max_positions_reached"
+    budget = strategy_run.get("live_budget")
+    if budget is not None and (open_notional + new_notional) > budget:
+        return False, "strategy_budget_exceeded"
+    return True, None
+
+
+def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dict, env: dict, side: str,
+                strategy_run: dict | None = None) -> list[dict]:
     """Scans this side's ('long' or 'short') watchlist for new entries
     under its own active strategy. positions holds ALL open positions
-    (both sides) — run_cycle chains a long scan then a short scan over the
-    same growing list, so each sees what the other already opened this
-    cycle. Concurrent-position and daily-entry caps are enforced per side
-    (this side's own count against this side's own rules), not pooled
-    across both directions.
+    (both sides, every strategy) — run_cycle chains one scan per active
+    strategy_run over the same growing list, so each sees what every
+    other one already opened this cycle; this is what naturally enforces
+    "only one strategy can hold a given symbol at a time" (see positions'
+    own PRIMARY KEY, unchanged by multi-strategy support - db.upsert_
+    position's ON CONFLICT simply overwrites rather than creating a second
+    row, so a second strategy's own db.upsert_position call for an already-
+    held symbol would silently misattribute it - held_symbols below is
+    what actually prevents that from ever being attempted). Concurrent-
+    position and daily-entry caps are enforced per side (this side's own
+    count against this side's own rules), not pooled across both
+    directions.
+
+    strategy_run (None for a legacy/pre-multi-strategy caller) adds a
+    SECOND, independent gate on top of the side's own rules-based caps
+    above - this strategy's own live_budget/live_max_positions (see
+    _strategy_can_enter) - and tags every position this scan opens with
+    strategy_id for attribution (budget accounting, routing to the right
+    dashboard sheet). A candidate can be skipped for either reason
+    (symbol already taken by another strategy vs. this strategy's own
+    budget/cap exhausted) - see the strategy_entry_blocked log event for
+    which.
 
     Touch & Turn strategies ("opening_candle" in rules) have their own
     separate scan (touch_turn_entry_scan, called alongside this one from
@@ -1535,6 +1569,15 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
     side_positions = [p for p in positions if p.get("side", "long") == side]
     if len(side_positions) >= max_concurrent:
         return positions
+
+    strategy_id = strategy_run["strategy_id"] if strategy_run else None
+    strategy_positions = [p for p in positions if p.get("strategy_id") == strategy_id] if strategy_run else []
+    strategy_open_notional = sum(p["qty"] * p["entry_price"] for p in strategy_positions)
+    if strategy_run:
+        can_enter, reason = _strategy_can_enter(strategy_run, len(strategy_positions), strategy_open_notional, 0.0)
+        if not can_enter:
+            log_decision(account_id, mode, {"event": "strategy_entry_blocked", "side": side, "strategy_id": strategy_id, "reason": reason})
+            return positions
 
     # A fade strategy's own filters (D1-D3/I1-I3, or ORB's confirm/gap/
     # retest conditions once signal_side reaches evaluate_orb_entry too)
@@ -1566,6 +1609,8 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
 
     for ticker in watchlist:
         if len(side_positions) >= max_concurrent:
+            break
+        if strategy_run and strategy_run.get("live_max_positions") is not None and len(strategy_positions) >= strategy_run["live_max_positions"]:
             break
         if ticker in held_symbols:
             continue
@@ -1599,6 +1644,12 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
             gate = es_filter.check(es_direction, side)
             if not gate["allowed"]:
                 _log_es_rejection(account_id, mode, rules.get("strategy_name", "?"), side, ticker, gate)
+                continue
+
+        if strategy_run:
+            can_enter, reason = _strategy_can_enter(strategy_run, len(strategy_positions), strategy_open_notional, size * price)
+            if not can_enter:
+                log_decision(account_id, mode, {"event": "strategy_entry_blocked", "symbol": ticker, "side": side, "strategy_id": strategy_id, "reason": reason})
                 continue
 
         # Dry run: everything up to here ran exactly as it would for a real
@@ -1680,6 +1731,7 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
             "stop_order_id": stop_order_id,
             "state": "pre_breakeven",
             "r_multiple": 0.0,
+            "strategy_id": strategy_id,
             **extra_position_fields,
         }
         if is_orb:
@@ -1687,11 +1739,143 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
         db.upsert_position(account_id, mode, new_position)
         positions.append(new_position)
         side_positions.append(new_position)
+        if strategy_run:
+            strategy_positions.append(new_position)
+            strategy_open_notional += fill_qty * fill_price
         held_symbols.add(ticker)
         notify(f"[{mode.upper()}] {action} {ticker}", f"@ ${fill_price:.2f}, stop ${initial_stop:.2f}, qty {fill_qty}", "default")
-        log_decision(account_id, mode, {"event": "entry", "symbol": ticker, "side": side, "price": fill_price, "stop": initial_stop, "qty": fill_qty})
+        log_decision(account_id, mode, {"event": "entry", "symbol": ticker, "side": side, "price": fill_price, "stop": initial_stop, "qty": fill_qty, "strategy_id": strategy_id})
 
     return positions
+
+
+def virtual_entry_scan(account_id: int, mode: str, ib, rules: dict, env: dict, side: str, strategy_run: dict) -> None:
+    """entry_scan's counterpart for a strategy_run with run_mode='virtual'
+    (see strategy_run's own schema comment, src/db.py) - same filter
+    evaluation, same sizing math, but on a pass this writes a simulated
+    fill straight to virtual_positions instead of ever calling trade.py or
+    touching a real broker order. ib is still needed (unlike everywhere
+    else in the virtual path) purely for _es_direction_for_scan's own
+    read-only ES futures market-data fetch, if this strategy opted into
+    that filter - reading market data isn't a real order, so reusing the
+    cycle's own already-open connection for it doesn't compromise "virtual
+    needs no dedicated broker connection".
+
+    Unlike entry_scan, this doesn't accept/mutate a shared cross-strategy
+    positions list - each virtual strategy's own open positions
+    (db.get_virtual_positions(account_id, strategy_id=...)) are what
+    "already held" means here, entirely independent of every other
+    strategy (real or virtual) that might also be holding the same
+    symbol right now (see virtual_positions' own schema comment for why
+    that's fine - no real shares are ever at stake). live_budget/
+    live_max_positions don't apply to a virtual run - virtual_capital is
+    its own notional cap instead, and position count is still bounded by
+    the strategy's own rules["risk"]["max_concurrent_positions"], same
+    field real trading already uses.
+
+    Deliberately does NOT check db.count_todays_entries/max_trades_per_day
+    (that table only ever records real fills) or db.is_dry_run (a
+    different, orthogonal feature for a live-scoped side, not a
+    strategy_run) - a virtual strategy's only throttle is its own
+    concurrent-position cap and virtual_capital, same as a real account's
+    own budget/position cap are its only throttle beyond the strategy's
+    own rules."""
+    if "opening_candle" in rules:
+        return
+    if not _within_entry_window(rules):
+        return
+
+    strategy_id, strategy_label = strategy_run["strategy_id"], strategy_run.get("strategy_name", "?")
+    open_positions = db.get_virtual_positions(account_id, strategy_id=strategy_id)
+    max_concurrent = rules["risk"]["max_concurrent_positions"]
+    if len(open_positions) >= max_concurrent:
+        return
+
+    watchlist_direction = rules.get("signal_side") or side
+    watchlist = [row["symbol"] for row in db.get_watchlist(account_id, mode, direction=watchlist_direction, universe=_strategy_universe(rules))]
+    if not watchlist:
+        return
+
+    es_direction = _es_direction_for_scan(account_id, mode, ib, rules)
+    held_symbols = {p["symbol"] for p in open_positions}
+    open_notional = sum(p["qty"] * p["entry_price"] for p in open_positions)
+    virtual_capital = strategy_run.get("virtual_capital")
+
+    risk = mode_config.risk_params(env, account_id, mode)
+    portfolio_value = risk["portfolio_value"]
+    max_risk_pct = risk["max_risk_pct"]
+    max_position_pct = rules["risk"]["max_position_size_pct_of_portfolio"] / 100
+    action = "BUY" if side == "long" else "SELL"
+
+    for ticker in watchlist:
+        if len(open_positions) >= max_concurrent:
+            break
+        if ticker in held_symbols:
+            continue
+
+        is_orb = "opening_range" in rules
+        signal = _evaluate_orb_entry(account_id, mode, ticker, rules, side) if is_orb \
+            else _evaluate_entry_filters(account_id, mode, ticker, rules, side)
+        if not signal.get("pass"):
+            continue
+
+        price = signal["price"]
+        initial_stop = signal["initial_stop"] if is_orb else _resolve_initial_stop(signal, rules, side)
+        r = (initial_stop - price) if side == "short" else (price - initial_stop)
+        if r <= 0:
+            continue
+
+        risk_dollars = portfolio_value * (max_risk_pct / 100)
+        size_by_risk = math.floor(risk_dollars / r)
+        size_by_cap = math.floor(portfolio_value * max_position_pct / price)
+        size = min(size_by_risk, size_by_cap)
+        if size < 1:
+            continue
+
+        if rules.get("es_vwap_filter") and db.is_es_vwap_filter_enabled(account_id, mode):
+            gate = es_filter.check(es_direction, side)
+            if not gate["allowed"]:
+                _log_es_rejection(account_id, mode, rules.get("strategy_name", "?"), side, ticker, gate)
+                continue
+
+        if virtual_capital is not None and (open_notional + size * price) > virtual_capital:
+            log_decision(account_id, mode, {"event": "strategy_entry_blocked", "symbol": ticker, "side": side, "strategy_id": strategy_id, "reason": "virtual_capital_exceeded", "virtual": True})
+            continue
+
+        # No fill delay/slippage to simulate - this is the instant the
+        # signal passed, at the signal's own price, exactly as if it had
+        # filled immediately (the same assumption backtest_engine.py's own
+        # simulator makes for a market-order entry).
+        order_stop_price = initial_stop
+        extra_position_fields = {"mae_price": price}
+        if rules["exit"].get("management_style") == "no_stop_delayed_trail":
+            extra_position_fields.update({"mfe_price": price, "trail_activated": False, "trail_activated_at_r": None})
+            hard_stop_r = rules["exit"].get("hard_stop_R")
+            if hard_stop_r is not None:
+                initial_risk = abs(price - initial_stop)
+                order_stop_price = (price + hard_stop_r * initial_risk) if side == "short" else (price - hard_stop_r * initial_risk)
+                extra_position_fields["hard_stop_price"] = order_stop_price
+
+        new_position = {
+            "symbol": ticker,
+            "side": side,
+            "entry_price": price,
+            "entry_time_iso": datetime.now(ET).isoformat(timespec="seconds"),
+            "qty": size,
+            "initial_stop": initial_stop,
+            "stop_price": order_stop_price,
+            "state": "pre_breakeven",
+            "r_multiple": 0.0,
+            **extra_position_fields,
+        }
+        if is_orb:
+            new_position["target_price"] = signal["target_price"]
+        db.upsert_virtual_position(account_id, strategy_id, new_position)
+        open_positions.append(new_position)
+        held_symbols.add(ticker)
+        open_notional += size * price
+        notify(f"[VIRTUAL] {strategy_label}: {action} {ticker}", f"@ ${price:.2f}, stop ${initial_stop:.2f}, qty {size}", "default")
+        log_decision(account_id, mode, {"event": "entry", "symbol": ticker, "side": side, "price": price, "stop": initial_stop, "qty": size, "strategy_id": strategy_id, "virtual": True})
 
 
 def touch_turn_entry_scan(account_id: int, mode: str, ib, rules: dict, env: dict, side: str):
