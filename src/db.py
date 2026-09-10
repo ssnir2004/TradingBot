@@ -4597,16 +4597,37 @@ def activate_strategy(account_id: int, strategy_id: int):
     replacing only this account's own prior selection for that direction
     (account_active_strategy's primary key is account_id+direction), so
     activating a strategy never touches any other account's selection, nor
-    this account's selection on the OTHER direction."""
+    this account's selection on the OTHER direction.
+
+    Also dual-writes to strategy_runs (run_mode='live') - cycle.py's
+    engine loop reads ONLY strategy_runs, not this legacy table, so this
+    is what makes this old single-strategy Activate button still actually
+    do anything now that multi-strategy support exists. Preserves this
+    table's own "exactly one active strategy per direction" semantics on
+    that side too: every OTHER same-direction strategy this legacy
+    mechanism previously activated is set back to 'off' in strategy_runs
+    first, mirroring the ON CONFLICT below on account_active_strategy
+    itself. A strategy someone already set to 'virtual', or 'live' with
+    its own budget via the newer set_strategy_run, is left alone unless
+    THIS activation targets it directly - this only ever touches this
+    account's own account_active_strategy history, never a strategy_run
+    this legacy button never touched in the first place."""
     with get_conn() as conn:
         row = conn.execute("SELECT direction FROM strategies WHERE id = ?", (strategy_id,)).fetchone()
         if not row:
             raise ValueError(f"Strategy {strategy_id} not found")
+        previously_active = conn.execute(
+            "SELECT strategy_id FROM account_active_strategy WHERE account_id = ? AND direction = ?",
+            (account_id, row["direction"]),
+        ).fetchone()
         conn.execute(
             "INSERT INTO account_active_strategy (account_id, direction, strategy_id) VALUES (?, ?, ?) "
             "ON CONFLICT(account_id, direction) DO UPDATE SET strategy_id = excluded.strategy_id",
             (account_id, row["direction"], strategy_id),
         )
+    if previously_active and previously_active["strategy_id"] != strategy_id:
+        _set_strategy_run_mode_only(account_id, previously_active["strategy_id"], "off")
+    _set_strategy_run_mode_only(account_id, strategy_id, "live")
 
 
 def deactivate_strategy(account_id: int, strategy_id: int):
@@ -4616,7 +4637,10 @@ def deactivate_strategy(account_id: int, strategy_id: int):
     been activated there. Scoped to strategy_id as well as direction so a
     stale "Deactivate" click can't clear a different strategy that became
     active in the meantime; only this account's own row is touched, same
-    isolation as activate_strategy."""
+    isolation as activate_strategy.
+
+    Also dual-writes to strategy_runs (run_mode='off') - see activate_
+    strategy's own comment for why."""
     with get_conn() as conn:
         row = conn.execute("SELECT direction FROM strategies WHERE id = ?", (strategy_id,)).fetchone()
         if not row:
@@ -4625,6 +4649,7 @@ def deactivate_strategy(account_id: int, strategy_id: int):
             "DELETE FROM account_active_strategy WHERE account_id = ? AND direction = ? AND strategy_id = ?",
             (account_id, row["direction"], strategy_id),
         )
+    _set_strategy_run_mode_only(account_id, strategy_id, "off")
 
 
 def delete_strategy(strategy_id: int):
@@ -4691,6 +4716,22 @@ def get_strategy_run(account_id: int, strategy_id: int) -> dict | None:
             (account_id, strategy_id),
         ).fetchone()
         return dict(row) if row else None
+
+
+def _set_strategy_run_mode_only(account_id: int, strategy_id: int, run_mode: str):
+    """Flips run_mode while preserving whatever virtual_capital/live_budget/
+    live_max_positions this strategy_run already has (or None if it has
+    none yet) - used by the legacy activate_strategy/deactivate_strategy
+    (which were never able to configure a budget themselves), so toggling
+    a strategy through them never silently wipes out a budget someone set
+    via the newer set_strategy_run/dashboard."""
+    existing = get_strategy_run(account_id, strategy_id)
+    set_strategy_run(
+        account_id, strategy_id, run_mode,
+        virtual_capital=existing["virtual_capital"] if existing else None,
+        live_budget=existing["live_budget"] if existing else None,
+        live_max_positions=existing["live_max_positions"] if existing else None,
+    )
 
 
 def set_strategy_run(account_id: int, strategy_id: int, run_mode: str,

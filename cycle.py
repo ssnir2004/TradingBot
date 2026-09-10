@@ -37,6 +37,7 @@ only enters from 10:05, even though the cycle itself is already running
 "ok" from 9:35 onward for whichever other strategy wants to start earlier.
 """
 import argparse
+import json
 import math
 import subprocess
 import sys
@@ -2512,6 +2513,75 @@ def scan_watchlist_filters(account_id: int):
 
 
 # -------------------------------------------------------------------- main
+def _rules_for_position(pos: dict, legacy_rules_by_side: dict) -> dict:
+    """A position's own strategy's rules, looked up by its own strategy_id
+    - regardless of whether that strategy_run is still 'live' right now
+    (a position stays managed even if its strategy was deactivated or
+    deleted after it was opened, same as before multi-strategy support -
+    see manage_position's own docstring). Falls back to the side's legacy
+    single-active-strategy rules (account_active_strategy, via db.
+    get_active_rules) for a position with no strategy_id at all - one
+    that predates this feature, or was opened by some other unattributed
+    path."""
+    strategy_id = pos.get("strategy_id")
+    if strategy_id is not None:
+        strategy = db.get_strategy(strategy_id)
+        if strategy is not None:
+            return json.loads(strategy["rules_json"])
+    return legacy_rules_by_side.get(pos.get("side", "long")) or {"exit": _FALLBACK_EXIT_CFG}
+
+
+def _manage_virtual_strategy_positions(account_id: int, strategy_run: dict):
+    """One virtual strategy_run's own position management for this cycle
+    tick - stop-out detection, then manage_virtual_position for whatever
+    survives, then its own resting Touch & Turn orders. Mirrors run_
+    cycle's own Step 3/4/4.5 for real positions, just against this
+    strategy's own virtual_positions/virtual_pending_orders - called for
+    every virtual strategy_run on every tick, independent of is_bot_
+    enabled/force_close/manage_only below (same "manage what's already
+    open no matter what" reasoning Step 3/4 already follow for real
+    positions)."""
+    strategy_id = strategy_run["strategy_id"]
+    strategy_label = strategy_run.get("strategy_name", "?")
+    strategy = db.get_strategy(strategy_id)
+    if strategy is None:
+        return
+    rules = json.loads(strategy["rules_json"])
+    positions = check_virtual_stop_outs(account_id, strategy_id, strategy_label, db.get_virtual_positions(account_id, strategy_id=strategy_id))
+    for pos in positions:
+        manage_virtual_position(account_id, strategy_id, strategy_label, pos, rules)
+    check_pending_virtual_touch_turn_orders(account_id, strategy_id, strategy_label)
+
+
+def _flatten_virtual_strategy(account_id: int, strategy_run: dict, reason: str):
+    """Closes every one of this virtual strategy's own open positions (at
+    the current price) and cancels every one of its own resting Touch &
+    Turn orders - the virtual-path counterpart to force_close_all/
+    _cancel_pending_touch_turn_order, called from run_cycle's own "flatten
+    everything now" and EOD force_close paths (see their own comments for
+    why virtual is included in both - "everything"/EOD-close means
+    everything, not just real money)."""
+    strategy_id = strategy_run["strategy_id"]
+    strategy_label = strategy_run.get("strategy_name", "?")
+    now_iso = datetime.now(ET).isoformat(timespec="seconds")
+    for pos in db.get_virtual_positions(account_id, strategy_id=strategy_id):
+        side = pos.get("side", "long")
+        price = _current_price(pos["symbol"])
+        exit_price = price if price is not None else pos["entry_price"]
+        pnl = ((exit_price - pos["entry_price"]) if side == "long" else (pos["entry_price"] - exit_price)) * pos["qty"]
+        db.record_virtual_trade(account_id, strategy_id, {
+            "symbol": pos["symbol"], "side": side, "entry_price": pos["entry_price"],
+            "entry_time_iso": pos["entry_time_iso"], "exit_price": exit_price, "exit_time_iso": now_iso,
+            "qty": pos["qty"], "final_r": pos.get("r_multiple"), "pnl_dollars": pnl, "exit_reason": reason,
+        })
+        db.remove_virtual_position(account_id, strategy_id, pos["symbol"])
+        notify(f"[VIRTUAL] {strategy_label}: FLATTEN {pos['symbol']}", f"closed @ ${exit_price:.2f}, P&L ${pnl:+.2f}", "default")
+        log_decision(account_id, "live", {"event": "flatten_close", "symbol": pos["symbol"], "side": side, "price": exit_price, "pnl": pnl, "strategy_id": strategy_id, "virtual": True, "reason": reason})
+    for po in db.get_virtual_pending_orders(account_id, strategy_id, "pending"):
+        db.resolve_virtual_pending_order(account_id, strategy_id, po["symbol"], po["placed_date"], "cancelled")
+        log_decision(account_id, "live", {"event": "touch_turn_cancelled", "symbol": po["symbol"], "side": po["side"], "strategy_id": strategy_id, "virtual": True})
+
+
 def run_cycle(account_id: int, mode: str):
     """Runs one tick of the trading cycle for the given account+mode. Safe
     to call as often as run_service.py's own "cycle" job interval allows
@@ -2524,8 +2594,11 @@ def run_cycle(account_id: int, mode: str):
     ibkr = None
     try:
         env = _env()
-        long_rules = db.get_active_rules(account_id, "long")
-        short_rules = db.get_active_rules(account_id, "short")
+        # Legacy fallback only - see _rules_for_position. Every position/
+        # order opened under multi-strategy support carries its own
+        # strategy_id and looks its own strategy up directly instead,
+        # regardless of whether that strategy is still 'live' right now.
+        legacy_rules_by_side = {"long": db.get_active_rules(account_id, "long"), "short": db.get_active_rules(account_id, "short")}
         client_id = int(env.get("IBKR_CLIENT_ID", 2))
 
         try:
@@ -2537,6 +2610,7 @@ def run_cycle(account_id: int, mode: str):
 
         ib = ibkr.ib
         positions = db.get_open_positions(account_id, mode)
+        virtual_strategy_runs = db.list_strategy_runs(account_id, run_mode="virtual")
 
         # Emergency "flatten everything now" request from the dashboard takes
         # priority over the normal cycle, but position management always runs
@@ -2544,6 +2618,8 @@ def run_cycle(account_id: int, mode: str):
         # Touch & Turn order still resting in the market gets cancelled too
         # - force_close_all only ever knows about already-FILLED positions,
         # so a pending, unfilled limit order needs its own cancellation here.
+        # Virtual strategies' own open positions/resting orders are flattened
+        # too - "everything now" means everything, not just real money.
         if db.consume_flatten_request(account_id, mode):
             positions = check_stop_outs(account_id, mode, ib, positions)
             force_close_all(account_id, mode, ib, positions)
@@ -2551,20 +2627,30 @@ def run_cycle(account_id: int, mode: str):
                 _cancel_pending_touch_turn_order(account_id, mode, ib, po, "cancelled")
             for trig in db.get_price_triggers(account_id, mode, "pending"):
                 _cancel_price_trigger(account_id, mode, ib, trig)
+            for strategy_run in virtual_strategy_runs:
+                _flatten_virtual_strategy(account_id, strategy_run, "flatten_request")
             db.record_cycle_run(account_id, mode, "flattened_on_request")
             return "flattened_on_request"
 
         positions = check_stop_outs(account_id, mode, ib, positions)  # Step 3
-        rules_by_side = {"long": long_rules, "short": short_rules}
         positions = [
-            manage_position(account_id, mode, ib, p, rules_by_side.get(p.get("side", "long")) or {"exit": _FALLBACK_EXIT_CFG})
+            manage_position(account_id, mode, ib, p, _rules_for_position(p, legacy_rules_by_side))
             for p in positions
         ]  # Step 4
         positions = check_pending_touch_turn_orders(account_id, mode, ib, positions)  # Step 4.5 - fills/expiry, always runs
         positions = check_price_triggers(account_id, mode, ib, positions)  # Step 4.6 - user-set buy/sell line fills, always runs
 
-        if status == "force_close":  # Step 6
+        # Every virtual strategy's own position management - same "always
+        # runs, regardless of what happens below" reasoning as Step 3/4
+        # above, just against virtual_positions/virtual_pending_orders
+        # instead of the real broker.
+        for strategy_run in virtual_strategy_runs:
+            _manage_virtual_strategy_positions(account_id, strategy_run)
+
+        if status == "force_close":  # Step 6 - EOD: flatten real AND virtual
             force_close_all(account_id, mode, ib, positions)
+            for strategy_run in virtual_strategy_runs:
+                _flatten_virtual_strategy(account_id, strategy_run, "force_close")
             db.record_cycle_run(account_id, mode, status)
             return status
 
@@ -2572,13 +2658,21 @@ def run_cycle(account_id: int, mode: str):
             db.record_cycle_run(account_id, mode, status)
             return status
 
-        if db.is_bot_enabled(account_id, mode):  # Step 8 — each direction scans under its own active strategy
-            if long_rules is not None:
-                positions = entry_scan(account_id, mode, ib, positions, long_rules, env, "long")
-                touch_turn_entry_scan(account_id, mode, ib, long_rules, env, "long")
-            if short_rules is not None:
-                positions = entry_scan(account_id, mode, ib, positions, short_rules, env, "short")
-                touch_turn_entry_scan(account_id, mode, ib, short_rules, env, "short")
+        if db.is_bot_enabled(account_id, mode):  # Step 8 - every active strategy_run scans independently
+            for strategy_run in db.list_strategy_runs(account_id):
+                if strategy_run["run_mode"] == "off":
+                    continue
+                strategy = db.get_strategy(strategy_run["strategy_id"])
+                if strategy is None:
+                    continue
+                rules = json.loads(strategy["rules_json"])
+                side = strategy["direction"]
+                if strategy_run["run_mode"] == "live":
+                    positions = entry_scan(account_id, mode, ib, positions, rules, env, side, strategy_run=strategy_run)
+                    touch_turn_entry_scan(account_id, mode, ib, rules, env, side, strategy_run=strategy_run)
+                elif strategy_run["run_mode"] == "virtual":
+                    virtual_entry_scan(account_id, mode, ib, rules, env, side, strategy_run)
+                    virtual_touch_turn_entry_scan(account_id, mode, ib, rules, env, side, strategy_run)
         else:
             log_decision(account_id, mode, {"event": "entries_paused", "reason": "bot_disabled"})
 
