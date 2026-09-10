@@ -6,9 +6,9 @@ locally using the exact same backtest_engine/perf logic the server's own
 run_backtest.py uses (shared via src/backtest_runner.py, so the two paths
 can never quietly drift apart), and reports the result back. Moves the
 CPU/memory cost of a backtest off the small always-on server entirely -
-that server also runs two IB Gateways and the live/paper trading engines
-around the clock, and has very little headroom to spare for a compute-
-heavy backtest on top of that.
+that server also runs the IB Gateway and live trading engine around the
+clock, and has very little headroom to spare for a compute-heavy backtest
+on top of that.
 
 Needs its own local copy of data/backtest_bars - backtest_engine.py only
 ever reads from that local cache (never IBKR directly), so a symbol/date

@@ -9,9 +9,6 @@
 <style>
   body { background:#f4f6f8; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .mode-tab { cursor:pointer; }
-  .mode-tab.active-paper { background:#0dcaf0 !important; color:#000 !important; }
-  .mode-tab.active-live { background:#dc3545 !important; color:#fff !important; }
   .pos-card { cursor:pointer; border-width:2px; }
   .pos-card.selected { border-color: var(--bs-primary); }
   .badge-status-HOLDING { background:#6c757d; }
@@ -46,12 +43,8 @@
     <strong>Read-only observability.</strong> This screen only ever narrates what the bot's own live logic already decided (see <code>src/decision_observer.py</code>) — nothing here can change a stop, trigger an order, or delay execution. It never runs the strategy itself.
   </div>
 
-  <div class="d-flex gap-2 mb-3">
-    <button id="tab-paper" class="btn btn-outline-info mode-tab fw-bold">PAPER</button>
-    <button id="tab-live" class="btn btn-outline-danger mode-tab fw-bold">LIVE — real money</button>
-  </div>
-
   <div class="d-flex flex-wrap align-items-center gap-3 mb-3 p-2 px-3 bg-white rounded shadow-sm small">
+    <span class="badge bg-danger">LIVE — real money</span>
     <span class="text-muted">Last cycle: <span id="dc-last-cycle" class="mono">-</span></span>
     <span class="text-muted">Next cycle in: <span id="dc-next-cycle-countdown" class="mono">-</span></span>
     <span id="dc-yfinance-status-badge" class="badge bg-secondary" title="Consecutive market-data fetch failures across different symbols">...</span>
@@ -129,7 +122,7 @@
 // (this page skips _header.html - no bot controls/IBKR creds card here,
 // nothing to wire those helpers into) - kept local so this page has zero
 // coupling to bot.html/trading.html's own control-panel JS.
-let currentMode = "paper";
+const currentMode = "live";  // paper trading removed - see db.MODES' own comment
 async function api(path) {
   const res = await fetch(path, { credentials: "same-origin" });
   if (res.status === 401) { window.location.href = "/login"; throw new Error("unauthenticated"); }
@@ -140,14 +133,6 @@ function modeApi(path) {
   const sep = path.includes("?") ? "&" : "?";
   return api(`${path}${sep}mode=${currentMode}`);
 }
-function setMode(mode) {
-  currentMode = mode;
-  document.getElementById("tab-paper").classList.toggle("active-paper", mode === "paper");
-  document.getElementById("tab-live").classList.toggle("active-live", mode === "live");
-  refreshAll();
-}
-document.getElementById("tab-paper").addEventListener("click", () => setMode("paper"));
-document.getElementById("tab-live").addEventListener("click", () => setMode("live"));
 
 function fmt(v, d) { return (v === null || v === undefined) ? "-" : Number(v).toFixed(d === undefined ? 2 : d); }
 function fmtR(v) { return (v === null || v === undefined) ? "-" : `${Number(v).toFixed(2)}R`; }
@@ -612,7 +597,7 @@ function drawReplayFrame() {
 
 window.addEventListener("resize", () => { if (replayData) drawReplayFrame(); });
 
-setMode("paper");
+refreshAll();
 setInterval(refreshOverview, 15000);
 setInterval(refreshCycleStatus, 15000);
 </script>

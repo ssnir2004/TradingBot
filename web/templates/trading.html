@@ -10,9 +10,6 @@
 <style>
   body { background:#f4f6f8; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .mode-tab { cursor:pointer; }
-  .mode-tab.active-paper { background:#0dcaf0 !important; color:#000 !important; }
-  .mode-tab.active-live { background:#dc3545 !important; color:#fff !important; }
   th[data-bs-toggle="tooltip"] { cursor: help; text-decoration: underline dotted; text-underline-offset: 3px; }
 </style>
 </head>
@@ -522,16 +519,12 @@ document.getElementById("broker-positions-body").addEventListener("click", async
   errorEl.textContent = "";
 
   const payload = { symbol, qty };
-  if (currentMode === "live") {
-    const typed = prompt(
-      `This immediately market-closes ${qty} share(s) of ${symbol} in your LIVE account — for profit or loss, ` +
-      `regardless of who opened it or when. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
-    );
-    if (typed !== CLOSE_LIVE_CONFIRM_PHRASE) { errorEl.textContent = "Not confirmed — nothing was closed."; return; }
-    payload.confirm = typed;
-  } else if (!confirm(`Market-close ${qty} share(s) of ${symbol} (PAPER)?`)) {
-    return;
-  }
+  const typed = prompt(
+    `This immediately market-closes ${qty} share(s) of ${symbol} in your LIVE account — for profit or loss, ` +
+    `regardless of who opened it or when. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
+  );
+  if (typed !== CLOSE_LIVE_CONFIRM_PHRASE) { errorEl.textContent = "Not confirmed — nothing was closed."; return; }
+  payload.confirm = typed;
 
   btn.disabled = true;
   try {
@@ -580,16 +573,12 @@ document.getElementById("btn-place-order").addEventListener("click", async () =>
     if (!Number.isFinite(atrMultiplier) || atrMultiplier <= 0) { errorEl.textContent = "Enter a valid positive ATR multiplier."; return; }
 
     const payload = { symbol, side, qty, limit_price: limitPrice, atr_period: atrPeriod, atr_multiplier: atrMultiplier };
-    if (currentMode === "live") {
-      const typed = prompt(
-        `This places a real LIVE bracket order: ${actionLabel} ${qty} share(s) of ${symbol} @ LIMIT $${limitPrice.toFixed(2)}, ` +
-        `with an ATR(${atrPeriod})×${atrMultiplier} trailing stop. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
-      );
-      if (typed !== CLOSE_LIVE_CONFIRM_PHRASE) { errorEl.textContent = "Not confirmed — nothing was ordered."; return; }
-      payload.confirm = typed;
-    } else if (!confirm(`Place a ${actionLabel} LIMIT $${limitPrice.toFixed(2)} order with ATR(${atrPeriod})×${atrMultiplier} trailing stop for ${qty} share(s) of ${symbol} (PAPER)?`)) {
-      return;
-    }
+    const typed = prompt(
+      `This places a real LIVE bracket order: ${actionLabel} ${qty} share(s) of ${symbol} @ LIMIT $${limitPrice.toFixed(2)}, ` +
+      `with an ATR(${atrPeriod})×${atrMultiplier} trailing stop. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
+    );
+    if (typed !== CLOSE_LIVE_CONFIRM_PHRASE) { errorEl.textContent = "Not confirmed — nothing was ordered."; return; }
+    payload.confirm = typed;
 
     btn.disabled = true;
     try {
@@ -610,15 +599,11 @@ document.getElementById("btn-place-order").addEventListener("click", async () =>
   }
 
   const payload = { symbol, side, qty };
-  if (currentMode === "live") {
-    const typed = prompt(
-      `This immediately places a LIVE market order to ${actionLabel} ${qty} share(s) of ${symbol}. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
-    );
-    if (typed !== CLOSE_LIVE_CONFIRM_PHRASE) { errorEl.textContent = "Not confirmed — nothing was ordered."; return; }
-    payload.confirm = typed;
-  } else if (!confirm(`Place a ${actionLabel} order for ${qty} share(s) of ${symbol} (PAPER)?`)) {
-    return;
-  }
+  const typed = prompt(
+    `This immediately places a LIVE market order to ${actionLabel} ${qty} share(s) of ${symbol}. Type "${CLOSE_LIVE_CONFIRM_PHRASE}" to confirm:`
+  );
+  if (typed !== CLOSE_LIVE_CONFIRM_PHRASE) { errorEl.textContent = "Not confirmed — nothing was ordered."; return; }
+  payload.confirm = typed;
 
   btn.disabled = true;
   try {

@@ -1,9 +1,9 @@
 """Dashboard web app: login, bot start/stop/emergency-flatten controls, live
-positions/trades/performance views, and the multi-strategy switcher — for
-BOTH the paper and live engines at once, selected per-request via a `mode`
-query param (the frontend has a Paper/Live tab). Reads and writes the same
-SQLite DB the two trading services (run_service.py --mode paper/live) use;
-it never talks to IBKR directly, so it can safely run as a separate process.
+positions/trades/performance views, and the multi-strategy switcher for the
+live engine (paper trading has been removed - see db.MODES' own comment).
+Reads and writes the same SQLite DB the trading service (run_service.py)
+uses; it never talks to IBKR directly, so it can safely run as a separate
+process.
 """
 import asyncio
 import io
@@ -336,9 +336,9 @@ def decision_center_page(request: Request):
     active per side (long/short) - see src/decision_observer.py's own
     module docstring for the "never affects a trading decision"
     guarantee. Same viewer-redirect precedent as /optimization/
-    /telemetry: this reads real paper/live position data (not just
-    backtest results), so a viewer account is redirected to /backtest
-    exactly like every other operational screen."""
+    /telemetry: this reads real live position data (not just backtest
+    results), so a viewer account is redirected to /backtest exactly
+    like every other operational screen."""
     if not db.any_users_exist():
         return RedirectResponse("/setup", status_code=303)
     username = read_session(request)
@@ -671,13 +671,12 @@ async def api_gateway_reinitialize(request: Request, mode: str = Depends(require
                 "Gateway is restarting. Flatten them first."
             ),
         )
-    if mode == "live":
-        body = await request.json()
-        if body.get("confirm") != DISCONNECT_LIVE_CONFIRM_PHRASE:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Type '{DISCONNECT_LIVE_CONFIRM_PHRASE}' to confirm reinitializing LIVE.",
-            )
+    body = await request.json()
+    if body.get("confirm") != DISCONNECT_LIVE_CONFIRM_PHRASE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Type '{DISCONNECT_LIVE_CONFIRM_PHRASE}' to confirm reinitializing LIVE.",
+        )
     try:
         gateway_control.reinitialize(mode)
     except gateway_control.GatewayControlError as exc:
@@ -1469,9 +1468,8 @@ def api_run_prefilter(account_id: int = Depends(require_account), user: str = De
     """On-demand gap scan — the same scan the scheduler runs every 5
     minutes (9:00-12:55 ET, see run_service.py's "prefilter" job),
     triggered right now instead of waiting for the next scheduled slot.
-    Mode-agnostic like the scan itself: writes the same watchlist to both
-    paper and live. Takes a while (scans the whole S&P 500 via yfinance) —
-    the request blocks until it's done."""
+    Takes a while (scans the whole S&P 500 via yfinance) — the request
+    blocks until it's done."""
     result = morning_prefilter.run_scan(morning_prefilter.DEFAULT_MIN_GAP_PCT, morning_prefilter.DEFAULT_MIN_PRICE, False)
     if result.get("success"):
         cycle.scan_watchlist_filters(account_id)
@@ -1743,10 +1741,9 @@ async def api_update_strategy(strategy_id: int, request: Request, account_id: in
     return {"ok": True}
 
 
-# Strategies are shared across paper AND live — activating one takes effect
-# on the live engine immediately too. A typed confirmation is required only
-# for the highest tier (aggressive), matching the same speed-bump pattern
-# used for editing LIVE risk sizing.
+# Activating a strategy takes effect on the live engine immediately. A
+# typed confirmation is required only for the highest tier (aggressive),
+# matching the same speed-bump pattern used for editing LIVE risk sizing.
 ACTIVATE_AGGRESSIVE_CONFIRM_PHRASE = "ok"
 
 

@@ -13,9 +13,6 @@
   textarea.rules-editor { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; min-height: 320px; }
   .hist-bar-track { height: 18px; background:#e9ecef; border-radius:4px; overflow:hidden; }
   .hist-bar { height:100%; }
-  .mode-tab { cursor:pointer; }
-  .mode-tab.active-paper { background:#0dcaf0 !important; color:#000 !important; }
-  .mode-tab.active-live { background:#dc3545 !important; color:#fff !important; }
   th[data-bs-toggle="tooltip"] { cursor: help; text-decoration: underline dotted; text-underline-offset: 3px; }
   /* Candidates table: whole columns hide when the strategy that owns this
      tab isn't the model that needs them - see renderCandidatesTable. */
@@ -41,7 +38,7 @@
     <div class="col-12">
       <div class="card">
         <div class="card-header d-flex justify-content-between align-items-center">
-          <span>Risk Settings (<span id="risk-mode-label">PAPER</span>)</span>
+          <span>Risk Settings (<span id="risk-mode-label">LIVE</span>)</span>
           <button id="btn-save-risk" class="btn btn-sm btn-primary">Save</button>
         </div>
         <div class="card-body">

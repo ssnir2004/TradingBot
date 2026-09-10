@@ -1,12 +1,17 @@
-// Shared across bot.html and trading.html: fetch helpers, formatters, the
-// chart modal, and every card in the common header partial (_header.html —
-// mode tabs, bot status/controls, Gateway Connection, Account, My Gateway,
-// My IBKR Login). Each page's own inline <script> defines a page-specific
-// refreshAll() that this file's setMode()/the periodic timer call by name —
-// load this file BEFORE the page's own script.
+// Shared across strategies.html and trading.html: fetch helpers,
+// formatters, the chart modal, and every card in the common header
+// partial (_header.html — bot status/controls, Gateway Connection,
+// Account, My Gateway, My IBKR Login). Each page's own inline <script>
+// defines a page-specific refreshAll() that this file's periodic timer
+// calls by name — load this file BEFORE the page's own script.
+//
+// Paper trading has been removed (see db.MODES' own comment) - currentMode
+// is always "live" now (kept as a variable, not inlined everywhere,
+// because modeApi's callers and every LIVE-confirm-phrase gate throughout
+// this file and each page's own script still read it explicitly).
 const POLL_MS = 5000;
 const CLOSE_LIVE_CONFIRM_PHRASE = "ok";
-let currentMode = "live";
+const currentMode = "live";
 let nextCycleAtMs = null;
 let isAdmin = false;
 
@@ -44,18 +49,6 @@ function sideBadge(side) {
     ? '<span class="badge bg-danger">SHORT</span>'
     : '<span class="badge bg-primary">LONG</span>';
 }
-
-// ---------------------------------------------------------------- mode ---
-function setMode(mode) {
-  currentMode = mode;
-  document.getElementById("tab-paper").classList.toggle("active-paper", mode === "paper");
-  document.getElementById("tab-live").classList.toggle("active-live", mode === "live");
-  document.getElementById("mode-hint").textContent = mode.toUpperCase();
-  document.getElementById("mode-hint").className = "fw-bold " + (mode === "live" ? "text-danger" : "text-info");
-  refreshAll();  // defined by the current page's own script
-}
-document.getElementById("tab-paper").addEventListener("click", () => setMode("paper"));
-document.getElementById("tab-live").addEventListener("click", () => setMode("live"));
 
 // ------------------------------------------------------------- status ---
 async function refreshStatus() {
@@ -234,16 +227,12 @@ document.getElementById("btn-gw-disconnect").addEventListener("click", async () 
   const errorEl = document.getElementById("gw-error");
   errorEl.textContent = "";
   const payload = {};
-  if (currentMode === "live") {
-    const typed = prompt(
-      'This stops the LIVE Gateway AND trading engine so you can log into TWS/Mobile with the same account.\n' +
-      'Type "ok" to confirm:'
-    );
-    if (typed !== "ok") { errorEl.textContent = "Not confirmed — nothing was disconnected."; return; }
-    payload.confirm = typed;
-  } else if (!confirm("Disconnect the PAPER Gateway and trading engine so you can log into TWS/Mobile?")) {
-    return;
-  }
+  const typed = prompt(
+    'This stops the LIVE Gateway AND trading engine so you can log into TWS/Mobile with the same account.\n' +
+    'Type "ok" to confirm:'
+  );
+  if (typed !== "ok") { errorEl.textContent = "Not confirmed — nothing was disconnected."; return; }
+  payload.confirm = typed;
   try {
     await modeApi("/api/gateway/disconnect", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
@@ -302,16 +291,12 @@ document.getElementById("btn-gw-reinit").addEventListener("click", async () => {
   const errorEl = document.getElementById("gw-error");
   errorEl.textContent = "";
   const payload = {};
-  if (currentMode === "live") {
-    const typed = prompt(
-      'This fully reinitializes the LIVE Gateway: stops the engine + Gateway, then starts the Gateway back up.\n' +
-      'Blocked while any LIVE position is open. Type "ok" to confirm:'
-    );
-    if (typed !== "ok") { errorEl.textContent = "Not confirmed — nothing was reinitialized."; return; }
-    payload.confirm = typed;
-  } else if (!confirm("Fully reinitialize the PAPER Gateway (stop engine + Gateway, then start the Gateway back up)?")) {
-    return;
-  }
+  const typed = prompt(
+    'This fully reinitializes the LIVE Gateway: stops the engine + Gateway, then starts the Gateway back up.\n' +
+    'Blocked while any LIVE position is open. Type "ok" to confirm:'
+  );
+  if (typed !== "ok") { errorEl.textContent = "Not confirmed — nothing was reinitialized."; return; }
+  payload.confirm = typed;
   try {
     await modeApi("/api/gateway/reinitialize", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
@@ -339,18 +324,14 @@ async function refreshMyGateway() {
   try {
     const s = await api("/api/my_gateway/status");
     const badge = document.getElementById("my-gw-badge");
-    const bothTrading = s.paper.engine_active && s.live.engine_active;
-    const bothConnected = s.paper.port_listening && s.live.port_listening;
-    const anyStarting = s.paper.gateway_active || s.live.gateway_active;
     let label, cls;
-    if (bothTrading) { label = "Trading"; cls = "bg-success"; }
-    else if (bothConnected) { label = "Connected — click Resume Trading"; cls = "bg-info text-dark"; }
-    else if (anyStarting) { label = "Connecting… check your phone for a 2FA approval"; cls = "bg-warning text-dark"; }
+    if (s.live.engine_active) { label = "Trading"; cls = "bg-success"; }
+    else if (s.live.port_listening) { label = "Connected — click Resume Trading"; cls = "bg-info text-dark"; }
+    else if (s.live.gateway_active) { label = "Connecting… check your phone for a 2FA approval"; cls = "bg-warning text-dark"; }
     else { label = "Not connected"; cls = "bg-secondary"; }
     badge.textContent = label;
     badge.className = "badge " + cls;
-    document.getElementById("my-gw-detail").textContent =
-      fmtGwLine("paper", s.paper) + " | " + fmtGwLine("live", s.live);
+    document.getElementById("my-gw-detail").textContent = fmtGwLine("live", s.live);
   } catch (e) {
     errorEl.textContent = "";  // stay quiet on transient poll errors, only show action-triggered ones
   }
@@ -758,7 +739,7 @@ document.addEventListener("click", (e) => {
 document.addEventListener("DOMContentLoaded", async () => {
   document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(el => new bootstrap.Tooltip(el));
   await refreshMe();
-  setMode("live");  // triggers the first refreshAll() via setMode
+  refreshAll();  // defined by the current page's own script
   setInterval(() => refreshAll(), POLL_MS);
   setInterval(updateCountdown, 1000);
 });

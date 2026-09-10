@@ -6,12 +6,12 @@
     <div class="col-12">
       <div class="card">
         <div class="card-header d-flex justify-content-between align-items-center">
-          <span>My IBKR Login <span class="badge bg-secondary fw-normal">not tied to Paper/Live below — one login covers both</span></span>
+          <span>My IBKR Login</span>
           <span id="ibkr-creds-badge" class="badge bg-secondary">...</span>
         </div>
         <div class="card-body">
           <div class="small text-muted mb-2">
-            Your own IBKR username/password — only you enter it, no one else (including the admin) sees it. Stored encrypted. IBKR ties every paper account to its parent live account under the same login, so one entry here covers both tabs above.
+            Your own IBKR username/password — only you enter it, no one else (including the admin) sees it. Stored encrypted.
           </div>
           <div class="row g-2 align-items-end">
             <div class="col-6 col-md-4">
@@ -41,7 +41,7 @@
         </div>
         <div class="card-body">
           <div class="small text-muted mb-2">
-            Starts your own IB Gateway processes (paper + live) using the IBKR login saved above. After clicking Connect, approve the 2FA push on your own phone — can take a minute. Once connected, click "Resume Trading" to actually let the bot trade on your account.
+            Starts your own IB Gateway process using the IBKR login saved above. After clicking Connect, approve the 2FA push on your own phone — can take a minute. Once connected, click "Resume Trading" to actually let the bot trade on your account.
           </div>
           <div id="my-gw-detail" class="small mono text-muted mb-2">-</div>
           <div class="d-flex gap-2">
@@ -55,14 +55,9 @@
     </div>
   </div>
 
-  <!-- Paper/Live tabs: both engines always run; this only selects which one's data you're viewing/controlling. -->
-  <div class="d-flex gap-2 mb-3">
-    <button id="tab-paper" class="btn btn-outline-info mode-tab fw-bold">PAPER</button>
-    <button id="tab-live" class="btn btn-outline-danger mode-tab fw-bold">LIVE — real money</button>
-  </div>
-
   <div class="d-flex flex-wrap align-items-center justify-content-between mb-4 p-3 bg-white rounded shadow-sm gap-3">
     <div class="d-flex align-items-center gap-3">
+      <span class="badge bg-danger fs-6">LIVE — real money</span>
       <span id="status-badge" class="badge bg-secondary fs-6">...</span>
       <span class="text-muted small">Last cycle: <span id="last-cycle" class="mono">-</span></span>
       <span class="text-muted small">Next cycle in: <span id="next-cycle-countdown" class="mono">-</span></span>
@@ -75,9 +70,8 @@
     </div>
   </div>
   <div class="small text-muted mb-4">
-    Controls above apply only to the selected tab (<span id="mode-hint" class="fw-bold">PAPER</span>) — paper and live run independently.
-    "Pause new entries" stops that engine from opening new positions but keeps managing stops/trailing on anything already open.
-    "Flatten all now" is the emergency button — it market-sells every open position in this mode immediately, on the next ~20s check.
+    "Pause new entries" stops the engine from opening new positions but keeps managing stops/trailing on anything already open.
+    "Flatten all now" is the emergency button — it market-sells every open position immediately, on the next ~20s check.
   </div>
 
   <div class="row g-3 mb-3">
