@@ -2453,60 +2453,62 @@ def _orb_watchlist_filters(detail: dict, rules: dict) -> dict:
 
 
 def scan_watchlist_filters(account_id: int):
-    """Evaluates every watchlist symbol's entry filters, for whichever
-    side(s) currently have an active strategy, and stores a snapshot for
-    the dashboard's Watchlist table — independent of entry_scan, which
-    stops early once the day's trade/position caps are hit and so doesn't
-    necessarily check every symbol. Pure yfinance, no IBKR connection
-    needed. Mode-agnostic like morning_prefilter (paper and live share the
-    same watchlist and market data), so this runs once and writes the same
-    snapshot to both modes — see run_service.py, which schedules it from
-    the live instance only. A side with no active strategy is skipped —
-    there's no criteria to check its candidates against.
+    """Evaluates every watchlist symbol's entry filters, for every strategy
+    that's currently virtual or live (see strategy_runs' own schema
+    comment, src/db.py), and stores a snapshot for the dashboard's
+    Watchlist table — independent of entry_scan, which stops early once
+    the day's trade/position caps are hit and so doesn't necessarily check
+    every symbol. Pure yfinance, no IBKR connection needed. Mode-agnostic
+    like morning_prefilter (paper and live share the same watchlist and
+    market data), so this runs once and writes the same snapshot to both
+    modes — see run_service.py, which schedules it from the live instance
+    only. A strategy_run that's 'off' is skipped - there's no criteria to
+    check its candidates against.
 
-    Dispatches per-side to the classic D1-D3/I1-I3 evaluator or the ORB
-    one depending on THAT side's own active strategy's rules (same
-    "opening_range" key check entry_scan uses) - long and short can each
-    have a different model active at once, so results carries a "model"
-    tag per row ("classic"/"orb") the dashboard uses to show only the
+    Dispatches per strategy to the classic D1-D3/I1-I3 evaluator, the ORB
+    one, or Touch & Turn's own, depending on THAT strategy's own rules
+    (same "opening_range"/"opening_candle" key checks entry_scan/touch_
+    turn_entry_scan use) - several strategies can each have a different
+    model active at once, so results carries a "model" tag per row
+    ("classic"/"orb"/"touch_turn") the dashboard uses to show only the
     columns relevant to whichever strategy produced that row, instead of
-    hard-coding one filter set for the whole table."""
+    hard-coding one filter set for the whole table. Every row also carries
+    its own strategy_id, so a per-strategy dashboard sheet can filter this
+    same shared snapshot down to just its own candidates instead of
+    needing a separate fetch/scan per strategy."""
     status = time_gate()
     if status in ("weekend", "too_early", "closed"):
         return
 
     results = []
-    for side in db.DIRECTIONS:
-        rules = db.get_active_rules(account_id, side)
-        if rules is None:
+    for strategy_run in db.list_strategy_runs(account_id):
+        if strategy_run["run_mode"] == "off":
             continue
-        if "opening_candle" in rules:
-            # Touch & Turn doesn't fit this table's "continuously re-check
-            # every candidate" model at all - its own signal is evaluated
-            # ONCE right after the opening candle closes, and a pass
-            # places a resting order rather than something with a
-            # per-tick pass/fail to show (see cycle.touch_turn_entry_scan/
-            # src/touch_turn.py). Skipped here entirely rather than
-            # falling through to the classic evaluator below, which would
-            # either error or silently misread its unrelated rules -
-            # dedicated Watchlist UI support for this model is a known
-            # follow-up, not built yet.
+        strategy_id = strategy_run["strategy_id"]
+        strategy = db.get_strategy(strategy_id)
+        if strategy is None:
             continue
+        rules = json.loads(strategy["rules_json"])
+        side = strategy["direction"]
+        is_touch_turn = "opening_candle" in rules
         is_orb = "opening_range" in rules
         # Same signal_side-vs-side watchlist scoping as entry_scan (see
         # its own comment) - a fade strategy's candidates come from its
         # signal direction's gap-scan survivors, not its trade side's.
         watchlist_direction = rules.get("signal_side") or side
         for row in db.get_watchlist(account_id, "paper", direction=watchlist_direction, universe=_strategy_universe(rules)):
-            if is_orb:
+            if is_touch_turn:
+                detail = _evaluate_touch_turn_entry(account_id, "paper", row["symbol"], rules, side)
+                results.append({"symbol": row["symbol"], "gap_pct": row["gap_pct"], "model": "touch_turn", "strategy_id": strategy_id, **detail})
+            elif is_orb:
                 detail = _evaluate_orb_entry(account_id, "paper", row["symbol"], rules, side)
                 results.append({
-                    "symbol": row["symbol"], "gap_pct": row["gap_pct"], "model": "orb",
+                    "symbol": row["symbol"], "gap_pct": row["gap_pct"], "model": "orb", "strategy_id": strategy_id,
                     **detail, **_orb_watchlist_filters(detail, rules),
                 })
             else:
                 detail = _evaluate_entry_filters(account_id, "paper", row["symbol"], rules, side)
-                results.append({"symbol": row["symbol"], "gap_pct": row["gap_pct"], "model": "classic", **detail})
+                results.append({"symbol": row["symbol"], "gap_pct": row["gap_pct"], "model": "classic", "strategy_id": strategy_id, **detail})
 
     for mode in db.MODES:
         db.update_watchlist_filters(account_id, mode, results)
