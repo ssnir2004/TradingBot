@@ -152,6 +152,54 @@ def check_stop_outs(account_id: int, mode: str, ib, positions: list[dict]) -> li
     return [p for p in positions if p["symbol"] not in stopped_symbols]
 
 
+def check_virtual_stop_outs(account_id: int, strategy_id: int, strategy_label: str, positions: list[dict]) -> list[dict]:
+    """check_stop_outs' counterpart for a strategy_run's simulated
+    positions - there's no real broker order to have filled (no
+    ib.fills() to check), so this instead directly compares each virtual
+    position's own stop_price against the CURRENT price each tick: a long
+    is stopped out once price <= stop_price, a short once price >=
+    stop_price. Same per-cycle (not truly intrabar) sampling granularity
+    every other live price check in this file already accepts.
+
+    The simulated exit/fill price is the worse of (stop_price, the
+    current tick's price) - i.e. exactly stop_price under normal
+    conditions (mirrors a real STOP order filling at its trigger level),
+    or the actual (worse) price if this tick's price already gapped
+    through the stop, same as a real stop would slip in that scenario -
+    never assumes a BETTER fill than what actually happened.
+
+    Must run before manage_virtual_position each tick (mirrors check_stop_
+    outs' own Step-3-before-Step-4 ordering in run_cycle) - a position
+    that's already stopped out has nothing left to manage."""
+    if not positions:
+        return positions
+
+    stopped_symbols = set()
+    for pos in positions:
+        side = pos.get("side", "long")
+        price = _current_price(pos["symbol"])
+        if price is None:
+            continue
+        stop_price = pos["stop_price"]
+        stopped = (price <= stop_price) if side == "long" else (price >= stop_price)
+        if not stopped:
+            continue
+        exit_price = min(price, stop_price) if side == "long" else max(price, stop_price)
+        pnl = ((exit_price - pos["entry_price"]) if side == "long" else (pos["entry_price"] - exit_price)) * pos["qty"]
+        db.record_virtual_trade(account_id, strategy_id, {
+            "symbol": pos["symbol"], "side": side, "entry_price": pos["entry_price"],
+            "entry_time_iso": pos["entry_time_iso"], "exit_price": exit_price,
+            "exit_time_iso": datetime.now(ET).isoformat(timespec="seconds"), "qty": pos["qty"],
+            "final_r": pos.get("r_multiple"), "pnl_dollars": pnl, "exit_reason": "stop_out",
+        })
+        db.remove_virtual_position(account_id, strategy_id, pos["symbol"])
+        notify(f"[VIRTUAL] {strategy_label}: STOP {pos['symbol']}", f"exit ${exit_price:.2f}, P&L ${pnl:+.2f}", "default")
+        log_decision(account_id, "live", {"event": "stop_out", "symbol": pos["symbol"], "side": side, "fill_price": exit_price, "pnl": pnl, "strategy_id": strategy_id, "virtual": True})
+        stopped_symbols.add(pos["symbol"])
+
+    return [p for p in positions if p["symbol"] not in stopped_symbols]
+
+
 # --------------------------------------------------------- order helpers ---
 def _qualify(ib, symbol: str):
     (contract,) = ib.qualifyContracts(Stock(symbol, "SMART", "USD"))
