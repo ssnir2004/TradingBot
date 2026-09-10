@@ -825,23 +825,7 @@ def api_cancel_price_trigger(trigger_id: int, mode: str = Depends(require_mode),
 
 @app.get("/api/positions")
 def api_positions(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
-    positions = db.get_open_positions(account_id, mode)
-    for pos in positions:
-        price = None
-        try:
-            price = cycle._current_price(pos["symbol"])
-        except Exception:
-            pass
-        side = pos.get("side", "long")
-        if side == "short":
-            risk_per_share = pos["initial_stop"] - pos["entry_price"]
-            move = (pos["entry_price"] - price) if price is not None else None
-        else:
-            risk_per_share = pos["entry_price"] - pos["initial_stop"]
-            move = (price - pos["entry_price"]) if price is not None else None
-        pos["current_price"] = price
-        pos["unrealized_r"] = (move / risk_per_share) if move is not None and risk_per_share > 0 else None
-    return positions
+    return [_enrich_position_with_price(p) for p in db.get_open_positions(account_id, mode)]
 
 
 # --------------------------------------------- Decision Intelligence Center
@@ -1795,6 +1779,87 @@ async def api_deactivate_strategy(strategy_id: int, account_id: int = Depends(re
     db.deactivate_strategy(account_id, strategy_id)
     _log_account_action(account_id, user, action="deactivate_strategy", strategy_id=strategy_id, name=strategy["name"])
     return {"ok": True}
+
+
+# ------------------------------------------------------------ strategy runs
+# The multi-strategy screen's own control surface - any number of
+# strategies can each independently be off/virtual/live (see strategy_runs'
+# own schema comment, src/db.py), unlike the single-active-strategy-per-
+# direction activate/deactivate endpoints above.
+@app.get("/api/strategy_runs")
+def api_list_strategy_runs(account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    return db.list_strategy_runs(account_id)
+
+
+@app.post("/api/strategy_runs/{strategy_id}")
+async def api_set_strategy_run(strategy_id: int, request: Request, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    strategy = db.get_strategy(strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    body = await request.json()
+    run_mode = body.get("run_mode")
+    if run_mode not in db.RUN_MODES:
+        raise HTTPException(status_code=400, detail=f"run_mode must be one of {db.RUN_MODES}")
+    # Same "type ok to confirm" gate activate_strategy already uses for an
+    # aggressive-rated strategy - going live carries the same real-money
+    # risk regardless of which control surface flips it on.
+    if run_mode == "live" and strategy["risk_rating"] == "aggressive":
+        if body.get("confirm") != ACTIVATE_AGGRESSIVE_CONFIRM_PHRASE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Type '{ACTIVATE_AGGRESSIVE_CONFIRM_PHRASE}' to confirm setting an aggressive strategy live.",
+            )
+    try:
+        db.set_strategy_run(
+            account_id, strategy_id, run_mode,
+            virtual_capital=body.get("virtual_capital"),
+            live_budget=body.get("live_budget"),
+            live_max_positions=body.get("live_max_positions"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    _log_account_action(account_id, user, action="set_strategy_run", strategy_id=strategy_id, name=strategy["name"], run_mode=run_mode)
+    return db.get_strategy_run(account_id, strategy_id)
+
+
+def _enrich_position_with_price(pos: dict) -> dict:
+    """current_price + unrealized_r for one position dict (real or
+    virtual - both share the same entry_price/initial_stop/side shape) -
+    shared by /api/positions and /api/strategy_runs/{id}/positions so the
+    two never compute this differently."""
+    price = None
+    try:
+        price = cycle._current_price(pos["symbol"])
+    except Exception:
+        pass
+    side = pos.get("side", "long")
+    if side == "short":
+        risk_per_share = pos["initial_stop"] - pos["entry_price"]
+        move = (pos["entry_price"] - price) if price is not None else None
+    else:
+        risk_per_share = pos["entry_price"] - pos["initial_stop"]
+        move = (price - pos["entry_price"]) if price is not None else None
+    pos["current_price"] = price
+    pos["unrealized_r"] = (move / risk_per_share) if move is not None and risk_per_share > 0 else None
+    return pos
+
+
+@app.get("/api/strategy_runs/{strategy_id}/positions")
+def api_strategy_run_positions(strategy_id: int, mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    """Real (this mode's positions.strategy_id) and virtual (mode-
+    independent) positions for one strategy, each enriched with current
+    price/R - real positions are strategy-tagged but still one-per-symbol
+    across every strategy (see positions' own primary key); virtual ones
+    are this strategy's own regardless of what any other strategy,
+    real or virtual, holds in the same symbol."""
+    real = [_enrich_position_with_price(p) for p in db.get_open_positions(account_id, mode) if p.get("strategy_id") == strategy_id]
+    virtual = [_enrich_position_with_price(p) for p in db.get_virtual_positions(account_id, strategy_id=strategy_id)]
+    return {"real": real, "virtual": virtual}
+
+
+@app.get("/api/strategy_runs/{strategy_id}/virtual_trades")
+def api_strategy_run_virtual_trades(strategy_id: int, account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    return db.get_virtual_trades(account_id, strategy_id=strategy_id)
 
 
 @app.get("/api/strategies/{strategy_id}/trade_diagnostics")
