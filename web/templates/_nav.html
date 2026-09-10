@@ -3,7 +3,7 @@
     <span class="navbar-brand mb-0 h1">TradingBot Dashboard</span>
     <div class="d-flex gap-2">
       {% if not is_viewer %}
-      <a href="/bot" class="btn btn-sm {{ 'btn-light' if active_page == 'bot' else 'btn-outline-light' }}">Bot</a>
+      <a href="/bot" class="btn btn-sm {{ 'btn-light' if active_page == 'bot' else 'btn-outline-light' }}">Strategies</a>
       <a href="/trading" class="btn btn-sm {{ 'btn-light' if active_page == 'trading' else 'btn-outline-light' }}">Trading</a>
       <a href="/decision_center" class="btn btn-sm {{ 'btn-light' if active_page == 'decision_center' else 'btn-outline-light' }}">Decision Center</a>
       {% endif %}

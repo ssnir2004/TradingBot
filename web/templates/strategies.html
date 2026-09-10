@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TradingBot — Bot</title>
+<title>TradingBot — Strategies</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 {% include "_theme.html" %}
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
@@ -17,17 +17,19 @@
   .mode-tab.active-paper { background:#0dcaf0 !important; color:#000 !important; }
   .mode-tab.active-live { background:#dc3545 !important; color:#fff !important; }
   th[data-bs-toggle="tooltip"] { cursor: help; text-decoration: underline dotted; text-underline-offset: 3px; }
-  /* Watchlist table: whole columns hide when no currently active strategy
-     (on either side) needs them, driven by classes JS toggles on
-     #watchlist-table based on which "model"(s) the API response's rows
-     actually carry - see refreshWatchlist. */
-  #watchlist-table.hide-classic [data-col="classic"],
-  #watchlist-table.hide-classic-rsi [data-col="classic-rsi"],
-  #watchlist-table.hide-orb [data-col="orb"],
-  #watchlist-table.hide-orb-confluence [data-col="orb-confluence"] { display: none; }
+  /* Candidates table: whole columns hide when the strategy that owns this
+     tab isn't the model that needs them - see renderCandidatesTable. */
+  .candidates-table.hide-classic [data-col="classic"],
+  .candidates-table.hide-classic-rsi [data-col="classic-rsi"],
+  .candidates-table.hide-orb [data-col="orb"],
+  .candidates-table.hide-orb-confluence [data-col="orb-confluence"] { display: none; }
   #strategy-info-body h6 { font-weight: 700; margin-top: 1rem; }
   #strategy-info-body h6:first-child { margin-top: 0; }
   #strategy-info-body p { white-space: pre-line; margin-bottom: 0.5rem; }
+  .run-mode-badge-off { background:#6c757d; }
+  .run-mode-badge-virtual { background:#0dcaf0; color:#000; }
+  .run-mode-badge-live { background:#dc3545; }
+  .strategy-tab-pane { min-height: 200px; }
 </style>
 </head>
 <body>
@@ -59,7 +61,7 @@
           </div>
           <div id="risk-error" class="text-danger small mt-2"></div>
           <div class="text-muted small mt-2">
-            Position size uses the lower of a risk-based size (Portfolio Value × Max Risk %, divided by the stop distance) and a cap of Max Position Size % of the active strategy.
+            Position size uses the lower of a risk-based size (Portfolio Value × Max Risk %, divided by the stop distance) and a cap of Max Position Size % of the strategy, further capped per-strategy by its own Live Budget / Live Max Positions below (live) or Virtual Capital (virtual).
             Saving on <strong>LIVE</strong> requires typing a confirmation phrase — it directly controls how much real money a single order can risk.
           </div>
         </div>
@@ -70,7 +72,7 @@
   <div class="row g-3 mb-3">
     <div class="col-lg-6">
       <div class="card h-100">
-        <div class="card-header">Today's Performance</div>
+        <div class="card-header">Today's Performance <span class="text-muted small fw-normal">(real fills, current mode tab)</span></div>
         <div class="card-body" id="perf-summary">Loading…</div>
       </div>
     </div>
@@ -85,66 +87,54 @@
   <div class="row g-3 mb-3">
     <div class="col-12">
       <div class="card h-100">
-        <div class="card-header">Open Positions</div>
+        <div class="card-header">All Open Positions <span class="text-muted small fw-normal">(real, current mode tab — includes manual/quick-trade entries with no strategy)</span></div>
         <div class="card-body p-0">
           <table class="table table-sm mb-0">
-            <thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>Stop</th><th>State</th><th>Unrealized R</th><th data-bs-toggle="tooltip" title="רווח/הפסד לא ממומש, כולל הערכת עמלת קניה ומכירה (${{ '%.2f'|format(default_commission_per_trade) }} לכל צד)">P&L</th><th data-bs-toggle="tooltip" title="דלג פעם אחת על הסגירה הכפויה בסוף היום">EOD</th></tr></thead>
-            <tbody id="positions-body"><tr><td colspan="10" class="text-center text-muted">Loading…</td></tr></tbody>
+            <thead><tr><th>Symbol</th><th>Strategy</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>Stop</th><th>State</th><th>Unrealized R</th><th data-bs-toggle="tooltip" title="רווח/הפסד לא ממומש, כולל הערכת עמלת קניה ומכירה (${{ '%.2f'|format(default_commission_per_trade) }} לכל צד)">P&L</th><th data-bs-toggle="tooltip" title="דלג פעם אחת על הסגירה הכפויה בסוף היום">EOD</th></tr></thead>
+            <tbody id="positions-body"><tr><td colspan="11" class="text-center text-muted">Loading…</td></tr></tbody>
           </table>
         </div>
       </div>
     </div>
   </div>
 
-  <div class="row g-3 mb-3">
-    <div class="col-12">
-      <div class="card">
-        <div class="card-header d-flex justify-content-between align-items-center">
-          <span>Watchlist (today) — live filter check</span>
-          <div class="d-flex align-items-center gap-2">
-            <span class="text-muted small">Checked: <span id="watchlist-checked" class="mono">-</span></span>
-            <button id="btn-run-prefilter" class="btn btn-sm btn-outline-primary">Run scan now</button>
-          </div>
-        </div>
-        <div class="small text-muted px-3 pt-2">
-          Sorted by how many of the independent sub-checks currently pass (best candidates first). <strong>The "Passed" badge counts sub-checks, not a live buy trigger</strong> — a green "✓ READY" badge means entry_scan's own trigger is active THIS scan tick (the exact breakout bar, or a retest hit - see src/orb.py); an orange badge means every independent sub-check passed but that trigger moment hasn't lined up (it's fleeting and can flicker tick to tick, even when everything else stays green). The gap scan itself runs on a schedule (9:00-12:55 ET, every 5 min) — "Run scan now" triggers it on demand instead of waiting. Only shows candidates for a direction with an active strategy — even a "✓ READY" symbol can go unbought (daily trade/position caps, or the bot being paused).
-        </div>
-        <div id="prefilter-error" class="text-danger small px-3"></div>
-        <div id="watchlist-active-params" class="row g-2 px-3 pb-2"></div>
-        <div class="card-body p-0" style="overflow-x:auto;">
-          <table class="table table-sm mb-0" id="watchlist-table">
-            <thead><tr>
-              <th>Symbol</th>
-              <th data-bs-toggle="tooltip" title="Long או Short">Side</th>
-              <th data-bs-toggle="tooltip" title="כמה מהבדיקות העצמאיות עברו - זה עדיין לא אומר שהבוט יקנה עכשיו! גם כשכולן ירוקות, חסר עדיין התנאי הסופי (הבר המדויק של הפריצה, או פגיעת retest) - ירוק מלא = זה כן מתקיים ברגע זה, כתום = רק הבדיקות העצמאיות">Passed</th>
-              <th data-col="classic" data-bs-toggle="tooltip" title="מעל שיא אתמול (Long) / מתחת לשפל אתמול (Short)">D1</th>
-              <th data-col="classic" data-bs-toggle="tooltip" title="סגירת אתמול מול SMA200">D2</th>
-              <th data-col="classic" data-bs-toggle="tooltip" title="gap מסגירת אתמול">D3</th>
-              <th data-col="classic" data-bs-toggle="tooltip" title="קיצון המסחר המוקדם (premarket)">I1</th>
-              <th data-col="classic" data-bs-toggle="tooltip" title="שיא/שפל תוך-יומי, או RSI(14)>50 - תלוי אסטרטגיה">I2</th>
-              <th data-col="classic" data-bs-toggle="tooltip" title="נפח מסחר יחסי לממוצע">I3</th>
-              <th data-col="orb" data-bs-toggle="tooltip" title="ORB: נפח מסחר יחסי (RVOL) מעל הסף">V1</th>
-              <th data-col="orb" data-bs-toggle="tooltip" title="ORB: תנודתיות (ATR%) מעל הסף המדורג לפי מחיר">V2</th>
-              <th data-col="orb" data-bs-toggle="tooltip" title="ORB: המחיר פרץ את רמת ה-opening range">Confirmed</th>
-              <th data-col="orb-confluence" data-bs-toggle="tooltip" title="ORB v2 בלבד: תנאי נוסף של RSI+מגמה">Confluence</th>
-              <th data-bs-toggle="tooltip" title="פער % מסגירה קודמת">Gap</th>
-              <th data-bs-toggle="tooltip" title="מחזור מסחר יחסי (Relative Volume)">RVOL</th>
-              <th data-col="orb" data-bs-toggle="tooltip" title="ORB: טווח תנודתיות יומי (ATR%)">ATR%</th>
-              <th data-col="classic-rsi" data-bs-toggle="tooltip" title="RSI(14) בנרות 5 דק' - מוצג רק כשה-I2 של האסטרטגיה מבוסס RSI">RSI</th>
-              <th data-bs-toggle="tooltip" title="מחיר נוכחי">Price</th>
-              <th data-bs-toggle="tooltip" title="הזמנת STOP אמיתית ב-IBKR שמתמלאת כשהמחיר מגיע ליעד - הבוט מנהל את הפוזיציה אחרי המילוי">Quick trade</th>
-            </tr></thead>
-            <tbody id="watchlist-body"><tr><td colspan="19" class="text-center text-muted">Loading…</td></tr></tbody>
-          </table>
-        </div>
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span>Strategy Runs <span class="badge bg-secondary fw-normal">run any number in parallel — virtual (simulated) or live (real money), independently</span></span>
+      <button id="btn-new-strategy" class="btn btn-sm btn-primary">+ New strategy</button>
+    </div>
+    <div class="small text-muted px-3 pt-2">
+      <strong>Off</strong> — no new entries, existing positions still managed to their own exit.
+      <strong>Virtual</strong> — fully simulated against real market prices, no broker order, tracked against its own Virtual Capital cap.
+      <strong>Live</strong> — real IBKR orders, capped by Live Budget ($) and/or Max Positions together (whichever hits first blocks the next entry). Any number of strategies can be Virtual or Live at the same time, even on the same side.
+    </div>
+    <div class="card-body p-0" style="overflow-x:auto;">
+      <table class="table table-sm mb-0 align-middle">
+        <thead><tr><th>Key</th><th>Name</th><th>Side</th><th>Risk</th><th>Mode</th><th style="min-width:150px;">Config</th><th></th><th class="text-end">Actions</th></tr></thead>
+        <tbody id="strategy-runs-body"><tr><td colspan="8" class="text-center text-muted">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <span>Strategy Sheets <span class="text-muted small fw-normal">one tab per strategy currently Virtual or Live — its own candidates, positions, and (virtual) trade history</span></span>
+      <div class="d-flex align-items-center gap-2">
+        <span class="text-muted small">Checked: <span id="watchlist-checked" class="mono">-</span></span>
+        <button id="btn-run-prefilter" class="btn btn-sm btn-outline-primary">Run scan now</button>
       </div>
+    </div>
+    <div id="prefilter-error" class="text-danger small px-3 pt-2"></div>
+    <div class="card-body">
+      <ul class="nav nav-tabs" id="strategy-tab-bar"></ul>
+      <div class="tab-content pt-3" id="strategy-tab-content"></div>
     </div>
   </div>
 
   <div class="row g-3 mb-3">
     <div class="col-lg-7">
       <div class="card h-100">
-        <div class="card-header">Recent Trades</div>
+        <div class="card-header">Recent Trades <span class="text-muted small fw-normal">(real fills, current mode tab)</span></div>
         <div class="card-body p-0" style="max-height:340px; overflow-y:auto;">
           <table class="table table-sm mb-0">
             <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Fill</th><th>Status</th></tr></thead>
@@ -163,22 +153,6 @@
           </table>
         </div>
       </div>
-    </div>
-  </div>
-
-  <div class="card mb-4">
-    <div class="card-header d-flex justify-content-between align-items-center">
-      <span>Strategies <span class="badge bg-secondary fw-normal">shared across paper &amp; live</span></span>
-      <button id="btn-new-strategy" class="btn btn-sm btn-primary">+ New strategy</button>
-    </div>
-    <div class="small text-muted px-3 pt-2">
-      At most one active strategy per direction — a long and a short strategy can be active and trading at the same time. Activating a strategy only deactivates others of the same direction; a direction can also have none active, in which case the bot skips it entirely.
-    </div>
-    <div class="card-body p-0">
-      <table class="table table-sm mb-0">
-        <thead><tr><th>Key</th><th>Name</th><th>Side</th><th>Risk</th><th>Active</th><th>Updated</th><th></th></tr></thead>
-        <tbody id="strategies-body"><tr><td colspan="7" class="text-center text-muted">Loading…</td></tr></tbody>
-      </table>
     </div>
   </div>
 
@@ -273,7 +247,7 @@
           <div class="text-muted small mb-2">
             קו קניה = הוראת STOP BUY שנפתחת ברגע שהמחיר עולה עד אליו (פוזיציית LONG חדשה).
             קו מכירה = הוראת STOP SELL שנפתחת ברגע שהמחיר יורד עד אליו (פוזיציית SHORT חדשה).
-            ברגע שההוראה תתמלא, הבוט יתחיל לנהל את הפוזיציה (סטופ, טריילינג) בדיוק כמו פוזיציה שנפתחה ע"י אסטרטגיה.
+            ברגע שההוראה תתמלא, הבוט יתחיל לנהל את הפוזיציה (סטופ, טריילינג) בדיוק כמו פוזיציה שנפתחה ע"י אסטרטגיה. הוראה כזו אינה משויכת לאסטרטגיה כלשהי.
           </div>
           <div class="row g-2 align-items-end">
             <div class="col-auto">
@@ -314,6 +288,7 @@
 <script src="/static/shared.js"></script>
 <script>
 const LIVE_RISK_CONFIRM_PHRASE = "ok";
+const AGGRESSIVE_CONFIRM_PHRASE = "ok";
 const COMMISSION_PER_TRADE = {{ default_commission_per_trade }};
 let editingStrategyId = null;
 let strategyModal;
@@ -362,16 +337,25 @@ document.getElementById("btn-save-risk").addEventListener("click", async () => {
   }
 });
 
+let strategiesCache = {};  // id -> strategy (from /api/strategies)
+
+function strategyLabel(strategyId) {
+  const s = strategiesCache[strategyId];
+  return s ? (s.key ? `${s.key} — ${s.name}` : s.name) : (strategyId ? `#${strategyId}` : "—");
+}
+
 async function refreshPositions() {
   const rows = await modeApi("/api/positions");
   const body = document.getElementById("positions-body");
-  if (!rows.length) { body.innerHTML = '<tr><td colspan="10" class="text-center text-muted">No open positions</td></tr>'; return; }
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="11" class="text-center text-muted">No open positions</td></tr>'; return; }
   body.innerHTML = rows.map(p => {
     const grossPnl = (p.current_price === null || p.current_price === undefined) ? null
       : (p.side === "short" ? (p.entry_price - p.current_price) : (p.current_price - p.entry_price)) * p.qty;
     const netPnl = grossPnl === null ? null : grossPnl - COMMISSION_PER_TRADE * 2;
     return `<tr>
-    <td>${symbolLink(p.symbol)}</td><td>${sideBadge(p.side)}</td><td>${p.qty}</td><td>${fmtMoney(p.entry_price)}</td>
+    <td>${symbolLink(p.symbol)}</td>
+    <td class="small">${strategyLabel(p.strategy_id)}</td>
+    <td>${sideBadge(p.side)}</td><td>${p.qty}</td><td>${fmtMoney(p.entry_price)}</td>
     <td>${fmtMoney(p.current_price)}</td>
     <td>${fmtMoney(p.stop_price)} <button class="btn btn-sm btn-outline-secondary edit-stop-btn" data-symbol="${p.symbol}" data-current="${p.stop_price}" title="Edit stop">&#9998;</button></td>
     <td class="small" title="אין הוראת Take Profit קבועה - הרווח נלקח בהדרגה לפי אחוזי R, ראה פאנל האסטרטגיה למעלה">${p.state}</td><td>${fmtR(p.unrealized_r)}</td>
@@ -462,105 +446,254 @@ function filterCell(r, key, col) {
 }
 
 const RISK_BADGE_CLASS = { conservative: "bg-info text-dark", moderate: "bg-warning text-dark", aggressive: "bg-danger" };
+const RUN_MODE_LABEL = { off: "Off", virtual: "Virtual", live: "Live" };
 
-async function refreshActiveStrategyParams() {
-  const list = await api("/api/strategies");
-  const el = document.getElementById("watchlist-active-params");
-  const sides = [["Long", list.find(s => s.is_active && s.direction === "long")],
-                 ["Short", list.find(s => s.is_active && s.direction === "short")]];
-
-  const parts = await Promise.all(sides.map(async ([label, s]) => {
-    if (!s) return `<div class="col-md-6"><span class="text-muted small">${label}: no active strategy</span></div>`;
-    const full = await api(`/api/strategies/${s.id}`);
-    const r = full.rules;
-
-    if ("opening_range" in r) {
-      const vf = r.volatility_filters;
-      const models = Object.entries(r.entry_models || {})
-        .filter(([, cfg]) => cfg && cfg.enabled)
-        .map(([name, cfg]) => cfg.target_rr ? `${name} (${cfg.target_rr}R)` : name)
-        .join(", ") || "none";
-      return `<div class="col-md-6">
-        <div class="small mb-1"><strong>${label}: ${full.name}</strong>
-          <span class="badge ${RISK_BADGE_CLASS[full.risk_rating] || "bg-secondary"}">${full.risk_rating}</span>
-          <span class="badge bg-light text-dark border">ORB</span></div>
-        <table class="table table-sm mb-0 mono" style="font-size:0.8rem;">
-          <tbody>
-            <tr><td class="text-muted">V1 RVOL</td><td>x${vf.V1_rvol_min} (${vf.V1_rvol_lookback_days}d)</td><td class="text-muted">V2 ATR</td><td>tiered by price</td></tr>
-            <tr><td class="text-muted">Entry models</td><td colspan="3">${models}</td></tr>
-            <tr><td class="text-muted">Risk/trade</td><td>${r.risk.max_risk_per_trade_pct}%</td><td class="text-muted">Max size</td><td>${r.risk.max_position_size_pct_of_portfolio}%</td></tr>
-            <tr><td class="text-muted">Max positions</td><td>${r.risk.max_concurrent_positions}</td><td class="text-muted">OR window</td><td>${r.opening_range.session_open_et} +${r.opening_range.or_timeframe}</td></tr>
-            <tr><td class="text-muted">Entry window</td><td>${r.time_filter ? `${r.time_filter.earliest_entry_et}-${r.time_filter.latest_entry_et}` : "none"}</td><td class="text-muted">Confluence gate</td><td>${r.entry_confluence ? "on" : "off"}</td></tr>
-          </tbody>
-        </table>
-      </div>`;
-    }
-
-    if ("opening_candle" in r) {
-      return `<div class="col-md-6">
-        <div class="small mb-1"><strong>${label}: ${full.name}</strong>
-          <span class="badge ${RISK_BADGE_CLASS[full.risk_rating] || "bg-secondary"}">${full.risk_rating}</span>
-          <span class="badge bg-light text-dark border">Touch &amp; Turn</span></div>
-        <table class="table table-sm mb-0 mono" style="font-size:0.8rem;">
-          <tbody>
-            <tr><td class="text-muted">Liquidity gate</td><td colspan="3">ATR(${r.liquidity_filter.atr_period}) x${r.liquidity_filter.atr_multiplier}</td></tr>
-            <tr><td class="text-muted">Fib target</td><td>${r.fib_targets.long_target_pct}% / ${r.fib_targets.short_target_pct}%</td><td class="text-muted">R:R</td><td>1:${r.reward_risk_ratio}</td></tr>
-            <tr><td class="text-muted">Risk/trade</td><td>${r.risk.max_risk_per_trade_pct}%</td><td class="text-muted">Max size</td><td>${r.risk.max_position_size_pct_of_portfolio}%</td></tr>
-            <tr><td class="text-muted">Max positions</td><td>${r.risk.max_concurrent_positions}</td><td class="text-muted">Entry window</td><td>${r.opening_candle.session_open_et} +${r.time_filter.entry_window_minutes}m</td></tr>
-          </tbody>
-        </table>
-      </div>`;
-    }
-
-    const d3Key = Object.keys(r.daily_filters).find(k => k.startsWith("D3_"));
-    const rsiPeriod = r.intraday_filters.I2_rsi_period || 14;
-    const emaPeriod = r.intraday_filters.I2_ema_period || 9;
-    const i2 = r.intraday_filters.I2_rsi_above !== undefined
-      ? `RSI(${rsiPeriod})>${r.intraday_filters.I2_rsi_above}`
-      : r.intraday_filters.I2_rsi_below !== undefined
-      ? `RSI(${rsiPeriod})<${r.intraday_filters.I2_rsi_below}`
-      : r.intraday_filters.I2_ema_above
-      ? `above EMA(${emaPeriod})`
-      : r.intraday_filters.I2_ema_below
-      ? `below EMA(${emaPeriod})`
-      : "new HOD/LOD";
-    return `<div class="col-md-6">
-      <div class="small mb-1"><strong>${label}: ${full.name}</strong>
-        <span class="badge ${RISK_BADGE_CLASS[full.risk_rating] || "bg-secondary"}">${full.risk_rating}</span></div>
-      <table class="table table-sm mb-0 mono" style="font-size:0.8rem;">
-        <tbody>
-          <tr><td class="text-muted">D3 gap</td><td>${r.daily_filters[d3Key]}%</td><td class="text-muted">I3 RVOL</td><td>x${r.intraday_filters.I3_rvol_min} (${r.intraday_filters.I3_rvol_lookback_days}d)</td></tr>
-          <tr><td class="text-muted">I2</td><td colspan="3">${i2}</td></tr>
-          <tr><td class="text-muted">Risk/trade</td><td>${r.risk.max_risk_per_trade_pct}%</td><td class="text-muted">Max size</td><td>${r.risk.max_position_size_pct_of_portfolio}%</td></tr>
-          <tr><td class="text-muted">Max positions</td><td>${r.risk.max_concurrent_positions}</td><td class="text-muted">Initial stop</td><td>${r.exit.initial_stop_rule || (label === "Long" ? "lod_minus_1pct" : "hod_plus_1pct")}</td></tr>
-          <tr><td class="text-muted">Breakeven @</td><td>${r.exit.breakeven_trigger_R}R</td><td class="text-muted">Entry window</td><td>${r.time_filter.earliest_entry_et}-${r.time_filter.latest_entry_et}</td></tr>
-        </tbody>
-      </table>
-    </div>`;
-  }));
-  el.innerHTML = parts.join("");
+// ---------------------------------------------------------- Strategy Runs ---
+async function loadMergedStrategyRuns() {
+  const [strategies, runs] = await Promise.all([api("/api/strategies"), api("/api/strategy_runs")]);
+  strategiesCache = Object.fromEntries(strategies.map(s => [s.id, s]));
+  const runsByStrategy = Object.fromEntries(runs.map(r => [r.strategy_id, r]));
+  return strategies.map(s => {
+    const run = runsByStrategy[s.id];
+    return {
+      ...s,
+      run_mode: run ? run.run_mode : "off",
+      virtual_capital: run ? run.virtual_capital : null,
+      live_budget: run ? run.live_budget : null,
+      live_max_positions: run ? run.live_max_positions : null,
+    };
+  });
 }
 
-async function refreshWatchlist() {
-  const data = await modeApi("/api/watchlist_filters");
-  document.getElementById("watchlist-checked").textContent = data.updated_at || "not checked yet";
-  const rows = data.results || [];
-  const body = document.getElementById("watchlist-body");
-  const table = document.getElementById("watchlist-table");
-  if (!rows.length) { body.innerHTML = '<tr><td colspan="19" class="text-center text-muted">Empty</td></tr>'; return; }
+function configCellHtml(s) {
+  return `
+    <div class="run-virtual-fields ${s.run_mode === "virtual" ? "" : "d-none"}">
+      <input type="number" step="0.01" min="0" class="form-control form-control-sm run-virtual-capital" placeholder="Virtual capital $" value="${s.virtual_capital ?? ""}">
+    </div>
+    <div class="run-live-fields ${s.run_mode === "live" ? "" : "d-none"}">
+      <input type="number" step="0.01" min="0" class="form-control form-control-sm run-live-budget mb-1" placeholder="Live budget $" value="${s.live_budget ?? ""}">
+      <input type="number" step="1" min="0" class="form-control form-control-sm run-live-max-positions" placeholder="Max positions" value="${s.live_max_positions ?? ""}">
+    </div>
+    <div class="text-muted small run-off-hint ${s.run_mode === "off" ? "" : "d-none"}">—</div>`;
+}
 
-  // Whole columns only exist when SOME currently active strategy (either
-  // side) actually needs them - each row already carries which model
-  // produced it, so this is derived straight from the response instead of
-  // a second lookup of which strategies are active.
+async function refreshStrategyRuns() {
+  const rows = await loadMergedStrategyRuns();
+  const body = document.getElementById("strategy-runs-body");
+  body.innerHTML = rows.map(s => `<tr data-strategy-id="${s.id}">
+    <td>${s.key ? `<span class="badge bg-light text-dark border">${escapeHtml(s.key)}</span>` : '<span class="text-muted small">—</span>'}</td>
+    <td>${s.name} ${s.description ? `<button class="btn btn-sm btn-link p-0 ms-1 strategy-info-btn" data-id="${s.id}" title="הצג הסבר מלא">&#8505;&#65039;</button>` : ""}</td>
+    <td>${sideBadge(s.direction)}</td>
+    <td><span class="badge ${RISK_BADGE_CLASS[s.risk_rating] || "bg-secondary"}">${s.risk_rating}</span></td>
+    <td>
+      <select class="form-select form-select-sm run-mode-select" style="width:100px">
+        <option value="off" ${s.run_mode === "off" ? "selected" : ""}>Off</option>
+        <option value="virtual" ${s.run_mode === "virtual" ? "selected" : ""}>Virtual</option>
+        <option value="live" ${s.run_mode === "live" ? "selected" : ""}>Live</option>
+      </select>
+    </td>
+    <td class="run-config-cell">${configCellHtml(s)}</td>
+    <td><button class="btn btn-sm btn-primary run-save-btn">Save</button></td>
+    <td class="text-end">
+      <button class="btn btn-sm btn-outline-secondary" onclick="editStrategy(${s.id})">Edit</button>
+      <button class="btn btn-sm btn-outline-danger run-delete-btn" ${s.run_mode !== "off" ? 'disabled title="Set to Off before deleting"' : ""}>Delete</button>
+    </td>
+  </tr>`).join("");
+  renderStrategyTabs(rows);
+}
+
+document.getElementById("strategy-runs-body").addEventListener("change", (e) => {
+  const select = e.target.closest(".run-mode-select");
+  if (!select) return;
+  const cell = select.closest("tr").querySelector(".run-config-cell");
+  cell.querySelector(".run-virtual-fields").classList.toggle("d-none", select.value !== "virtual");
+  cell.querySelector(".run-live-fields").classList.toggle("d-none", select.value !== "live");
+  cell.querySelector(".run-off-hint").classList.toggle("d-none", select.value !== "off");
+});
+
+document.getElementById("strategy-runs-body").addEventListener("click", async (e) => {
+  const infoBtn = e.target.closest(".strategy-info-btn");
+  if (infoBtn) { showStrategyInfo(Number(infoBtn.dataset.id)); return; }
+
+  const deleteBtn = e.target.closest(".run-delete-btn");
+  if (deleteBtn) {
+    if (deleteBtn.disabled) return;
+    const row = deleteBtn.closest("tr");
+    const id = row.dataset.strategyId;
+    if (!confirm("Delete this strategy?")) return;
+    try { await api(`/api/strategies/${id}`, { method: "DELETE" }); refreshStrategyRuns(); }
+    catch (err) { alert("Could not delete: " + err.message); }
+    return;
+  }
+
+  const saveBtn = e.target.closest(".run-save-btn");
+  if (!saveBtn) return;
+  const row = saveBtn.closest("tr");
+  const id = row.dataset.strategyId;
+  const strategy = strategiesCache[id];
+  const runMode = row.querySelector(".run-mode-select").value;
+  const payload = { run_mode: runMode };
+  if (runMode === "virtual") {
+    const v = row.querySelector(".run-virtual-capital").value;
+    payload.virtual_capital = v === "" ? null : Number(v);
+  } else if (runMode === "live") {
+    const budget = row.querySelector(".run-live-budget").value;
+    const maxPos = row.querySelector(".run-live-max-positions").value;
+    payload.live_budget = budget === "" ? null : Number(budget);
+    payload.live_max_positions = maxPos === "" ? null : Number(maxPos);
+    if (strategy && strategy.risk_rating === "aggressive") {
+      const typed = prompt(
+        'This strategy will start placing REAL orders with real money.\n' +
+        `Type "${AGGRESSIVE_CONFIRM_PHRASE}" to confirm:`
+      );
+      if (typed !== AGGRESSIVE_CONFIRM_PHRASE) { alert("Not confirmed — no changes were saved."); return; }
+      payload.confirm = typed;
+    }
+  }
+  saveBtn.disabled = true;
+  try {
+    await api(`/api/strategy_runs/${id}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    await refreshStrategyRuns();
+  } catch (err) {
+    alert("Save failed: " + err.message);
+  } finally {
+    saveBtn.disabled = false;
+  }
+});
+
+// --------------------------------------------------------- Strategy Tabs ---
+let latestWatchlistRows = [];  // cached from refreshWatchlistData(), filtered per-tab by strategy_id
+let activeStrategyTabId = null;
+
+function renderStrategyTabs(rows) {
+  const active = rows.filter(s => s.run_mode !== "off");
+  const bar = document.getElementById("strategy-tab-bar");
+  const content = document.getElementById("strategy-tab-content");
+
+  if (!active.length) {
+    bar.innerHTML = "";
+    content.innerHTML = '<p class="text-muted mb-0">No strategy is Virtual or Live right now — set one above to see its sheet here.</p>';
+    activeStrategyTabId = null;
+    return;
+  }
+  if (!active.some(s => s.id === activeStrategyTabId)) activeStrategyTabId = active[0].id;
+
+  bar.innerHTML = active.map(s => `
+    <li class="nav-item">
+      <button class="nav-link strategy-tab-btn ${s.id === activeStrategyTabId ? "active" : ""}" data-id="${s.id}" type="button">
+        ${escapeHtml(s.key || s.name)}
+        <span class="badge run-mode-badge-${s.run_mode} ms-1">${RUN_MODE_LABEL[s.run_mode]}</span>
+      </button>
+    </li>`).join("");
+
+  content.innerHTML = active.map(s => `
+    <div class="strategy-tab-pane ${s.id === activeStrategyTabId ? "" : "d-none"}" data-id="${s.id}">
+      <div class="small text-muted mb-2">
+        ${sideBadge(s.direction)} <strong>${escapeHtml(s.name)}</strong>
+        ${s.run_mode === "virtual"
+          ? `— virtual capital ${s.virtual_capital != null ? fmtMoney(s.virtual_capital) : "unset"}`
+          : `— live budget ${s.live_budget != null ? fmtMoney(s.live_budget) : "unset"}, max positions ${s.live_max_positions ?? "unset"}`}
+      </div>
+      <div class="row g-3">
+        <div class="col-12">
+          <h6 class="mb-1">Positions</h6>
+          <div class="table-responsive">
+            <table class="table table-sm mb-0">
+              <thead><tr><th>Type</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>Stop</th><th>State</th><th>Unrealized R</th></tr></thead>
+              <tbody id="tab-positions-${s.id}"><tr><td colspan="9" class="text-center text-muted">Loading…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="col-12">
+          <h6 class="mb-1">Candidates <span class="text-muted small fw-normal">today's watchlist checked against this strategy's own filters</span></h6>
+          <div class="table-responsive" id="tab-candidates-${s.id}">Loading…</div>
+        </div>
+        ${s.run_mode === "virtual" ? `
+        <div class="col-12">
+          <h6 class="mb-1">Virtual Trade History</h6>
+          <div id="tab-virtual-summary-${s.id}" class="small text-muted mb-1"></div>
+          <div class="table-responsive" style="max-height:300px; overflow-y:auto;">
+            <table class="table table-sm mb-0">
+              <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>R</th><th>P&L</th><th>Reason</th></tr></thead>
+              <tbody id="tab-virtual-trades-${s.id}"><tr><td colspan="9" class="text-center text-muted">Loading…</td></tr></tbody>
+            </table>
+          </div>
+        </div>` : ""}
+      </div>
+    </div>`).join("");
+
+  refreshActiveTabData(active.find(s => s.id === activeStrategyTabId));
+}
+
+document.getElementById("strategy-tab-bar").addEventListener("click", (e) => {
+  const btn = e.target.closest(".strategy-tab-btn");
+  if (!btn) return;
+  activeStrategyTabId = Number(btn.dataset.id);
+  document.querySelectorAll(".strategy-tab-btn").forEach(b => b.classList.toggle("active", Number(b.dataset.id) === activeStrategyTabId));
+  document.querySelectorAll(".strategy-tab-pane").forEach(p => p.classList.toggle("d-none", Number(p.dataset.id) !== activeStrategyTabId));
+  const s = { ...strategiesCache[activeStrategyTabId] };
+  const row = document.querySelector(`#strategy-runs-body tr[data-strategy-id="${activeStrategyTabId}"]`);
+  s.run_mode = row ? row.querySelector(".run-mode-select").value : "off";
+  refreshActiveTabData(s);
+});
+
+async function refreshActiveTabData(strategy) {
+  if (!strategy) return;
+  const id = strategy.id;
+
+  modeApi(`/api/strategy_runs/${id}/positions`).then(data => renderTabPositions(id, data)).catch(() => {});
+  renderTabCandidates(id);
+  if (strategy.run_mode === "virtual") {
+    api(`/api/strategy_runs/${id}/virtual_trades`).then(rows => renderTabVirtualTrades(id, rows)).catch(() => {});
+  }
+}
+
+function positionRow(p, type) {
+  return `<tr>
+    <td><span class="badge ${type === "Real" ? "bg-danger" : "bg-info text-dark"}">${type}</span></td>
+    <td>${symbolLink(p.symbol)}</td><td>${sideBadge(p.side)}</td><td>${p.qty}</td>
+    <td>${fmtMoney(p.entry_price)}</td><td>${fmtMoney(p.current_price)}</td><td>${fmtMoney(p.stop_price)}</td>
+    <td class="small">${p.state ?? "-"}</td><td>${fmtR(p.unrealized_r)}</td>
+  </tr>`;
+}
+
+function renderTabPositions(strategyId, data) {
+  const body = document.getElementById(`tab-positions-${strategyId}`);
+  if (!body) return;
+  const rows = [...(data.real || []).map(p => positionRow(p, "Real")), ...(data.virtual || []).map(p => positionRow(p, "Virtual"))];
+  body.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="9" class="text-center text-muted">No open positions</td></tr>';
+}
+
+function renderCandidatesTable(rows) {
+  if (!rows.length) return '<p class="text-muted small mb-0">No candidates for this strategy today.</p>';
+
+  const model = rows[0].model;
+  if (model === "touch_turn") {
+    return `<table class="table table-sm mb-0">
+      <thead><tr><th>Symbol</th><th>Side</th><th>Status</th><th>Limit</th><th>Stop</th><th>Target</th><th>Gap</th><th></th></tr></thead>
+      <tbody>${rows.map(r => `<tr>
+        <td class="fw-bold">${symbolLink(r.symbol)}</td>
+        <td>${sideBadge(r.side)}</td>
+        <td>${r.error ? `<span class="badge bg-secondary" title="${r.error}">n/a</span>`
+          : r.pass ? '<span class="badge bg-success">✓ READY</span>' : '<span class="badge bg-secondary">not triggered</span>'}</td>
+        <td>${fmtMoney(r.limit_price)}</td><td>${fmtMoney(r.initial_stop)}</td><td>${fmtMoney(r.target_price)}</td>
+        <td>${r.gap_pct !== undefined && r.gap_pct !== null ? Number(r.gap_pct).toFixed(2) + "%" : "-"}</td>
+        <td><button type="button" class="btn btn-sm btn-outline-primary quick-trigger-btn" data-symbol="${r.symbol}" data-side="${r.side}" data-price="${r.limit_price ?? ""}">${r.side === "short" ? "מכירה" : "קניה"} ⚡</button></td>
+      </tr>`).join("")}</tbody>
+    </table>`;
+  }
+
   const hasClassic = rows.some(r => r.model === "classic");
   const hasOrb = rows.some(r => r.model === "orb");
   const hasConfluence = rows.some(r => r.model === "orb" && "CONFLUENCE" in r);
   const hasRsi = rows.some(r => r.model === "classic" && r.rsi !== undefined && r.rsi !== null);
-  table.classList.toggle("hide-classic", !hasClassic);
-  table.classList.toggle("hide-orb", !hasOrb);
-  table.classList.toggle("hide-orb-confluence", !hasConfluence);
-  table.classList.toggle("hide-classic-rsi", !hasRsi);
+  const tableClasses = ["candidates-table"];
+  if (!hasClassic) tableClasses.push("hide-classic");
+  if (!hasOrb) tableClasses.push("hide-orb");
+  if (!hasConfluence) tableClasses.push("hide-orb-confluence");
+  if (!hasRsi) tableClasses.push("hide-classic-rsi");
 
   const withCount = rows.map(r => {
     const keys = relevantFilterKeys(r);
@@ -568,41 +701,101 @@ async function refreshWatchlist() {
   });
   withCount.sort((a, b) => b._passedCount - a._passedCount || Math.abs(b.gap_pct || 0) - Math.abs(a.gap_pct || 0));
 
-  body.innerHTML = withCount.map(r => {
-    const total = r._relevantKeys.length;
-    // r.pass is the SAME field cycle.entry_scan itself gates a real buy on -
-    // the independent sub-checks (V1/V2/Confirmed/Confluence, or D1-I3) can
-    // all show green without r.pass being true, since the entry MODEL still
-    // needs its own trigger moment (the exact breakout bar, or a retest hit
-    // - see src/orb.py's evaluate_orb_entry) on top of them, and that
-    // trigger is fleeting: a symbol can flicker in and out of a full pass
-    // from one scan tick to the next. Spelling this out in the badge text
-    // itself (not just its color) - real trading investigations this same
-    // day found the color-only distinction alone easy to miss at a glance.
-    const passedBadge = !total
-      ? `<span class="badge bg-secondary" title="${r.error || 'no data'}">n/a</span>`
-      : r.pass
-      ? `<span class="badge bg-success" title="Live entry trigger is active right now - this is what entry_scan itself sees">${r._passedCount}/${total} ✓ READY</span>`
-      : `<span class="badge ${r._passedCount >= Math.ceil(total * 0.66) ? "bg-warning text-dark" : "bg-secondary"}" title="Sub-checks only - NOT the same as a live buy trigger. Still needs the entry model's own trigger moment (exact breakout bar or a retest hit), which is fleeting and can come and go tick to tick.">${r._passedCount}/${total} (not triggered)</span>`;
-    return `<tr>
-      <td class="fw-bold">${symbolLink(r.symbol)}</td>
-      <td>${sideBadge(r.side)}</td>
-      <td>${passedBadge}</td>
-      ${CLASSIC_FILTER_KEYS.map(k => filterCell(r, k, "classic")).join("")}
-      ${filterCell(r, "V1", "orb")}
-      ${filterCell(r, "V2", "orb")}
-      ${filterCell(r, "CONFIRMED", "orb")}
-      ${filterCell(r, "CONFLUENCE", "orb-confluence")}
-      <td>${r.gap_pct !== undefined && r.gap_pct !== null ? Number(r.gap_pct).toFixed(2) + "%" : "-"}</td>
-      <td>${r.rvol !== undefined ? "x" + Number(r.rvol).toFixed(2) : "-"}</td>
-      <td data-col="orb">${r.atr_pct !== undefined && r.atr_pct !== null ? Number(r.atr_pct).toFixed(2) + "%" : "-"}</td>
-      <td data-col="classic-rsi">${r.rsi !== undefined && r.rsi !== null ? Number(r.rsi).toFixed(1) : "-"}</td>
-      <td>${fmtMoney(r.price)}</td>
-      <td><button type="button" class="btn btn-sm btn-outline-primary quick-trigger-btn"
-        data-symbol="${r.symbol}" data-side="${r.side}" data-price="${r.price ?? ""}">${r.side === "short" ? "מכירה" : "קניה"} ⚡</button></td>
-    </tr>`;
-  }).join("");
+  return `<table class="table table-sm mb-0 ${tableClasses.join(" ")}">
+    <thead><tr>
+      <th>Symbol</th><th>Side</th><th>Passed</th>
+      <th data-col="classic">D1</th><th data-col="classic">D2</th><th data-col="classic">D3</th>
+      <th data-col="classic">I1</th><th data-col="classic">I2</th><th data-col="classic">I3</th>
+      <th data-col="orb">V1</th><th data-col="orb">V2</th><th data-col="orb">Confirmed</th>
+      <th data-col="orb-confluence">Confluence</th>
+      <th>Gap</th><th>RVOL</th><th data-col="orb">ATR%</th><th data-col="classic-rsi">RSI</th>
+      <th>Price</th><th></th>
+    </tr></thead>
+    <tbody>${withCount.map(r => {
+      const total = r._relevantKeys.length;
+      const passedBadge = !total
+        ? `<span class="badge bg-secondary" title="${r.error || "no data"}">n/a</span>`
+        : r.pass
+        ? `<span class="badge bg-success" title="Live entry trigger is active right now">${r._passedCount}/${total} ✓ READY</span>`
+        : `<span class="badge ${r._passedCount >= Math.ceil(total * 0.66) ? "bg-warning text-dark" : "bg-secondary"}" title="Sub-checks only - not the same as a live buy trigger.">${r._passedCount}/${total} (not triggered)</span>`;
+      return `<tr>
+        <td class="fw-bold">${symbolLink(r.symbol)}</td>
+        <td>${sideBadge(r.side)}</td>
+        <td>${passedBadge}</td>
+        ${CLASSIC_FILTER_KEYS.map(k => filterCell(r, k, "classic")).join("")}
+        ${filterCell(r, "V1", "orb")}
+        ${filterCell(r, "V2", "orb")}
+        ${filterCell(r, "CONFIRMED", "orb")}
+        ${filterCell(r, "CONFLUENCE", "orb-confluence")}
+        <td>${r.gap_pct !== undefined && r.gap_pct !== null ? Number(r.gap_pct).toFixed(2) + "%" : "-"}</td>
+        <td>${r.rvol !== undefined ? "x" + Number(r.rvol).toFixed(2) : "-"}</td>
+        <td data-col="orb">${r.atr_pct !== undefined && r.atr_pct !== null ? Number(r.atr_pct).toFixed(2) + "%" : "-"}</td>
+        <td data-col="classic-rsi">${r.rsi !== undefined && r.rsi !== null ? Number(r.rsi).toFixed(1) : "-"}</td>
+        <td>${fmtMoney(r.price)}</td>
+        <td><button type="button" class="btn btn-sm btn-outline-primary quick-trigger-btn" data-symbol="${r.symbol}" data-side="${r.side}" data-price="${r.price ?? ""}">${r.side === "short" ? "מכירה" : "קניה"} ⚡</button></td>
+      </tr>`;
+    }).join("")}</tbody>
+  </table>`;
 }
+
+function renderTabCandidates(strategyId) {
+  const el = document.getElementById(`tab-candidates-${strategyId}`);
+  if (!el) return;
+  const rows = latestWatchlistRows.filter(r => r.strategy_id === strategyId);
+  el.innerHTML = renderCandidatesTable(rows);
+}
+
+function renderTabVirtualTrades(strategyId, trades) {
+  const body = document.getElementById(`tab-virtual-trades-${strategyId}`);
+  const summaryEl = document.getElementById(`tab-virtual-summary-${strategyId}`);
+  if (!body) return;
+  if (!trades.length) {
+    body.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No closed virtual trades yet</td></tr>';
+    if (summaryEl) summaryEl.textContent = "";
+    return;
+  }
+  const wins = trades.filter(t => (t.pnl_dollars ?? 0) > 0).length;
+  const totalPnl = trades.reduce((sum, t) => sum + (t.pnl_dollars ?? 0), 0);
+  if (summaryEl) summaryEl.textContent = `${trades.length} trades, ${wins}W/${trades.length - wins}L (${((wins / trades.length) * 100).toFixed(0)}%), total P&L ${fmtMoney(totalPnl)}`;
+  body.innerHTML = trades.map(t => `<tr>
+    <td class="small">${t.exit_time_iso}</td><td>${t.symbol}</td><td>${sideBadge(t.side)}</td><td>${t.qty}</td>
+    <td>${fmtMoney(t.entry_price)}</td><td>${fmtMoney(t.exit_price)}</td><td>${fmtR(t.final_r)}</td>
+    <td>${fmtPnl(t.pnl_dollars)}</td><td class="small">${t.exit_reason ?? "-"}</td>
+  </tr>`).join("");
+}
+
+document.getElementById("strategy-tab-content").addEventListener("click", (e) => {
+  const btn = e.target.closest(".quick-trigger-btn");
+  if (!btn) return;
+  openQuickTrigger(btn.dataset.symbol, btn.dataset.side, btn.dataset.price);
+});
+
+// ------------------------------------------------------------ Watchlist ---
+async function refreshWatchlistData() {
+  const data = await modeApi("/api/watchlist_filters");
+  latestWatchlistRows = data.results || [];
+  document.getElementById("watchlist-checked").textContent = data.updated_at || "not checked yet";
+  if (activeStrategyTabId !== null) renderTabCandidates(activeStrategyTabId);
+}
+
+document.getElementById("btn-run-prefilter").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-run-prefilter");
+  const errorEl = document.getElementById("prefilter-error");
+  errorEl.textContent = "";
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = "Scanning… (up to ~1 min)";
+  try {
+    const result = await api("/api/prefilter/run", { method: "POST" });
+    errorEl.textContent = result.success ? "" : "Scan failed: " + (result.error || "unknown error");
+    await refreshWatchlistData();
+  } catch (e) {
+    errorEl.textContent = "Scan failed: " + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+});
 
 // Watchlist row's "Quick trade" button - opens the same chart modal + buy/
 // sell-line form (see shared.js's refreshPriceTriggers/pt-submit) that
@@ -617,35 +810,6 @@ function openQuickTrigger(symbol, side, price) {
   if (priceEl) priceEl.value = price ? Number(price).toFixed(2) : "";
   document.getElementById("pt-qty")?.focus();
 }
-
-document.getElementById("watchlist-body")?.addEventListener("click", (e) => {
-  const btn = e.target.closest(".quick-trigger-btn");
-  if (!btn) return;
-  openQuickTrigger(btn.dataset.symbol, btn.dataset.side, btn.dataset.price);
-});
-
-document.getElementById("btn-run-prefilter").addEventListener("click", async () => {
-  const btn = document.getElementById("btn-run-prefilter");
-  const errorEl = document.getElementById("prefilter-error");
-  errorEl.textContent = "";
-  btn.disabled = true;
-  const originalText = btn.textContent;
-  btn.textContent = "Scanning… (up to ~1 min)";
-  try {
-    const result = await api("/api/prefilter/run", { method: "POST" });
-    if (!result.success) {
-      errorEl.textContent = "Scan failed: " + (result.error || "unknown error");
-    } else {
-      errorEl.textContent = "";
-    }
-    await refreshWatchlist();
-  } catch (e) {
-    errorEl.textContent = "Scan failed: " + e.message;
-  } finally {
-    btn.disabled = false;
-    btn.textContent = originalText;
-  }
-});
 
 async function refreshTrades() {
   const rows = await modeApi("/api/trades?limit=50");
@@ -684,29 +848,6 @@ async function refreshPerformance() {
     </div>`).join("") || '<p class="text-muted">No closed trades</p>';
 }
 
-let strategiesCache = {};
-
-async function refreshStrategies() {
-  const rows = await api("/api/strategies");
-  strategiesCache = Object.fromEntries(rows.map(s => [s.id, s]));
-  const body = document.getElementById("strategies-body");
-  body.innerHTML = rows.map(s => `<tr>
-    <td>${s.key ? `<span class="badge bg-light text-dark border">${escapeHtml(s.key)}</span>` : '<span class="text-muted small">—</span>'}</td>
-    <td>${s.name} ${s.description ? `<button class="btn btn-sm btn-link p-0 ms-1 strategy-info-btn" data-id="${s.id}" title="הצג הסבר מלא">&#8505;&#65039;</button>` : ""}</td>
-    <td>${sideBadge(s.direction)}</td>
-    <td><span class="badge ${RISK_BADGE_CLASS[s.risk_rating] || "bg-secondary"}">${s.risk_rating}</span></td>
-    <td>${s.is_active ? '<span class="badge bg-success">active</span>' : ""}</td>
-    <td class="small">${s.updated_at}</td>
-    <td class="text-end">
-      ${s.is_active
-        ? `<button class="btn btn-sm btn-outline-warning" onclick="deactivateStrategy(${s.id})">Deactivate</button>`
-        : `<button class="btn btn-sm btn-outline-success" onclick="activateStrategy(${s.id}, '${s.risk_rating}')">Activate</button>`}
-      <button class="btn btn-sm btn-outline-secondary" onclick="editStrategy(${s.id})">Edit</button>
-      ${s.is_active ? "" : `<button class="btn btn-sm btn-outline-danger" onclick="deleteStrategy(${s.id})">Delete</button>`}
-    </td>
-  </tr>`).join("");
-}
-
 function escapeHtml(text) {
   const div = document.createElement("div");
   div.textContent = text;
@@ -737,50 +878,6 @@ function showStrategyInfo(id) {
   strategyInfoModal.show();
 }
 
-document.getElementById("strategies-body").addEventListener("click", (e) => {
-  const btn = e.target.closest(".strategy-info-btn");
-  if (!btn) return;
-  showStrategyInfo(Number(btn.dataset.id));
-});
-
-async function activateStrategy(id, riskRating) {
-  const payload = {};
-  if (riskRating === "aggressive") {
-    const typed = prompt(
-      'This strategy takes effect on LIVE immediately too (strategies are shared across paper/live).\n' +
-      'Type "ok" to confirm:'
-    );
-    if (typed !== "ok") { alert("Not confirmed — strategy was not activated."); return; }
-    payload.confirm = typed;
-  }
-  try {
-    await api(`/api/strategies/${id}/activate`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
-    });
-    refreshStrategies();
-    refreshActiveStrategyParams();
-  } catch (e) {
-    alert("Could not activate: " + e.message);
-  }
-}
-
-async function deactivateStrategy(id) {
-  const s = strategiesCache[id];
-  if (!confirm(`Deactivate "${s ? s.name : "this strategy"}"? The bot stops opening new ${s ? s.direction : ""} trades until you activate another strategy on that side.`)) return;
-  try {
-    await api(`/api/strategies/${id}/deactivate`, { method: "POST" });
-    refreshStrategies();
-    refreshActiveStrategyParams();
-  } catch (e) {
-    alert("Could not deactivate: " + e.message);
-  }
-}
-async function deleteStrategy(id) {
-  if (!confirm("Delete this strategy?")) return;
-  try { await api(`/api/strategies/${id}`, { method: "DELETE" }); refreshStrategies(); }
-  catch (e) { alert("Could not delete: " + e.message); }
-}
-
 async function editStrategy(id) {
   const s = await api(`/api/strategies/${id}`);
   editingStrategyId = id;
@@ -797,8 +894,8 @@ async function editStrategy(id) {
 }
 
 async function loadBaseRulesForDirection(direction) {
-  const active = (await api("/api/strategies")).find(s => s.is_active && s.direction === direction);
-  const base = active ? await api(`/api/strategies/${active.id}`) : null;
+  const candidates = Object.values(strategiesCache).filter(s => s.direction === direction);
+  const base = candidates.length ? await api(`/api/strategies/${candidates[0].id}`) : null;
   document.getElementById("strategy-rules").value = base ? JSON.stringify(base.rules, null, 2) : "{}";
 }
 
@@ -846,7 +943,7 @@ document.getElementById("btn-save-strategy").addEventListener("click", async () 
       });
     }
     strategyModal.hide();
-    refreshStrategies();
+    refreshStrategyRuns();
   } catch (e) {
     errorEl.textContent = "Save failed: " + e.message;
   }
@@ -854,7 +951,7 @@ document.getElementById("btn-save-strategy").addEventListener("click", async () 
 
 function refreshAll() {
   refreshStatus(); refreshAccount(); refreshGatewayStatus(); refreshRiskParams(); refreshPositions();
-  refreshWatchlist(); refreshActiveStrategyParams(); refreshTrades(); refreshLog(); refreshPerformance(); refreshStrategies(); refreshIbkrCredentials();
+  refreshWatchlistData(); refreshTrades(); refreshLog(); refreshPerformance(); refreshStrategyRuns(); refreshIbkrCredentials();
   refreshMyGateway();
 }
 
