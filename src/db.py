@@ -452,6 +452,40 @@ CREATE TABLE IF NOT EXISTS pending_orders (
     PRIMARY KEY (account_id, mode, symbol, placed_date)
 );
 
+-- virtual_pending_orders' own schema comment (below) explains the
+-- multi-strategy Touch & Turn design - real pending_orders itself stays
+-- keyed by (account_id, mode, symbol, placed_date), same "one resting
+-- order per symbol per day" behavior as before multi-strategy support;
+-- strategy_id (added via migration) is purely an attribution tag, same
+-- role as positions.strategy_id.
+
+-- Touch & Turn's own simulated resting order for a strategy_run in
+-- 'virtual' mode - mirrors pending_orders above, but keyed by
+-- (account_id, strategy_id, symbol, placed_date) instead of (account_id,
+-- mode, symbol, placed_date), same reasoning as virtual_positions vs.
+-- positions: two different virtual strategies can each have their own
+-- resting order on the same symbol at once, since there's no real
+-- broker-side limit order competing for a fill. No broker_order_id at
+-- all - there's nothing to cancel at a broker; check_pending_virtual_
+-- touch_turn_orders (cycle.py) detects a "fill" by comparing the current
+-- price against limit_price directly each tick (no broker to poll),
+-- same convention check_virtual_stop_outs already uses for a stop.
+CREATE TABLE IF NOT EXISTS virtual_pending_orders (
+    account_id INTEGER NOT NULL,
+    strategy_id INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    placed_date TEXT NOT NULL,
+    side TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    limit_price REAL NOT NULL,
+    target_price REAL NOT NULL,
+    initial_stop REAL NOT NULL,
+    qty INTEGER NOT NULL,
+    placed_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, strategy_id, symbol, placed_date)
+);
+
 -- User-defined "buy line"/"sell line" entry triggers, set from the
 -- dashboard's chart screen (see web/app.py's POST /api/price_triggers).
 -- Each row's real native IBKR STP order is already live at the broker by
@@ -3676,6 +3710,12 @@ def init_db(seed_rules_path: Path | None = None):
         _migrate_add_column(conn, "decision_log", "strategy_id", "INTEGER")
 
         _migrate_account_active_strategy_to_strategy_runs(conn)
+        # NULL for every pending Touch & Turn order predating multi-strategy
+        # support - same attribution-only role as positions.strategy_id
+        # (see that column's own migration comment); pending_orders' own
+        # primary key is unchanged, so "one resting order per symbol per
+        # day" is still enforced by the table itself.
+        _migrate_add_column(conn, "pending_orders", "strategy_id", "INTEGER")
 
 
 # -------------------------------------------------------------- settings ---
@@ -4077,14 +4117,17 @@ def create_pending_order(account_id: int, mode: str, order: dict) -> bool:
     already has an attempt on record, so a caller that raced past
     has_pending_order_today's own check (two cycle ticks close together)
     still can't double-place. `order` needs symbol, placed_date, side,
-    limit_price, target_price, initial_stop, qty, placed_at, expires_at."""
+    limit_price, target_price, initial_stop, qty, placed_at, expires_at -
+    strategy_id is optional (None for a legacy/pre-multi-strategy caller,
+    same attribution-only role as positions.strategy_id)."""
     _check_mode(mode)
+    order = {"strategy_id": None, **order}
     with get_conn() as conn:
         cur = conn.execute(
             "INSERT OR IGNORE INTO pending_orders (account_id, mode, symbol, placed_date, side, "
-            "limit_price, target_price, initial_stop, qty, placed_at, expires_at) VALUES "
+            "limit_price, target_price, initial_stop, qty, placed_at, expires_at, strategy_id) VALUES "
             "(:account_id, :mode, :symbol, :placed_date, :side, :limit_price, :target_price, "
-            ":initial_stop, :qty, :placed_at, :expires_at)",
+            ":initial_stop, :qty, :placed_at, :expires_at, :strategy_id)",
             {**order, "account_id": account_id, "mode": mode},
         )
         return cur.rowcount > 0
@@ -4119,6 +4162,58 @@ def resolve_pending_order(account_id: int, mode: str, symbol: str, placed_date: 
         conn.execute(
             "UPDATE pending_orders SET status = ? WHERE account_id = ? AND mode = ? AND symbol = ? AND placed_date = ?",
             (status, account_id, mode, symbol, placed_date),
+        )
+
+
+# ------------------------------------------------- virtual pending orders ---
+# Touch & Turn's simulated resting order for a 'virtual' strategy_run - see
+# virtual_pending_orders' own schema comment for why it's a separate table,
+# keyed by strategy_id rather than mode. Mirrors has_pending_order_today/
+# create_pending_order/get_pending_orders/resolve_pending_order above
+# closely, on purpose, so cycle.py's virtual Touch & Turn scan stays a
+# close parallel to the real one rather than a from-scratch design.
+def has_virtual_pending_order_today(account_id: int, strategy_id: int, symbol: str, placed_date: str) -> bool:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM virtual_pending_orders WHERE account_id = ? AND strategy_id = ? AND symbol = ? AND placed_date = ?",
+            (account_id, strategy_id, symbol, placed_date),
+        ).fetchone()
+        return row is not None
+
+
+def create_virtual_pending_order(account_id: int, strategy_id: int, order: dict) -> bool:
+    """Returns whether a new row was actually inserted - same race-safe
+    INSERT OR IGNORE reasoning as create_pending_order. `order` needs
+    symbol, placed_date, side, limit_price, target_price, initial_stop,
+    qty, placed_at, expires_at."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO virtual_pending_orders (account_id, strategy_id, symbol, placed_date, side, "
+            "limit_price, target_price, initial_stop, qty, placed_at, expires_at) VALUES "
+            "(:account_id, :strategy_id, :symbol, :placed_date, :side, :limit_price, :target_price, "
+            ":initial_stop, :qty, :placed_at, :expires_at)",
+            {**order, "account_id": account_id, "strategy_id": strategy_id},
+        )
+        return cur.rowcount > 0
+
+
+def get_virtual_pending_orders(account_id: int, strategy_id: int, status: str = "pending") -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM virtual_pending_orders WHERE account_id = ? AND strategy_id = ? AND status = ?",
+            (account_id, strategy_id, status),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def resolve_virtual_pending_order(account_id: int, strategy_id: int, symbol: str, placed_date: str, status: str):
+    """status: 'filled', 'cancelled', or 'expired' - kept (not deleted),
+    same audit-trail/same-day-re-attempt-blocking reasoning as
+    resolve_pending_order."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE virtual_pending_orders SET status = ? WHERE account_id = ? AND strategy_id = ? AND symbol = ? AND placed_date = ?",
+            (status, account_id, strategy_id, symbol, placed_date),
         )
 
 

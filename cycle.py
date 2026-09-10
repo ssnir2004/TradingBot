@@ -1926,7 +1926,8 @@ def virtual_entry_scan(account_id: int, mode: str, ib, rules: dict, env: dict, s
         log_decision(account_id, mode, {"event": "entry", "symbol": ticker, "side": side, "price": price, "stop": initial_stop, "qty": size, "strategy_id": strategy_id, "virtual": True})
 
 
-def touch_turn_entry_scan(account_id: int, mode: str, ib, rules: dict, env: dict, side: str):
+def touch_turn_entry_scan(account_id: int, mode: str, ib, rules: dict, env: dict, side: str,
+                           strategy_run: dict | None = None):
     """Touch & Turn's own entry scan - the counterpart to entry_scan
     above, called alongside it from run_cycle for a strategy whose rules
     carry an "opening_candle" key (see entry_scan's own docstring for why
@@ -1939,7 +1940,13 @@ def touch_turn_entry_scan(account_id: int, mode: str, ib, rules: dict, env: dict
     makes repeat calls across a single day's many 5-minute cycle ticks
     harmless no-ops once a symbol's already had an attempt today,
     regardless of that attempt's eventual outcome - this function has no
-    memory of its own between calls."""
+    memory of its own between calls.
+
+    strategy_run (None for a legacy/pre-multi-strategy caller) works
+    exactly like entry_scan's own - see that function's docstring -
+    tagging the resting order (and later, once it fills, the position)
+    with strategy_id and enforcing this strategy's own live_budget/
+    live_max_positions on top of the side's rules-based caps below."""
     if "opening_candle" not in rules:
         return
     if not db.is_bot_enabled(account_id, mode):
@@ -1979,8 +1986,28 @@ def touch_turn_entry_scan(account_id: int, mode: str, ib, rules: dict, env: dict
     side_open_count = sum(1 for p in db.get_open_positions(account_id, mode) if p.get("side", "long") == side)
     side_pending_count = sum(1 for po in db.get_pending_orders(account_id, mode, "pending") if po["side"] == side)
 
+    # Same strategy-scoped budget/cap gate as entry_scan - see its own
+    # docstring. A resting order counts against the budget/cap alongside
+    # already-filled positions now (not just at fill time), same reasoning
+    # as max_concurrent_positions/side_open_count+side_pending_count above.
+    strategy_id = strategy_run["strategy_id"] if strategy_run else None
+    strategy_positions = [p for p in db.get_open_positions(account_id, mode) if p.get("strategy_id") == strategy_id] if strategy_run else []
+    strategy_pending = [po for po in db.get_pending_orders(account_id, mode, "pending") if po.get("strategy_id") == strategy_id] if strategy_run else []
+    strategy_open_count = len(strategy_positions) + len(strategy_pending)
+    strategy_open_notional = (
+        sum(p["qty"] * p["entry_price"] for p in strategy_positions)
+        + sum(po["qty"] * po["limit_price"] for po in strategy_pending)
+    )
+    if strategy_run:
+        can_enter, reason = _strategy_can_enter(strategy_run, strategy_open_count, strategy_open_notional, 0.0)
+        if not can_enter:
+            log_decision(account_id, mode, {"event": "strategy_entry_blocked", "side": side, "strategy_id": strategy_id, "reason": reason})
+            return
+
     for ticker in watchlist:
         if side_open_count + side_pending_count >= max_concurrent:
+            break
+        if strategy_run and strategy_run.get("live_max_positions") is not None and strategy_open_count >= strategy_run["live_max_positions"]:
             break
         if ticker in held_symbols:
             continue
@@ -2009,6 +2036,12 @@ def touch_turn_entry_scan(account_id: int, mode: str, ib, rules: dict, env: dict
                 _log_es_rejection(account_id, mode, rules.get("strategy_name", "?"), side, ticker, gate)
                 continue
 
+        if strategy_run:
+            can_enter, reason = _strategy_can_enter(strategy_run, strategy_open_count, strategy_open_notional, size * limit_price)
+            if not can_enter:
+                log_decision(account_id, mode, {"event": "strategy_entry_blocked", "symbol": ticker, "side": side, "strategy_id": strategy_id, "reason": reason})
+                continue
+
         # Dry run - see entry_scan's own comment on the same check. Touch &
         # Turn's real order is the resting limit placed below; skip that
         # (and its DB bookkeeping) the same way.
@@ -2026,10 +2059,14 @@ def touch_turn_entry_scan(account_id: int, mode: str, ib, rules: dict, env: dict
             "symbol": ticker, "placed_date": placed_date, "side": side,
             "limit_price": limit_price, "target_price": signal["target_price"], "initial_stop": initial_stop,
             "qty": size, "placed_at": now_et.isoformat(timespec="seconds"), "expires_at": expiry_et.isoformat(timespec="seconds"),
+            "strategy_id": strategy_id,
         })
         if not inserted:
             continue  # another tick already claimed this symbol/day between the check above and here
         side_pending_count += 1
+        if strategy_run:
+            strategy_open_count += 1
+            strategy_open_notional += size * limit_price
 
         try:
             order_id = _place_touch_turn_limit(ib, ticker, size, limit_price, side, expiry_et)
@@ -2084,13 +2121,13 @@ def check_pending_touch_turn_orders(account_id: int, mode: str, ib, positions: l
                 "entry_time_iso": now_et.isoformat(timespec="seconds"), "qty": fill_qty,
                 "initial_stop": po["initial_stop"], "stop_price": po["initial_stop"],
                 "stop_order_id": stop_order_id, "state": "pre_breakeven", "r_multiple": 0.0,
-                "target_price": po["target_price"],
+                "target_price": po["target_price"], "strategy_id": po.get("strategy_id"),
             }
             db.upsert_position(account_id, mode, new_position)
             positions.append(new_position)
             db.resolve_pending_order(account_id, mode, symbol, po["placed_date"], "filled")
             notify(f"[{mode.upper()}] Touch&Turn FILLED: {symbol}", f"@ ${fill_price:.2f}, target ${po['target_price']:.2f}, stop ${po['initial_stop']:.2f}", "default")
-            log_decision(account_id, mode, {"event": "touch_turn_fill", "symbol": symbol, "side": side, "price": fill_price, "qty": fill_qty})
+            log_decision(account_id, mode, {"event": "touch_turn_fill", "symbol": symbol, "side": side, "price": fill_price, "qty": fill_qty, "strategy_id": po.get("strategy_id")})
             continue
 
         expires_at = datetime.fromisoformat(po["expires_at"])
@@ -2109,6 +2146,151 @@ def _cancel_pending_touch_turn_order(account_id: int, mode: str, ib, po: dict, s
         _cancel_stop(ib, po["broker_order_id"])
     db.resolve_pending_order(account_id, mode, po["symbol"], po["placed_date"], status)
     log_decision(account_id, mode, {"event": f"touch_turn_{status}", "symbol": po["symbol"], "side": po["side"]})
+
+
+def virtual_touch_turn_entry_scan(account_id: int, mode: str, ib, rules: dict, env: dict, side: str, strategy_run: dict) -> None:
+    """touch_turn_entry_scan's counterpart for a strategy_run with
+    run_mode='virtual' - same signal evaluation/sizing, but records a
+    simulated resting order (db.create_virtual_pending_order) instead of
+    ever calling _place_touch_turn_limit. No broker_order_id, nothing to
+    cancel at a broker - check_pending_virtual_touch_turn_orders detects a
+    "fill" by comparing price against limit_price directly each tick (see
+    its own docstring), the same no-broker-to-poll reasoning virtual_
+    entry_scan/check_virtual_stop_outs already use elsewhere in the
+    virtual path.
+
+    held/count/budget scoping is entirely this strategy's own (virtual_
+    positions + virtual_pending_orders for this strategy_id only) - same
+    "independent of every other strategy, real or virtual" reasoning
+    virtual_entry_scan's own docstring explains for why that's fine here
+    too. virtual_capital is the notional cap (not live_budget/
+    live_max_positions, which don't apply to a virtual run)."""
+    if "opening_candle" not in rules:
+        return
+
+    strategy_id, strategy_label = strategy_run["strategy_id"], strategy_run.get("strategy_name", "?")
+    now_et = datetime.now(ET)
+    session_open_et = datetime.combine(now_et.date(), dt_time(9, 30), tzinfo=ET)
+    expiry_et = session_open_et + timedelta(minutes=rules["time_filter"]["entry_window_minutes"])
+    if now_et >= expiry_et:
+        return
+
+    watchlist = [row["symbol"] for row in db.get_watchlist(account_id, mode, direction=side, universe=_strategy_universe(rules))]
+    if not watchlist:
+        return
+
+    es_direction = _es_direction_for_scan(account_id, mode, ib, rules)
+    placed_date = now_et.date().isoformat()
+
+    risk = mode_config.risk_params(env, account_id, mode)
+    portfolio_value = risk["portfolio_value"]
+    max_risk_pct = risk["max_risk_pct"]
+    max_position_pct = rules["risk"]["max_position_size_pct_of_portfolio"] / 100
+    max_concurrent = rules["risk"]["max_concurrent_positions"]
+
+    open_positions = db.get_virtual_positions(account_id, strategy_id=strategy_id)
+    pending = db.get_virtual_pending_orders(account_id, strategy_id, "pending")
+    held_symbols = {p["symbol"] for p in open_positions} | {po["symbol"] for po in pending}
+    open_count = len(open_positions) + len(pending)
+    open_notional = (
+        sum(p["qty"] * p["entry_price"] for p in open_positions)
+        + sum(po["qty"] * po["limit_price"] for po in pending)
+    )
+    virtual_capital = strategy_run.get("virtual_capital")
+
+    for ticker in watchlist:
+        if open_count >= max_concurrent:
+            break
+        if ticker in held_symbols:
+            continue
+        if db.has_virtual_pending_order_today(account_id, strategy_id, ticker, placed_date):
+            continue
+
+        signal = _evaluate_touch_turn_entry(account_id, mode, ticker, rules, side)
+        if not signal.get("pass"):
+            continue
+
+        limit_price, initial_stop = signal["limit_price"], signal["initial_stop"]
+        r = abs(limit_price - initial_stop)
+        if r <= 0:
+            continue
+
+        risk_dollars = portfolio_value * (max_risk_pct / 100)
+        size_by_risk = math.floor(risk_dollars / r)
+        size_by_cap = math.floor(portfolio_value * max_position_pct / limit_price)
+        size = min(size_by_risk, size_by_cap)
+        if size < 1:
+            continue
+
+        if rules.get("es_vwap_filter") and db.is_es_vwap_filter_enabled(account_id, mode):
+            gate = es_filter.check(es_direction, side)
+            if not gate["allowed"]:
+                _log_es_rejection(account_id, mode, rules.get("strategy_name", "?"), side, ticker, gate)
+                continue
+
+        if virtual_capital is not None and (open_notional + size * limit_price) > virtual_capital:
+            log_decision(account_id, mode, {"event": "strategy_entry_blocked", "symbol": ticker, "side": side, "strategy_id": strategy_id, "reason": "virtual_capital_exceeded", "virtual": True})
+            continue
+
+        inserted = db.create_virtual_pending_order(account_id, strategy_id, {
+            "symbol": ticker, "placed_date": placed_date, "side": side,
+            "limit_price": limit_price, "target_price": signal["target_price"], "initial_stop": initial_stop,
+            "qty": size, "placed_at": now_et.isoformat(timespec="seconds"), "expires_at": expiry_et.isoformat(timespec="seconds"),
+        })
+        if not inserted:
+            continue
+        held_symbols.add(ticker)
+        open_count += 1
+        open_notional += size * limit_price
+        notify(f"[VIRTUAL] {strategy_label}: Touch&Turn order placed: {ticker}",
+               f"{side} limit @ ${limit_price:.2f}, target ${signal['target_price']:.2f}, stop ${initial_stop:.2f}, expires {expiry_et.strftime('%H:%M')} ET", "default")
+        log_decision(account_id, mode, {
+            "event": "touch_turn_order_placed", "symbol": ticker, "side": side,
+            "limit_price": limit_price, "target_price": signal["target_price"], "initial_stop": initial_stop, "qty": size,
+            "strategy_id": strategy_id, "virtual": True,
+        })
+
+
+def check_pending_virtual_touch_turn_orders(account_id: int, strategy_id: int, strategy_label: str) -> None:
+    """check_pending_touch_turn_orders' counterpart for a strategy_run's
+    simulated resting orders - no broker to poll for a fill, so this
+    compares the current price against limit_price directly each tick: a
+    long (resting BUY limit) fills once price <= limit_price, a short
+    (resting SELL limit) once price >= limit_price - same direction
+    convention check_virtual_stop_outs already uses for "has price
+    reached this level". Unlike a stop order (which can slip WORSE on a
+    gap), a limit order has price protection and never fills worse than
+    its own limit - so the simulated fill price is the BETTER of (limit_
+    price, current price): min() for a long, max() for a short.
+
+    Must run every tick regardless of run_mode gating elsewhere (same
+    "an already-resting order still needs watching" reasoning check_
+    pending_touch_turn_orders' own docstring gives for the real path)."""
+    now_et = datetime.now(ET)
+    for po in db.get_virtual_pending_orders(account_id, strategy_id, "pending"):
+        symbol, side = po["symbol"], po["side"]
+        price = _current_price(symbol)
+        if price is not None:
+            touched = (price <= po["limit_price"]) if side == "long" else (price >= po["limit_price"])
+            if touched:
+                fill_price = min(price, po["limit_price"]) if side == "long" else max(price, po["limit_price"])
+                new_position = {
+                    "symbol": symbol, "side": side, "entry_price": fill_price,
+                    "entry_time_iso": now_et.isoformat(timespec="seconds"), "qty": po["qty"],
+                    "initial_stop": po["initial_stop"], "stop_price": po["initial_stop"],
+                    "state": "pre_breakeven", "r_multiple": 0.0, "target_price": po["target_price"],
+                }
+                db.upsert_virtual_position(account_id, strategy_id, new_position)
+                db.resolve_virtual_pending_order(account_id, strategy_id, symbol, po["placed_date"], "filled")
+                notify(f"[VIRTUAL] {strategy_label}: Touch&Turn FILLED: {symbol}",
+                       f"@ ${fill_price:.2f}, target ${po['target_price']:.2f}, stop ${po['initial_stop']:.2f}", "default")
+                log_decision(account_id, "live", {"event": "touch_turn_fill", "symbol": symbol, "side": side, "price": fill_price, "qty": po["qty"], "strategy_id": strategy_id, "virtual": True})
+                continue
+
+        expires_at = datetime.fromisoformat(po["expires_at"])
+        if now_et >= expires_at:
+            db.resolve_virtual_pending_order(account_id, strategy_id, symbol, po["placed_date"], "expired")
+            log_decision(account_id, "live", {"event": "touch_turn_expired", "symbol": symbol, "side": side, "strategy_id": strategy_id, "virtual": True})
 
 
 def check_price_triggers(account_id: int, mode: str, ib, positions: list[dict]) -> list[dict]:
