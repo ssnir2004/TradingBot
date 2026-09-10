@@ -2337,23 +2337,40 @@ def check_price_triggers(account_id: int, mode: str, ib, positions: list[dict]) 
     unprotected. reqExecutions/reqAllOpenOrders are account-wide (same
     reasoning sync_broker_fills already relies on for the same class of
     problem), so this now finds a fill or a genuine cancel regardless of
-    which client id placed the order."""
+    which client id placed the order.
+
+    Fills are keyed by (orderId, symbol), not orderId alone - a second,
+    separate live incident (2026-09-10, CHTR/TSCO) found that IBKR's own
+    orderId is NOT reliably unique across this function's own lookups:
+    place_price_trigger.py reuses one fixed client id for every trigger it
+    places, connecting fresh and disconnecting again each time, and two
+    triggers placed close together can race Gateway's own next-order-id
+    bookkeeping into handing out the same numeric orderId for two
+    genuinely different real orders. Grouping fills by orderId alone then
+    summed BOTH orders' executions into whichever pending trigger looked
+    them up first - one filled trigger absorbed the other trigger's fill
+    price and quantity too (a real $ trade sized/priced from two unrelated
+    symbols' fills blended together), and the second trigger never saw its
+    own execution at all. orderId collisions are Gateway's behavior, not
+    something this code can prevent outright - but a fill can only ever
+    genuinely belong to a trigger placed on that trigger's OWN symbol, so
+    keying by the pair closes the hole even when the numeric id repeats."""
     pending = db.get_price_triggers(account_id, mode, "pending")
     if not pending:
         return positions
 
-    fills_by_order_id: dict[int, list] = {}
+    fills_by_key: dict[tuple[int, str], list] = {}
     for fill in ib.reqExecutions():
         if not belongs_to_account(ib, fill.execution.acctNumber):
             continue
-        fills_by_order_id.setdefault(fill.execution.orderId, []).append(fill)
+        fills_by_key.setdefault((fill.execution.orderId, fill.contract.symbol), []).append(fill)
     ib.reqAllOpenOrders()
     ib.sleep(1)
     open_order_ids = {t.order.orderId for t in ib.openTrades() if belongs_to_account(ib, t.order.account)}
 
     for trig in pending:
         order_id = trig["broker_order_id"]
-        matched_fills = fills_by_order_id.get(order_id)
+        matched_fills = fills_by_key.get((order_id, trig["symbol"]))
         if matched_fills:
             symbol, side = trig["symbol"], trig["side"]
             fill_qty = sum(int(f.execution.shares) for f in matched_fills)
@@ -2406,16 +2423,26 @@ def _cancel_price_trigger(account_id: int, mode: str, ib, trig: dict):
     found filled, this leaves it 'pending' so the next regular
     check_price_triggers call promotes it properly (protective stop +
     tracked position), which a later flatten cycle then closes out same as
-    any other open position."""
+    any other open position.
+
+    Both checks below also require the fill's/order's own symbol to match
+    trig's - same reasoning as check_price_triggers' own (orderId, symbol)
+    keying (see its docstring for the 2026-09-10 CHTR/TSCO incident):
+    orderId alone can collide across two genuinely different real orders,
+    and this function is reached from the "Flatten all now" emergency
+    button - matching only on orderId here could skip cancelling trig's
+    own still-resting order (wrongly believing it already filled, off some
+    OTHER symbol's execution sharing the same numeric id) or cancel a
+    completely unrelated symbol's order instead."""
     order_id = trig.get("broker_order_id")
     if order_id is not None:
         for fill in ib.reqExecutions():
-            if fill.execution.orderId == order_id and belongs_to_account(ib, fill.execution.acctNumber):
+            if fill.execution.orderId == order_id and fill.contract.symbol == trig["symbol"] and belongs_to_account(ib, fill.execution.acctNumber):
                 log_decision(account_id, mode, {"event": "price_trigger_already_filled_skip_cancel", "symbol": trig["symbol"], "side": trig["side"]})
                 return
         ib.reqAllOpenOrders()
         ib.sleep(1)
-        match = next((t for t in ib.openTrades() if t.order.orderId == order_id and belongs_to_account(ib, t.order.account)), None)
+        match = next((t for t in ib.openTrades() if t.order.orderId == order_id and t.contract.symbol == trig["symbol"] and belongs_to_account(ib, t.order.account)), None)
         if match is not None:
             ib.cancelOrder(match.order)
     db.resolve_price_trigger(account_id, mode, trig["id"], "cancelled")
