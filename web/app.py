@@ -26,7 +26,15 @@ from fastapi.templating import Jinja2Templates
 import cycle
 import morning_prefilter
 import run_optimization
-from src import backtest_data, backtest_engine, db, decision_observer, gateway_provisioning, mode_config, perf, risk_reduction_report, secrets_store, telemetry_engine, trade_diagnostics, trades_csv, trades_pdf, trades_xlsx, v10_recovery_report
+# trades_csv/trades_pdf/trades_xlsx are deliberately NOT imported here -
+# trades_pdf pulls in reportlab+bidi (~18MB RSS) and trades_xlsx pulls in
+# openpyxl (~24MB RSS), both only ever needed by the three trade-export
+# endpoints below, which import them locally right before use instead -
+# ~42MB the dashboard process never pays unless someone actually downloads
+# a PDF/Excel/CSV trade export (trades_csv itself imports EXIT_REASON_
+# LABELS from trades_pdf, so it drags reportlab/bidi in too - see its own
+# lazy import below).
+from src import backtest_data, backtest_engine, db, decision_observer, gateway_provisioning, mode_config, perf, risk_reduction_report, secrets_store, telemetry_engine, trade_diagnostics, v10_recovery_report
 from src.sp500_tickers import SP500_TICKERS
 from web import gateway_control
 from web.auth import COOKIE_NAME, make_session_cookie, read_session, require_user
@@ -1535,6 +1543,7 @@ def api_strategy_trades_pdf_all(account_id: int = Depends(require_account), user
     pooling/scoping/enrichment as that endpoint, just looped over every
     strategy_id perf.strategy_report already found completed backtests
     for, instead of the one this account asked for by id."""
+    from src import trades_pdf  # lazy: reportlab/bidi cost real RAM (~18MB) - only pay it when a PDF is actually requested
     backtests = db.list_done_backtest_results(account_id)
     report_entries = perf.strategy_report(backtests)
     if not report_entries:
@@ -1823,6 +1832,7 @@ def api_strategy_trades_pdf(strategy_id: int, account_id: int = Depends(require_
     account implicitly through list_done_backtest_results(account_id) -
     strategies themselves aren't per-account rows, but their backtest
     history is, so this can never leak another account's trade data."""
+    from src import trades_pdf  # lazy: reportlab/bidi cost real RAM (~18MB) - only pay it when a PDF is actually requested
     strategy = db.get_strategy(strategy_id)
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
@@ -1856,6 +1866,7 @@ def api_strategy_trades_xlsx(strategy_id: int, account_id: int = Depends(require
     real numeric cells (sortable/filterable/pivotable in Excel) instead of
     a print layout, plus a Summary sheet mirroring the PDF's own summary/
     Exit Reason Breakdown sections. See src/trades_xlsx.py."""
+    from src import trades_xlsx  # lazy: openpyxl costs real RAM (~24MB) - only pay it when an xlsx is actually requested
     strategy = db.get_strategy(strategy_id)
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
@@ -1881,6 +1892,7 @@ def api_strategy_trades_csv(strategy_id: int, account_id: int = Depends(require_
     """Same pooled trade log as trades.xlsx just above, as a plain .csv -
     the direct feed for analyze_entry_metrics.py's own statistical
     analysis. See src/trades_csv.py."""
+    from src import trades_csv  # lazy: trades_csv itself imports trades_pdf.EXIT_REASON_LABELS, dragging in reportlab/bidi too
     strategy = db.get_strategy(strategy_id)
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
