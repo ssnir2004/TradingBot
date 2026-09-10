@@ -25,7 +25,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 from src import db, mode_config
-from src.ibkr_client import IBKRClient, belongs_to_account
+from src.ibkr_client import IBKRClient, belongs_to_account, cancel_order_any_client
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
@@ -57,22 +57,30 @@ def main():
         order_id = trig["broker_order_id"]
 
         # Account-wide (reqExecutions, not ib.trades()) - see this file's
-        # own module docstring for why this check exists at all.
+        # own module docstring for why this check exists at all. Also
+        # requires the fill's own symbol to match trig's - a colliding
+        # orderId across two genuinely different real orders (a separate
+        # live incident, 2026-09-10, CHTR/TSCO - see check_price_triggers'
+        # own docstring) could otherwise match an unrelated symbol's fill
+        # here and wrongly refuse to cancel THIS trigger.
         for fill in ib.reqExecutions():
-            if fill.execution.orderId == order_id and belongs_to_account(ib, fill.execution.acctNumber):
+            if fill.execution.orderId == order_id and fill.contract.symbol == trig["symbol"] and belongs_to_account(ib, fill.execution.acctNumber):
                 print(f"[{args.mode}] {trig['symbol']}: trigger {args.trigger_id} already filled at the broker "
                       f"({fill.execution.shares} @ {fill.execution.price}) - refusing to cancel. "
                       f"The bot's own cycle will pick up the fill and start managing it on its next tick.")
                 sys.exit(1)
 
         # Account-wide (reqAllOpenOrders/openTrades, not ib.trades()) -
-        # same reasoning.
+        # same reasoning, same symbol guard.
         ib.reqAllOpenOrders()
         ib.sleep(1)
-        match = next((t.order for t in ib.openTrades() if t.order.orderId == order_id and belongs_to_account(ib, t.order.account)), None)
+        match = next((t.order for t in ib.openTrades() if t.order.orderId == order_id and t.contract.symbol == trig["symbol"] and belongs_to_account(ib, t.order.account)), None)
         if match is not None:
-            ib.cancelOrder(match)
-            ib.sleep(1)
+            # place_price_trigger.py placed this under its own, different
+            # client id - a plain ib.cancelOrder() here would silently
+            # fail (see cancel_order_any_client's own docstring for the
+            # real live incident, 2026-09-10, that class of bug caused).
+            cancel_order_any_client(ib, match)
 
         db.resolve_price_trigger(account_id, args.mode, args.trigger_id, "cancelled")
         print(f"[{args.mode}] {trig['symbol']}: trigger {args.trigger_id} cancelled")

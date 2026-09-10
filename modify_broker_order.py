@@ -36,7 +36,7 @@ from dotenv import dotenv_values
 from ib_async import LimitOrder, Order, Stock, StopOrder
 
 from src import db, mode_config
-from src.ibkr_client import IBKRClient, belongs_to_account, scoped_positions
+from src.ibkr_client import IBKRClient, act_on_order_any_client, belongs_to_account, cancel_order_any_client, scoped_positions
 
 PROJECT_DIR = Path(__file__).resolve().parent
 # Same ATR bracket-stop math as open_position.py, reused here so an
@@ -96,7 +96,7 @@ def main():
                 print(f"[{args.mode}] {symbol}: order {args.order_id} not found among open orders "
                       f"(already filled or cancelled?)")
                 sys.exit(1)
-            ib.cancelOrder(match.order)
+            cancel_order_any_client(ib, match.order)
             print(f"[{args.mode}] {symbol}: order {args.order_id} cancelled")
             return
 
@@ -121,8 +121,11 @@ def main():
                 order.lmtPrice = round(args.price, 2)
             if args.qty is not None:
                 order.totalQuantity = args.qty
-            ib.placeOrder(match.contract, order)
-            ib.sleep(1)
+            # Same ownership rule as a cancel (see cancel_order_any_client's
+            # own docstring) - a same-orderId re-submit is a live modify,
+            # not a fresh order, and IBKR only accepts that from the
+            # client id that originally placed it.
+            act_on_order_any_client(ib, order, lambda target_ib, o: target_ib.placeOrder(match.contract, o))
             print(f"[{args.mode}] {symbol}: order {args.order_id} ({order.orderType}) updated to "
                   f"${args.price:.2f}" + (f", qty {args.qty}" if args.qty is not None else ""))
             return

@@ -13,7 +13,7 @@ from dotenv import dotenv_values
 from ib_async import Stock, StopOrder
 
 from src import db, mode_config
-from src.ibkr_client import IBKRClient
+from src.ibkr_client import IBKRClient, belongs_to_account, cancel_order_any_client
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
@@ -50,12 +50,19 @@ def main():
         # Cancel the existing stop (if the API can still find it) before
         # placing the new one - same cancel-then-replace sequence cycle.py
         # itself uses for breakeven flips and trailing-stop updates.
+        # reqAllOpenOrders/openTrades (account-wide) find it regardless of
+        # which client id originally placed it (e.g. the engine's own
+        # automatic stop management) - and cancel_order_any_client is
+        # needed on top of that, since IBKR only accepts a cancelOrder()
+        # call from that SAME client id (see its own docstring for a real
+        # live incident, 2026-09-10, this exact gap caused).
         old_order_id = pos.get("stop_order_id")
         if old_order_id is not None:
-            for t in ib.trades():
-                if t.order.orderId == old_order_id:
-                    ib.cancelOrder(t.order)
+            ib.reqAllOpenOrders()
             ib.sleep(1)
+            match = next((t for t in ib.openTrades() if t.order.orderId == old_order_id and belongs_to_account(ib, t.order.account)), None)
+            if match is not None:
+                cancel_order_any_client(ib, match.order)
 
         action = "SELL" if pos.get("side", "long") == "long" else "BUY"
         order = StopOrder(action, pos["qty"], round(args.stop_price, 2))

@@ -75,6 +75,64 @@ def scoped_positions(ib: IB) -> list:
     return ib.positions(getattr(ib, "account", "") or "")
 
 
+def act_on_order_any_client(ib: IB, order, action) -> None:
+    """Runs `action(target_ib, order)` (a cancelOrder or a same-orderId
+    placeOrder "modify") against whichever IBKR API client actually owns
+    `order` (an Order object from reqAllOpenOrders()/ib.openTrades(),
+    possibly placed by a DIFFERENT client than `ib` itself).
+
+    IBKR only accepts a cancel or in-place modify of an order from the
+    exact client id that originally placed it - reqAllOpenOrders()/
+    openTrades() are account-wide for READING (any client sees every
+    order), but acting on one some OTHER client placed silently fails:
+    IBKR logs "Error 10147: OrderId X that needs to be cancelled is not
+    found", the order flips to PendingCancel, then reverts right back to
+    its prior working status - no exception is raised, nothing in this
+    codebase was checking for it. Client id 0 does NOT have a special
+    "manage anything" privilege on this account either - verified
+    directly (2026-09-10) with a disposable test order; it hit the exact
+    same silent failure as any other non-owning client id.
+
+    A real live incident (2026-09-10, CHTR) hit this through cycle.py's
+    own stop-repositioning: a dashboard-placed stop (modify_stop.py, its
+    own client id) needed to be replaced by the engine's automatic hard-
+    stop backfill (a different client id) - the cancel silently failed,
+    leaving BOTH the old and the new stop resting on the same 10 shares
+    at once.
+
+    If `order.clientId` already matches `ib`'s own client id, runs
+    `action` directly on the existing connection (the common case - a
+    script acting on an order it placed itself in this same run needs
+    nothing special). Otherwise opens a brief, separate connection using
+    the order's own clientId (reusing `ib`'s host/port/account) purely to
+    run `action`, then disconnects immediately - IBKR orderIds here are
+    really only ever one of this codebase's own small set of well-known
+    per-script client ids (see .env.example), never some arbitrary
+    external value, so this is a bounded, predictable reconnect."""
+    if order.clientId == ib.client.clientId:
+        action(ib, order)
+        ib.sleep(2)
+        return
+
+    owner = IB()
+    try:
+        owner.connect(ib.client.host, ib.client.port, clientId=order.clientId, timeout=10)
+        account = getattr(ib, "account", None)
+        if account:
+            owner.account = account
+        action(owner, order)
+        owner.sleep(2)
+    finally:
+        owner.disconnect()
+
+
+def cancel_order_any_client(ib: IB, order) -> None:
+    """act_on_order_any_client, specialized to a plain cancel - see its
+    own docstring for the full reasoning (a real live incident,
+    2026-09-10, CHTR)."""
+    act_on_order_any_client(ib, order, lambda target_ib, o: target_ib.cancelOrder(o))
+
+
 def belongs_to_account(ib: IB, acct_number: str | None) -> bool:
     """Whether an execution/order's own account attribution matches this
     connection's resolved account - for the calls that return everything

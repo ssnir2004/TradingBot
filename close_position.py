@@ -12,7 +12,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 from src import db, mode_config
-from src.ibkr_client import IBKRClient, scoped_positions
+from src.ibkr_client import IBKRClient, belongs_to_account, cancel_order_any_client, scoped_positions
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
@@ -72,16 +72,25 @@ def main():
         # If the bot itself was tracking this symbol (own entry, own stop),
         # a manual close from here bypasses that entirely — cancel the
         # orphaned stop and drop the row so the bot doesn't keep "managing"
-        # a position that no longer exists.
+        # a position that no longer exists. reqAllOpenOrders/openTrades
+        # (account-wide) finds it regardless of which client id placed it,
+        # and cancel_order_any_client is needed on top of that since IBKR
+        # only accepts a cancelOrder() call from that SAME client id (see
+        # its own docstring for a real live incident, 2026-09-10, this
+        # exact gap caused) - otherwise a stale stop could keep resting
+        # after the position it protected was already closed here, ready
+        # to open an unintended new position if price ever reaches it.
         closed_side = "long" if action == "SELL" else "short"
         for pos in db.get_open_positions(account_id, args.mode):
             if pos["symbol"] != symbol or pos["side"] != closed_side:
                 continue
             stop_order_id = pos.get("stop_order_id")
             if stop_order_id is not None:
-                for t in ib.trades():
-                    if t.order.orderId == stop_order_id:
-                        ib.cancelOrder(t.order)
+                ib.reqAllOpenOrders()
+                ib.sleep(1)
+                match = next((t for t in ib.openTrades() if t.order.orderId == stop_order_id and belongs_to_account(ib, t.order.account)), None)
+                if match is not None:
+                    cancel_order_any_client(ib, match.order)
             db.remove_position(account_id, args.mode, symbol)
 
         print(f"[{args.mode}] {action} {close_qty} {symbol}: order_id={order_id} "

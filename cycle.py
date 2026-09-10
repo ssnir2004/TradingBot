@@ -52,7 +52,7 @@ from dotenv import dotenv_values
 from ib_async import LimitOrder, Stock, StopOrder
 
 from src import db, es_filter, mode_config, orb, touch_turn
-from src.ibkr_client import IBKRClient, belongs_to_account, scoped_positions
+from src.ibkr_client import IBKRClient, belongs_to_account, cancel_order_any_client, scoped_positions
 from src.notify import notify
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -207,19 +207,23 @@ def _qualify(ib, symbol: str):
     return contract
 
 
-def _find_order(ib, order_id: int):
-    for trade in ib.trades():
-        if trade.order.orderId == order_id:
-            return trade.order
-    return None
-
-
 def _cancel_stop(ib, order_id: int | None):
+    """Cancels a resting stop order regardless of which IBKR API client
+    originally placed it (e.g. a stop the dashboard's modify_stop.py or
+    Account Holdings set, which this engine's own client id then needs to
+    reposition/cancel automatically) - see cancel_order_any_client's own
+    docstring for the real live incident (2026-09-10, CHTR) this fixes:
+    the engine's own client id could see the order via reqAllOpenOrders
+    but silently failed to actually cancel it via ib.trades()-based
+    lookup + same-connection cancelOrder(), leaving a stale duplicate
+    stop resting alongside the new one."""
     if order_id is None:
         return
-    order = _find_order(ib, order_id)
-    if order is not None:
-        ib.cancelOrder(order)
+    ib.reqAllOpenOrders()
+    ib.sleep(1)
+    match = next((t for t in ib.openTrades() if t.order.orderId == order_id and belongs_to_account(ib, t.order.account)), None)
+    if match is not None:
+        cancel_order_any_client(ib, match.order)
 
 
 def _place_stop(ib, symbol: str, quantity: int, stop_price: float, side: str) -> int:
@@ -2410,12 +2414,15 @@ def check_price_triggers(account_id: int, mode: str, ib, positions: list[dict]) 
 
 def _cancel_price_trigger(account_id: int, mode: str, ib, trig: dict):
     """Used by run_cycle's "flatten everything now" path to clear out any
-    still-resting entry trigger along with open positions. Does NOT use
-    _cancel_stop's own ib.trades()-based _find_order - the trigger order
-    was placed by a DIFFERENT client id (place_price_trigger.py's own
-    connection), which ib.trades() on THIS connection never sees (see
-    check_price_triggers' own docstring for the real incident this class
-    of bug caused) - reqAllOpenOrders/openTrades are account-wide instead.
+    still-resting entry trigger along with open positions. Looks the
+    order up via reqAllOpenOrders/openTrades (account-wide - the trigger
+    order was placed by a DIFFERENT client id, place_price_trigger.py's
+    own connection, which plain ib.trades() on THIS connection never sees
+    - see check_price_triggers' own docstring for the real incident this
+    class of bug caused), then cancels via cancel_order_any_client since
+    even seeing the order account-wide isn't enough to cancel it through
+    a different client id (see that function's own docstring for the
+    2026-09-10 CHTR incident that found this out).
 
     Checks for a fill FIRST, same reasoning: a trigger that already filled
     for real must never be blindly marked 'cancelled' (that exact mistake
@@ -2444,7 +2451,7 @@ def _cancel_price_trigger(account_id: int, mode: str, ib, trig: dict):
         ib.sleep(1)
         match = next((t for t in ib.openTrades() if t.order.orderId == order_id and t.contract.symbol == trig["symbol"] and belongs_to_account(ib, t.order.account)), None)
         if match is not None:
-            ib.cancelOrder(match.order)
+            cancel_order_any_client(ib, match.order)
     db.resolve_price_trigger(account_id, mode, trig["id"], "cancelled")
     log_decision(account_id, mode, {"event": "price_trigger_cancelled", "symbol": trig["symbol"], "side": trig["side"], "reason": "flatten_request"})
 
@@ -2861,11 +2868,10 @@ def refresh_account_info(account_id: int, mode: str):
         # cycle connection, a manual TWS/Mobile order, etc. Lets the
         # dashboard show a holding's real protective orders even for a
         # symbol the bot never touched. reconcile_broker_positions below
-        # relies on this too - its own best-effort stop cancel needs
-        # ib.trades() (what _find_order searches) to already know about an
-        # order placed under the main cycle's OWN client id, which this
-        # connection (ACCOUNT_REFRESH_CLIENT_ID) otherwise has no visibility
-        # into at all.
+        # relies on this too - its own best-effort stop cancel (_cancel_stop)
+        # calls reqAllOpenOrders() itself, but doing it here as well costs
+        # nothing extra and keeps this connection's own order view fresh
+        # for the broker_orders list built just below.
         ib.reqAllOpenOrders()
         ib.sleep(1)
         reconcile_broker_positions(account_id, mode, ib, {p["symbol"] for p in broker_positions})
