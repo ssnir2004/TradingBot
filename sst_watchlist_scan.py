@@ -51,6 +51,22 @@ import yfinance as yf
 
 from src import db
 from src.custom_universes import ET
+
+
+def _drop_todays_forming_bar(daily: pd.DataFrame) -> pd.DataFrame:
+    """Same fix as cycle._fetch_sst_daily_bars, for the same reason: once
+    the market is open, yfinance's last daily row is today's still-
+    forming bar - every score below treats the frame's tail as fully
+    closed sessions, so left unfiltered a live run would silently poison
+    noise_score/step_regularity_ratio/correlation_spy with a few minutes
+    of intraday range read as a whole day. A no-op on the intended weekly
+    Sunday-morning schedule (no session exists yet to even return), so
+    this only ever matters for a manual/rescheduled run during market
+    hours - kept anyway since the cost is one date comparison."""
+    if daily.empty:
+        return daily
+    today = datetime.now(ET).date()
+    return daily[daily.index.date < today]
 from src.notify import notify
 from src.sp500_tickers import SP500_TICKERS
 from src.sst_swing import classify_days
@@ -176,6 +192,7 @@ def run_scan(symbols: list[str] | None = None, params: dict | None = None, dry_r
         return result
     if isinstance(ref.columns, pd.MultiIndex):
         ref = ref.xs(REFERENCE_SYMBOL, axis=1, level=1)
+    ref = _drop_todays_forming_bar(ref)
 
     rows = []
     failed = 0
@@ -193,7 +210,7 @@ def run_scan(symbols: list[str] | None = None, params: dict | None = None, dry_r
             except (KeyError, TypeError):
                 failed += 1
                 continue
-            sub = sub.dropna(how="all")
+            sub = _drop_todays_forming_bar(sub.dropna(how="all"))
             hit = screen_one(sym, sub, ref, p)
             if hit is not None:
                 rows.append(hit)
