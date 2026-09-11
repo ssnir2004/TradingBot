@@ -24,6 +24,9 @@
   .live-switch-on .form-check-input:checked { background-color:#dc3545; border-color:#dc3545; }
   .breaker-blocked { color:#dc3545; font-weight:600; }
   .breaker-ok { color:#198754; }
+  .cand-passed { background:#198754; }
+  .cand-rejected { background:#6c757d; }
+  .cand-row-passed { background:rgba(25,135,84,.07); }
 </style>
 </head>
 <body>
@@ -107,6 +110,35 @@
                  <th>Avg R (gross → net)</th><th>Total R (gross → net)</th>
                  <th>PF (gross → net)</th><th>$ net</th></tr></thead>
           <tbody id="backtestByStrategy"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span>Candidates (most recent scan) <span class="text-muted small" id="candScanTime"></span></span>
+      <button class="btn btn-sm btn-outline-secondary" onclick="loadCandidates()">Refresh</button>
+    </div>
+    <div class="card-body py-2">
+      <div class="small text-muted mb-2">
+        Every symbol the scanner actually looked at this cycle, pass or fail, with why - one level
+        upstream of Recent Signals below (a candidate here still has to clear the full detector
+        pipeline before becoming a real signal). Rows here refresh every scan (~45s); a quiet page
+        with rows still appearing means the scanner is working, just not finding a qualifying setup yet.
+      </div>
+      <div class="table-responsive">
+        <table class="table table-sm table-hover mb-0 mono" style="font-size:.85rem">
+          <thead>
+            <tr>
+              <th>Symbol</th><th>Exch</th><th>Price</th><th>Δ open %</th><th>RVOL</th>
+              <th>Float</th><th>Volume</th><th>Avg Vol 10d</th><th>Premkt %</th>
+              <th>Passed?</th><th>Reject reason</th>
+            </tr>
+          </thead>
+          <tbody id="candidatesBody">
+            <tr><td colspan="11" class="text-muted">loading…</td></tr>
+          </tbody>
         </table>
       </div>
     </div>
@@ -207,6 +239,36 @@ document.getElementById("masterSwitch").addEventListener("change", async (e) => 
 });
 
 function fmt(n) { return (n === null || n === undefined) ? "—" : Number(n).toFixed(2); }
+
+function fmtCompact(n) {
+  if (n === null || n === undefined || Number.isNaN(Number(n))) return "—";
+  return Number(n).toLocaleString(undefined, { notation: "compact", maximumFractionDigits: 1 });
+}
+
+async function loadCandidates() {
+  const data = await getJSON("/api/momentum/candidates");
+  const body = document.getElementById("candidatesBody");
+  document.getElementById("candScanTime").textContent =
+    data.scan_iso ? `as of ${data.scan_iso.replace('T', ' ').slice(0, 19)}` : "";
+  if (!data.rows.length) {
+    body.innerHTML = '<tr><td colspan="11" class="text-muted">No scan has run yet.</td></tr>';
+    return;
+  }
+  body.innerHTML = data.rows.map(r => `
+    <tr class="${r.passed_screener ? 'cand-row-passed' : ''}">
+      <td class="fw-semibold">${r.symbol}</td>
+      <td>${r.exchange ?? "—"}</td>
+      <td>${fmt(r.price)}</td>
+      <td>${r.change_from_open_pct === null ? "—" : (r.change_from_open_pct >= 0 ? "+" : "") + r.change_from_open_pct.toFixed(1) + "%"}</td>
+      <td>${r.rvol === null ? "—" : Number(r.rvol).toFixed(1) + "×"}</td>
+      <td>${fmtCompact(r.float_shares)}</td>
+      <td>${fmtCompact(r.volume)}</td>
+      <td>${fmtCompact(r.avg_volume_10d)}</td>
+      <td>${r.premarket_pct === null ? "—" : (r.premarket_pct >= 0 ? "+" : "") + r.premarket_pct.toFixed(1) + "%"}</td>
+      <td><span class="badge ${r.passed_screener ? 'cand-passed' : 'cand-rejected'}">${r.passed_screener ? "pass" : "reject"}</span></td>
+      <td class="text-muted">${r.reject_reason ?? "—"}</td>
+    </tr>`).join("");
+}
 
 function statCol(label, value) {
   return `<div class="col"><div class="text-muted small">${label}</div>
@@ -365,9 +427,11 @@ loadSignals();
 loadBacktestSummary();
 loadLiveStatus();
 loadPositions();
+loadCandidates();
 setInterval(loadSignals, 30000);
 setInterval(loadLiveStatus, 15000);
 setInterval(loadPositions, 15000);
+setInterval(loadCandidates, 20000);
 </script>
 </body>
 </html>

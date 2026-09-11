@@ -204,6 +204,25 @@ def recent_signals(limit: int = 100) -> list[dict]:
         )]
 
 
+def latest_candidates() -> dict:
+    """Every candidate row from the single most recent scan cycle (see
+    loop.run_scan_cycle's own store.record_candidates call) - the raw
+    screener output, symbol-by-symbol, including WHY a candidate did or
+    didn't pass (passed_screener, reject_reason). {"scan_iso": ... or
+    None, "rows": [...]} - scan_iso lets the dashboard show how fresh
+    this is; rows is [] (not an error) for a scan cycle that found zero
+    candidates, or if the scanner hasn't run yet at all."""
+    with get_conn() as conn:
+        scan_iso = conn.execute("SELECT MAX(scan_iso) FROM momentum_candidates").fetchone()[0]
+        if scan_iso is None:
+            return {"scan_iso": None, "rows": []}
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM momentum_candidates WHERE scan_iso = ? ORDER BY change_from_open_pct DESC",
+            (scan_iso,),
+        )]
+        return {"scan_iso": scan_iso, "rows": rows}
+
+
 # --------------------------------------------------------------- bars meta ---
 def upsert_bars_meta(symbol: str, timeframe: str, from_iso: str, to_iso: str, bar_count: int) -> None:
     with get_conn() as conn:

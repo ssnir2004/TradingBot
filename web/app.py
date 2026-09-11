@@ -3177,6 +3177,17 @@ def api_momentum_signals(limit: int = Query(100, le=500), user: str = Depends(re
     return momentum_store.recent_signals(limit)
 
 
+@app.get("/api/momentum/candidates")
+def api_momentum_candidates(user: str = Depends(require_user)):
+    """Every symbol the most recent scan cycle actually looked at, pass
+    or fail, with why - the raw screener output (momentum_candidates),
+    one level upstream of /api/momentum/signals (which only ever shows a
+    candidate that made it all the way through the full detector
+    pipeline). Answers "is the scanner actually finding anything" on a
+    quiet day when zero signals alone looks the same as a stuck process."""
+    return momentum_store.latest_candidates()
+
+
 @app.get("/api/momentum/backtest_summary")
 def api_momentum_backtest_summary(mode: str = Query("backfill"), user: str = Depends(require_user)):
     """Phase 2 report (see momentum/backtest.py) - built from each
