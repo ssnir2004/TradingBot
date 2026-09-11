@@ -971,6 +971,24 @@ def _manage_position_core(pos: dict, rules: dict, ops: _PositionOps) -> dict:
             ops.save(pos)
         return pos
 
+    if exit_cfg.get("management_style") == "sst_swing_trail":
+        # SST Swing (see src/sst_swing.py, docs/sst_swing_spec.md): no
+        # breakeven stage, no intraday trailing of any kind. The real stop
+        # is a resting broker order and protects the downside on its own
+        # between cycles - nothing here needs to poll price to keep it
+        # safe. Rule 6's trailing_stop_update only ever moves the stop
+        # once per day, on a new daily bar close, from sst_swing_live's
+        # own once-a-day scheduled job (G-SST-6), never from this
+        # per-minute loop - this branch exists purely so r_multiple/
+        # mae_price (both observational, see their own comments above)
+        # still get refreshed and saved every cycle like every other
+        # position's, without any of the intraday stages below (staged
+        # breakeven flips, swing-pivot trailing) ever mistakenly firing
+        # against a position they were never designed for.
+        if pos["qty"] > 0:
+            ops.save(pos)
+        return pos
+
     if pos["state"] == "pre_breakeven":
         decision = _breakeven_decision(pos, exit_cfg, r_multiple)
         if decision["action"] == "breakeven_flip":
@@ -1639,8 +1657,17 @@ def entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dic
     the instant a signal passes like every strategy this function DOES
     handle, so it's skipped here entirely rather than falling through to
     the classic D1-D3/I1-I3 evaluator below, which would either error or
-    silently misread its unrelated rules."""
-    if "opening_candle" in rules:
+    silently misread its unrelated rules.
+
+    SST Swing (rules["strategy_type"] == "sst_swing", per G-SST-5 - an
+    explicit marker rather than shape-sniffing like the other families,
+    since it shares no rules keys with any of them) is skipped here for
+    the same reason, plus one more: it trades off DAILY bars re-evaluated
+    once per new close (G-SST-6), not this per-minute intraday scan, so
+    it isn't even called from run_cycle's normal loop the way touch_turn_
+    entry_scan is - see sst_swing_live.run_daily_scan, its own scheduled
+    job."""
+    if "opening_candle" in rules or rules.get("strategy_type") == "sst_swing":
         return positions
     if not _within_entry_window(rules):
         return positions
@@ -1863,8 +1890,13 @@ def virtual_entry_scan(account_id: int, mode: str, ib, rules: dict, env: dict, s
     strategy_run) - a virtual strategy's only throttle is its own
     concurrent-position cap and virtual_capital, same as a real account's
     own budget/position cap are its only throttle beyond the strategy's
-    own rules."""
-    if "opening_candle" in rules:
+    own rules.
+
+    SST Swing (rules["strategy_type"] == "sst_swing") is skipped here too
+    - see entry_scan's own docstring for why; its virtual-mode evaluation
+    runs from sst_swing_live.run_daily_scan alongside the real path, not
+    from this per-minute scan."""
+    if "opening_candle" in rules or rules.get("strategy_type") == "sst_swing":
         return
     if not _within_entry_window(rules):
         return
