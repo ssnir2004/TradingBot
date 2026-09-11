@@ -172,6 +172,46 @@ quick smoke test.
   2500-symbol backfill: C dropped to 14/142 (10%), A/D now dominate (55%/33%),
   B stayed rare (2%, expected - the most specific of the four patterns).
 
+## Phase 2 — backtest report (2026-09-11)
+
+`momentum/backtest.py` (entrypoint `run_momentum_backtest.py`) replays every
+`momentum_signals` row (`mode='backfill'`) forward through real 5-minute
+RTH bars, applying the Shared Exit Engine (G7-G12) exactly as documented -
+no lookahead, fill assumed at `entry_ref`. Writes `outcome`/`outcome_json`
+back onto each signal row.
+
+**Headline numbers (155 signals, all four strategies, fill-at-entry_ref,
+no slippage):** 69.7% win rate, avg +0.82R, total +127.5R, profit factor
+4.7, ≈$7,650 nominal on a $12k/0.5%-per-trade account. **Do not take these
+at face value** - three things make them fragile:
+
+1. **Outlier concentration.** The top 3 winning trades are 29% of total R;
+   one trade (D, ZSTK, +21.55R) alone is 17%. A "poor backtest" this small
+   is not resilient to a handful of extreme prints.
+2. **Only 103 independent (symbol, day) events behind 155 signals** - up
+   to 5 signals fired on the same symbol on the same day (different
+   strategies or re-entries), so the true sample of independent market
+   events is smaller than 155 suggests.
+3. **Slippage sensitivity, the big one.** Re-run with a modest 3-cent
+   worse fill on entry (stop/targets left at their original fixed
+   technical prices, matching how a real order would work): win rate
+   61.9%, avg R **+0.41** (down from +0.82), total R +64 (down from +127),
+   PF 2.78 (down from 4.7). On a 10-cent stop, 3 cents of slippage is 30%
+   of the risk unit - and 3 cents is an optimistic assumption for a fast
+   breakout on an illiquid low-float name being chased by other momentum
+   algos for the same fill. The edge roughly halves under a mild, entirely
+   plausible execution assumption.
+
+**Conclusion: encouraging, not a green light.** The strategies aren't
+obviously broken (still net positive even under the slippage stress test),
+but this backtest cannot be trusted to size a live-capital decision on its
+own - the sample is small, correlated, and outlier-driven, and real
+execution quality on 10-cent-stop penny-stock breakouts is the single
+biggest unknown the backtest can't answer. Before phase 3: keep phase 1's
+live alert-only scan running to accumulate genuinely independent, forward
+(not backfilled) signals, and treat any live-execution numbers phase 3
+eventually produces as the real test - not this report.
+
 ## Phase 1 caveats / known limits
 
 - Detectors B/C/D pattern-matching is a first cut — will be tuned against

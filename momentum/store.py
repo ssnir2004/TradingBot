@@ -141,6 +141,18 @@ def record_signal(sig: dict) -> int:
         return cur.lastrowid
 
 
+def set_signal_outcome(signal_id: int, outcome: str, outcome_detail: dict) -> None:
+    """Phase 2 (momentum.backtest) writes its simulated result back onto
+    the signal it was computed from - outcome is the short label ("win" /
+    "loss" / "scratch" / "no_data"), outcome_json the full detail
+    (r_multiple, exit_reason, bars_held, ...)."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE momentum_signals SET outcome = ?, outcome_json = ? WHERE id = ?",
+            (outcome, json.dumps(outcome_detail, default=str), signal_id),
+        )
+
+
 def recent_signals(limit: int = 100) -> list[dict]:
     with get_conn() as conn:
         return [dict(r) for r in conn.execute(
