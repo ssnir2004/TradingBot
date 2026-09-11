@@ -58,7 +58,20 @@ DEFAULTS = {
         "bailout_exit_type": "market",      # G10
         "first_scale_r": 1.0,               # G11 sell half here
         "breakeven_after_first_scale": True,  # G11
-        "second_scale_r": 2.0,              # G11 sell half of the remainder
+        # use_second_scale changed to False on 2026-09-11: a phase 2
+        # backtest re-run comparing "sell 25% more at second_scale_r, let
+        # the last 25% run" against "let the whole other 50% run past
+        # first_scale_r" found the second explicit scale was cutting
+        # winners short - avg R +0.24 -> +0.45, PF 1.81 -> 2.48, on
+        # essentially the same commission total. second_scale_r/price is
+        # still computed (informational on the signal) but no longer
+        # acted on by the exit engine while this is False. See
+        # docs/momentum_strategy_spec.md's "Phase 2" section - it also
+        # records a widened stop (20c) as tried and REJECTED (cut
+        # commission ~40% but hurt avg R more: hitting a proportionally
+        # farther target got harder, so don't revisit that one blindly.
+        "use_second_scale": False,          # G11
+        "second_scale_r": 2.0,              # G11 informational only while use_second_scale is False
         "runner_trail": "prior_5m_low",     # G11
     },
 

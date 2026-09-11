@@ -96,7 +96,7 @@ discretionary exits (all per the source / require feeds we don't have).
 | G8 | `exit.red_candle_exit_enabled` · `red_candle_hold_min_r` | true · 2.0R |
 | G9 | `risk.per_trade_pct` · `max_concurrent_positions` · `max_position_notional_usd` · `daily_max_loss_usd` · `daily_max_trades` | 0.5% · 1 · 3000 · 200 · 5 |
 | G10 | `exit.bailout_minutes` · `bailout_exit_type` | 5 · `market` |
-| G11 | `exit.first_scale_r` / `second_scale_r` · `breakeven_after_first_scale` · `runner_trail` | 1.0R / 2.0R · true · `prior_5m_low` |
+| G11 | `exit.first_scale_r` · `use_second_scale` · `breakeven_after_first_scale` · `runner_trail` | 1.0R · **false** (changed 2026-09-11 - see Phase 2's exit-tuning note; the other 50% rides past first_scale_r instead of a fixed second scale-out) · true · `prior_5m_low` |
 | G12 | `strategy_D.stop_mode` | `shared` (inherits the 10¢ stop; `pivot_low` available) |
 
 *Phase 1 computes these levels and shows them in the alert; nothing is
@@ -184,51 +184,83 @@ side by side, always - never just one number. Writes `outcome`/
 `outcome_json` (both figures) back onto each signal row; shown on the
 `/momentum` dashboard page too.
 
-**Gross headline (155 signals, fill-at-entry_ref, no costs):** 69.7% win
-rate, avg +0.82R, total +127.5R, PF 4.7, ≈$7,650 nominal. **Net (realistic:
-3¢ slippage + commissions):** 55.5% win rate, avg **+0.23R**, total +35.9R,
-PF **1.75**, ≈**$2,155** nominal, **$1,583 paid in commissions**. The two
-costs compound - slippage alone (no commissions) had already roughly
-halved the edge in an earlier pass; adding the real commission schedule on
-top cuts it further, down to about a quarter of the optimistic number.
+**Gross headline (155 signals, fill-at-entry_ref, no costs, original
+two-scale exit):** 69.7% win rate, avg +0.82R, PF 4.7, ≈$7,650 nominal.
+**Net (realistic: 3¢ slippage + commissions):** 55.5% win rate, avg
++0.23R, PF 1.75, ≈$2,155 nominal, $1,583 in commissions - about a quarter
+of the optimistic number. This first net pass is what motivated the
+exit-rule tuning below.
 
-Two commission-specific notes: (1) every leg of a trade - the entry buy,
-each scale-out sell, the final exit - is its own order and its own fee,
-so a 4-leg trade (both scale-outs + a runner) pays up to 4x the per-order
-minimum; (2) with a $60 risk budget most positions size to a few hundred
-shares, which sits right at this broker's flat-fee/per-share breakpoint,
-so the fee schedule bites harder here than it would on a larger account.
+### Exit-rule tuning: dropping the second scale (2026-09-11)
+
+The commission investigation above led to a real question: is locking in
+25% of the position at exactly `second_scale_r` (2.0R) actually better
+than letting that whole remaining 50% ride the trailing stop past
+`first_scale_r`? Tested both directly on the same 155 signals (see
+`momentum.config`'s `exit.use_second_scale`):
+
+| variant | win rate | avg R (net) | PF (net) | commission |
+|---|---|---|---|---|
+| original (2 scales) | 58.1% | +0.24 | 1.81 | $1,583 |
+| **drop 2nd scale (adopted)** | 52.3% | **+0.44** | **2.39** | $1,552 |
+| widen stop to 20c (2 scales) | 52.3% | +0.19 | 1.78 | $959 |
+| widen stop to 20c + drop 2nd scale | 52.3% | +0.27 | 2.14 | $905 |
+
+**Dropping the second scale roughly doubled net avg R for essentially the
+same commission** - the fixed 2R take-profit was cutting real winners
+short more than it was protecting against reversals. Widening the stop to
+20c was tried too (it does cut commission ~40%, since position size scales
+inversely with stop distance) but **made results worse**, not better - the
+proportionally farther targets became harder to reach before red-candle/
+bailout closed the trade. **Rejected - do not revisit without new
+evidence.** `exit.use_second_scale` is now `False` by default;
+`second_scale_r`/`second_scale_price` are still computed and shown
+(informational) but no longer acted on by the exit engine or the backtest.
+
+**Current net headline (155 signals, second scale dropped):** 52.3% win
+rate, avg **+0.44R**, total +67.4R, PF **2.39**, ≈**$4,043** nominal,
+$1,552 in commissions - roughly double the net profitability of the
+original exit rule, at essentially the same cost.
+
+Two commission-specific notes that remain true regardless of exit rule:
+(1) every leg of a trade - the entry buy, each scale-out sell, the final
+exit - is its own order and its own fee; (2) with a fixed-cents stop, the
+commission-as-%-of-risk ratio is structurally ~`2 x per_share_fee /
+stop_dollars` (here, ~17-20%) **independent of account size** - the only
+ways to change that ratio are a different stop distance (tried, rejected
+above), fewer legs (the change adopted above), or a different broker fee
+schedule (not investigated here - worth checking against alternate
+commission plans separately, no code change needed either way).
 
 Other reasons not to over-trust even the net figure:
 
-1. **Outlier concentration.** The top 3 winning trades are ~25%+ of total
-   net R; one trade (D, ZSTK, +16.15R net) alone is a large single share.
-   A "poor backtest" this small is not resilient to a handful of extreme
-   prints.
+1. **Outlier concentration.** A handful of trades (esp. one, D/ZSTK,
+   +31.57R net) are a large share of total net R. A "poor backtest" this
+   small is not resilient to a handful of extreme prints.
 2. **Only 103 independent (symbol, day) events behind 155 signals** - up
    to 5 signals fired on the same symbol on the same day, so the true
    sample of independent market events is smaller than 155 suggests.
 3. Sizing is illustrative ($12k nominal account, 0.5%/trade) - see
    momentum.backfill's own equity_usd=None note.
 
-**By strategy (net) - this changed the phase-3 ordering:** D is now the
-strongest (win 54.7%, PF 2.69, +$1,184), A still positive but weaker
-(win 59.3%, PF 1.61, +$1,098), **C is a net LOSER once costs are included**
-(PF 0.66, -$112 - it looked profitable gross at +$298), B stayed too small
-a sample to read (n=2). **D, not A, is now the stronger phase-3 candidate**
-- the original "A first" plan (chosen before this report existed) should
-be revisited.
+**By strategy (net, second scale dropped) - this changed the phase-3
+ordering:** D is by far the strongest (win 52.8%, **PF 4.1**, +$2,175), A
+solid (win 54.7%, PF 2.08, +$1,959), **C is a net LOSER once costs are
+included** (PF 0.78, -$73 - it looked profitable gross), B stayed too
+small a sample to read (n=2). **D, not A, is the stronger phase-3
+candidate** - the original "A first" plan (chosen before this report
+existed) should be revisited.
 
 **Conclusion: encouraging, not a green light.** The strategies aren't
-obviously broken (A and D stay net positive under realistic costs), but
-this backtest cannot size a live-capital decision on its own - the sample
-is small, correlated, and outlier-driven, and real execution quality on
-10-cent-stop penny-stock breakouts is the single biggest unknown it can't
-answer (the 3¢ slippage assumption is itself a guess, not measured). Before
-phase 3: keep phase 1's live alert-only scan running to accumulate
-genuinely independent, forward (not backfilled) signals, and treat any
-live-execution numbers phase 3 eventually produces as the real test - not
-this report.
+obviously broken (A and D stay net positive under realistic costs, and
+meaningfully improved by the exit-rule fix), but this backtest cannot size
+a live-capital decision on its own - the sample is small, correlated, and
+outlier-driven, and real execution quality on 10-cent-stop penny-stock
+breakouts is the single biggest unknown it can't answer (the 3¢ slippage
+assumption is itself a guess, not measured). Before phase 3: keep phase
+1's live alert-only scan running to accumulate genuinely independent,
+forward (not backfilled) signals, and treat any live-execution numbers
+phase 3 eventually produces as the real test - not this report.
 
 ## Phase 1 caveats / known limits
 

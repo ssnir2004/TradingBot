@@ -162,7 +162,7 @@ def simulate_signal(sig: dict, day_bars_rth: pd.DataFrame, cfg: dict) -> dict:
             scaled1 = True
             if ex["breakeven_after_first_scale"]:
                 cur_stop = max(cur_stop, entry_ref)
-        if scaled1 and not scaled2 and high >= scale2:
+        if ex["use_second_scale"] and scaled1 and not scaled2 and high >= scale2:
             realized_r_gross += 0.25 * ex["second_scale_r"]
             realized_r_net += 0.25 * ((scale2 - fill) / r_unit_net)
             remaining -= 0.25
