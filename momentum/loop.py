@@ -67,6 +67,8 @@ def run_scan_cycle(account_id: int, *, force: bool = False) -> dict:
     cfg = load_config()
     scan_iso = datetime.now(ET).isoformat(timespec="seconds")
 
+    if not force and not cfg.get("enabled", True):
+        return {"scan_iso": scan_iso, "skipped": "disabled (dashboard kill switch)"}
     if not force and not in_entry_window(cfg):
         return {"scan_iso": scan_iso, "skipped": "outside entry window"}
 

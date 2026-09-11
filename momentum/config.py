@@ -17,6 +17,12 @@ from src import db
 CONFIG_SETTING_KEY = "momentum:config_json"
 
 DEFAULTS = {
+    # Master kill switch - checked once per cycle in momentum.loop before
+    # anything else runs. Independent of the strategy_X.enabled flags
+    # below (those gate individual detectors; this stops the scan
+    # entirely). Toggled from the dashboard's Momentum page.
+    "enabled": True,
+
     # ---- G1-G6 : screener / universe -----------------------------------
     "screener": {
         "poll_seconds": 45,                 # how often the scan loop hits TradingView
@@ -148,3 +154,23 @@ def load_config() -> dict:
 def save_override(override: dict) -> None:
     """Persist a (partial) override dict. Stored verbatim; merged at read."""
     db.set_setting(CONFIG_SETTING_KEY, json.dumps(override, indent=2, default=str))
+
+
+def get_raw_override() -> dict:
+    raw = db.get_setting(CONFIG_SETTING_KEY, "")
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+
+
+def update_override(patch: dict) -> dict:
+    """Deep-merges `patch` into whatever override is already saved (so
+    toggling one switch - e.g. strategy_B.enabled - never clobbers an
+    earlier, unrelated override) and persists the result. Returns the new
+    merged config (DEFAULTS + override) for the caller to hand back."""
+    merged_override = _deep_merge(get_raw_override(), patch)
+    save_override(merged_override)
+    return load_config()

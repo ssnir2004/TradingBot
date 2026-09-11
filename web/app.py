@@ -26,6 +26,8 @@ from fastapi.templating import Jinja2Templates
 import cycle
 import morning_prefilter
 import run_optimization
+from momentum import config as momentum_config
+from momentum import store as momentum_store
 # trades_csv/trades_pdf/trades_xlsx are deliberately NOT imported here -
 # trades_pdf pulls in reportlab+bidi (~18MB RSS) and trades_xlsx pulls in
 # openpyxl (~24MB RSS), both only ever needed by the three trade-export
@@ -3009,3 +3011,76 @@ async def api_worker_fail(backtest_id: int, request: Request, account_id: int = 
     if not db.fail_worker_backtest(backtest_id, account_id, str(error)):
         raise HTTPException(status_code=404, detail="Backtest not found, not claimed by this account, or no longer 'running'")
     return {"ok": True}
+
+
+# ------------------------------------------------------------- momentum ---
+# Read-only status/signal feed + on-off switches for the momentum-scan.
+# service (see momentum/ - a fully separate scanner/detector suite, not
+# one of the strategies table's cycle.py-compatible rule sets, so it gets
+# its own page rather than showing up on /bot). The service polls
+# momentum.config.load_config() every cycle, so a toggle here takes
+# effect on the *next* scan (within poll_seconds), no restart needed.
+MOMENTUM_STRATEGY_NAMES = {
+    "A": "WholeHalfDollarBreak",
+    "B": "BullFlagFlatTop",
+    "C": "MAPullback9ema",
+    "D": "Setup1234",
+}
+
+
+@app.get("/momentum", response_class=HTMLResponse)
+def momentum_page(request: Request):
+    if not db.any_users_exist():
+        return RedirectResponse("/setup", status_code=303)
+    username = read_session(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    account = db.get_user_by_username(username)
+    if account and account.get("role") == "viewer":
+        return RedirectResponse("/backtest", status_code=303)
+    return templates.TemplateResponse(request, "momentum.html", {
+        "active_page": "momentum", "is_admin": bool(account and account.get("is_admin")),
+        "strategy_names": MOMENTUM_STRATEGY_NAMES,
+    })
+
+
+@app.get("/api/momentum/status")
+def api_momentum_status(user: str = Depends(require_user)):
+    cfg = momentum_config.load_config()
+    return {
+        "enabled": cfg.get("enabled", True),
+        "poll_seconds": cfg["screener"]["poll_seconds"],
+        "entry_window_et": cfg["screener"]["entry_window_et"],
+        "strategies": {
+            key: {"name": MOMENTUM_STRATEGY_NAMES[key], "enabled": cfg[f"strategy_{key}"]["enabled"]}
+            for key in MOMENTUM_STRATEGY_NAMES
+        },
+    }
+
+
+@app.post("/api/momentum/toggle")
+async def api_momentum_toggle(request: Request, user: str = Depends(require_full_access)):
+    body = await request.json()
+    enabled = bool(body.get("enabled"))
+    momentum_config.update_override({"enabled": enabled})
+    db.log_decision(db.get_default_account_id(), "live", "dashboard_control",
+                    action="momentum_toggle", enabled=enabled, user=user)
+    return {"enabled": enabled}
+
+
+@app.post("/api/momentum/strategy_toggle")
+async def api_momentum_strategy_toggle(request: Request, user: str = Depends(require_full_access)):
+    body = await request.json()
+    strategy = body.get("strategy")
+    if strategy not in MOMENTUM_STRATEGY_NAMES:
+        raise HTTPException(status_code=400, detail=f"strategy must be one of {list(MOMENTUM_STRATEGY_NAMES)}")
+    enabled = bool(body.get("enabled"))
+    momentum_config.update_override({f"strategy_{strategy}": {"enabled": enabled}})
+    db.log_decision(db.get_default_account_id(), "live", "dashboard_control",
+                    action="momentum_strategy_toggle", strategy=strategy, enabled=enabled, user=user)
+    return {"strategy": strategy, "enabled": enabled}
+
+
+@app.get("/api/momentum/signals")
+def api_momentum_signals(limit: int = Query(100, le=500), user: str = Depends(require_user)):
+    return momentum_store.recent_signals(limit)
