@@ -55,18 +55,19 @@
     <div class="card-body">
       <div class="caveat-box mb-3">
         ⚠ <strong>Encouraging, not a green light.</strong> The sample is small, several
-        signals share the same (symbol, day) so they aren't fully independent, a
-        handful of outlier trades drive a large share of the total, and everything
-        here assumes a fill at the exact entry price with no slippage. A modest
-        3¢-worse-fill sensitivity test roughly <strong>halved</strong> the edge
-        (avg R, PF) below. See docs/momentum_strategy_spec.md's "Phase 2" section
-        for the full write-up. Do not size a live-capital decision on this alone.
+        signals share the same (symbol, day) so they aren't fully independent, and a
+        handful of outlier trades drive a large share of the total. <strong>Net</strong>
+        columns below already include a modest slippage assumption
+        (<span id="slippageNote">3¢</span> worse fill) and the real broker commission
+        schedule - both configurable in momentum.config. See docs/momentum_strategy_spec.md's
+        "Phase 2" section for the full write-up. Do not size a live-capital decision on this alone.
       </div>
       <div class="row mb-3 text-center" id="backtestOverall"></div>
       <div class="table-responsive">
         <table class="table table-sm mb-0 mono" style="font-size:.85rem">
-          <thead><tr><th>Strategy</th><th>n</th><th>Win rate</th><th>Avg R</th>
-                 <th>Total R</th><th>Profit Factor</th><th>Nominal $</th></tr></thead>
+          <thead><tr><th>Strategy</th><th>n</th><th>Win rate</th>
+                 <th>Avg R (gross → net)</th><th>Total R (gross → net)</th>
+                 <th>PF (gross → net)</th><th>$ net</th></tr></thead>
           <tbody id="backtestByStrategy"></tbody>
         </table>
       </div>
@@ -153,6 +154,8 @@ async function loadStatus() {
   document.getElementById("pollSeconds").textContent = status.poll_seconds;
   document.getElementById("entryWindow").textContent = status.entry_window_et.join(" – ");
   renderStrategyToggles(status.strategies);
+  const slipEl = document.getElementById("slippageNote");
+  if (slipEl && status.slippage_cents !== undefined) slipEl.textContent = status.slippage_cents + "¢";
 }
 
 document.getElementById("masterSwitch").addEventListener("change", async (e) => {
@@ -182,23 +185,25 @@ async function loadBacktestSummary() {
   const o = summary.overall;
   if (!o || !o.n) return;
   document.getElementById("backtestCard").style.display = "";
+  const gn = (g, n2) => `${g >= 0 ? "+" : ""}${g} → ${n2 >= 0 ? "+" : ""}${n2}`;
   document.getElementById("backtestOverall").innerHTML = [
     statCol("Signals", o.n),
-    statCol("Win rate", o.win_rate_pct + "%"),
-    statCol("Avg R", (o.avg_r >= 0 ? "+" : "") + o.avg_r),
-    statCol("Total R", (o.total_r >= 0 ? "+" : "") + o.total_r),
-    statCol("Profit Factor", o.profit_factor ?? "—"),
-    statCol("Nominal $", "$" + o.total_dollars_nominal.toLocaleString()),
+    statCol("Win rate (net)", o.win_rate_pct + "%"),
+    statCol("Avg R g→n", gn(o.avg_r_gross, o.avg_r_net)),
+    statCol("Total R g→n", gn(o.total_r_gross, o.total_r_net)),
+    statCol("PF g→n", `${o.profit_factor_gross ?? "—"} → ${o.profit_factor_net ?? "—"}`),
+    statCol("$ net (commission $" + o.total_commission.toLocaleString() + ")",
+            "$" + o.total_dollars_net.toLocaleString()),
   ].join("");
   const body = document.getElementById("backtestByStrategy");
   body.innerHTML = Object.entries(summary.by_strategy).map(([k, s]) => s.n ? `
     <tr>
       <td><span class="badge badge-strategy-${k}">${k}</span> ${STRATEGY_NAMES[k] || ""}</td>
       <td>${s.n}</td><td>${s.win_rate_pct}%</td>
-      <td>${s.avg_r >= 0 ? "+" : ""}${s.avg_r}</td>
-      <td>${s.total_r >= 0 ? "+" : ""}${s.total_r}</td>
-      <td>${s.profit_factor ?? "—"}</td>
-      <td>$${s.total_dollars_nominal.toLocaleString()}</td>
+      <td>${gn(s.avg_r_gross, s.avg_r_net)}</td>
+      <td>${gn(s.total_r_gross, s.total_r_net)}</td>
+      <td>${s.profit_factor_gross ?? "—"} → ${s.profit_factor_net ?? "—"}</td>
+      <td>$${s.total_dollars_net.toLocaleString()}</td>
     </tr>` : "").join("");
 }
 
@@ -217,7 +222,9 @@ async function loadSignals() {
     if (r.outcome_json) {
       try {
         const d = JSON.parse(r.outcome_json);
-        rCell = (d.r_multiple >= 0 ? "+" : "") + Number(d.r_multiple).toFixed(2);
+        const rNet = Number(d.r_multiple_net).toFixed(2);
+        const rGross = Number(d.r_multiple_gross).toFixed(2);
+        rCell = `${d.r_multiple_net >= 0 ? "+" : ""}${rNet} <span class="text-muted">(gross ${d.r_multiple_gross >= 0 ? "+" : ""}${rGross})</span>`;
         outcomeCell = `<span class="outcome-${r.outcome}">${r.outcome}</span> (${d.exit_reason || ""})`;
       } catch (e) { /* leave dashes */ }
     }

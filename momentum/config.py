@@ -71,6 +71,26 @@ DEFAULTS = {
         "daily_max_trades": 5,
     },
 
+    # ---- backtest realism (phase 2 only - not used by the live scanner) ----
+    # Not one of G1-G19 (those are entry/exit rules); these model the two
+    # real-world costs a "poor backtest" otherwise hides. Added 2026-09-11
+    # after the phase 2 report's headline numbers (69.7% win, PF 4.7) turned
+    # out to be fragile - see docs/momentum_strategy_spec.md's "Phase 2"
+    # section for the full investigation.
+    "execution": {
+        "slippage_cents": 3,   # assumed worse fill on entry vs the technical
+                                # trigger price; stop/scale levels stay at
+                                # their original fixed prices (a resting
+                                # order at a technical level doesn't move
+                                # just because your own fill was worse)
+    },
+    "commissions": {
+        "enabled": True,
+        "flat_fee_usd": 1.50,          # per order, up to flat_fee_max_shares
+        "flat_fee_max_shares": 150,
+        "per_share_usd": 0.01,         # per order, above flat_fee_max_shares
+    },
+
     # ---- G13-G15 : shared pattern primitives -------------------------
     "patterns": {
         "entry_timeframe": "5m",            # G13

@@ -3056,6 +3056,7 @@ def api_momentum_status(user: str = Depends(require_user)):
             key: {"name": MOMENTUM_STRATEGY_NAMES[key], "enabled": cfg[f"strategy_{key}"]["enabled"]}
             for key in MOMENTUM_STRATEGY_NAMES
         },
+        "slippage_cents": cfg["execution"]["slippage_cents"],
     }
 
 

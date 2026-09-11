@@ -177,40 +177,58 @@ quick smoke test.
 `momentum/backtest.py` (entrypoint `run_momentum_backtest.py`) replays every
 `momentum_signals` row (`mode='backfill'`) forward through real 5-minute
 RTH bars, applying the Shared Exit Engine (G7-G12) exactly as documented -
-no lookahead, fill assumed at `entry_ref`. Writes `outcome`/`outcome_json`
-back onto each signal row.
+no lookahead. Reports **gross** (optimistic: fill at `entry_ref`, no
+commissions) and **net** (realistic: `execution.slippage_cents` worse fill
++ the broker's own `commissions` schedule, both in `momentum/config.py`)
+side by side, always - never just one number. Writes `outcome`/
+`outcome_json` (both figures) back onto each signal row; shown on the
+`/momentum` dashboard page too.
 
-**Headline numbers (155 signals, all four strategies, fill-at-entry_ref,
-no slippage):** 69.7% win rate, avg +0.82R, total +127.5R, profit factor
-4.7, ≈$7,650 nominal on a $12k/0.5%-per-trade account. **Do not take these
-at face value** - three things make them fragile:
+**Gross headline (155 signals, fill-at-entry_ref, no costs):** 69.7% win
+rate, avg +0.82R, total +127.5R, PF 4.7, ≈$7,650 nominal. **Net (realistic:
+3¢ slippage + commissions):** 55.5% win rate, avg **+0.23R**, total +35.9R,
+PF **1.75**, ≈**$2,155** nominal, **$1,583 paid in commissions**. The two
+costs compound - slippage alone (no commissions) had already roughly
+halved the edge in an earlier pass; adding the real commission schedule on
+top cuts it further, down to about a quarter of the optimistic number.
 
-1. **Outlier concentration.** The top 3 winning trades are 29% of total R;
-   one trade (D, ZSTK, +21.55R) alone is 17%. A "poor backtest" this small
-   is not resilient to a handful of extreme prints.
+Two commission-specific notes: (1) every leg of a trade - the entry buy,
+each scale-out sell, the final exit - is its own order and its own fee,
+so a 4-leg trade (both scale-outs + a runner) pays up to 4x the per-order
+minimum; (2) with a $60 risk budget most positions size to a few hundred
+shares, which sits right at this broker's flat-fee/per-share breakpoint,
+so the fee schedule bites harder here than it would on a larger account.
+
+Other reasons not to over-trust even the net figure:
+
+1. **Outlier concentration.** The top 3 winning trades are ~25%+ of total
+   net R; one trade (D, ZSTK, +16.15R net) alone is a large single share.
+   A "poor backtest" this small is not resilient to a handful of extreme
+   prints.
 2. **Only 103 independent (symbol, day) events behind 155 signals** - up
-   to 5 signals fired on the same symbol on the same day (different
-   strategies or re-entries), so the true sample of independent market
-   events is smaller than 155 suggests.
-3. **Slippage sensitivity, the big one.** Re-run with a modest 3-cent
-   worse fill on entry (stop/targets left at their original fixed
-   technical prices, matching how a real order would work): win rate
-   61.9%, avg R **+0.41** (down from +0.82), total R +64 (down from +127),
-   PF 2.78 (down from 4.7). On a 10-cent stop, 3 cents of slippage is 30%
-   of the risk unit - and 3 cents is an optimistic assumption for a fast
-   breakout on an illiquid low-float name being chased by other momentum
-   algos for the same fill. The edge roughly halves under a mild, entirely
-   plausible execution assumption.
+   to 5 signals fired on the same symbol on the same day, so the true
+   sample of independent market events is smaller than 155 suggests.
+3. Sizing is illustrative ($12k nominal account, 0.5%/trade) - see
+   momentum.backfill's own equity_usd=None note.
+
+**By strategy (net) - this changed the phase-3 ordering:** D is now the
+strongest (win 54.7%, PF 2.69, +$1,184), A still positive but weaker
+(win 59.3%, PF 1.61, +$1,098), **C is a net LOSER once costs are included**
+(PF 0.66, -$112 - it looked profitable gross at +$298), B stayed too small
+a sample to read (n=2). **D, not A, is now the stronger phase-3 candidate**
+- the original "A first" plan (chosen before this report existed) should
+be revisited.
 
 **Conclusion: encouraging, not a green light.** The strategies aren't
-obviously broken (still net positive even under the slippage stress test),
-but this backtest cannot be trusted to size a live-capital decision on its
-own - the sample is small, correlated, and outlier-driven, and real
-execution quality on 10-cent-stop penny-stock breakouts is the single
-biggest unknown the backtest can't answer. Before phase 3: keep phase 1's
-live alert-only scan running to accumulate genuinely independent, forward
-(not backfilled) signals, and treat any live-execution numbers phase 3
-eventually produces as the real test - not this report.
+obviously broken (A and D stay net positive under realistic costs), but
+this backtest cannot size a live-capital decision on its own - the sample
+is small, correlated, and outlier-driven, and real execution quality on
+10-cent-stop penny-stock breakouts is the single biggest unknown it can't
+answer (the 3¢ slippage assumption is itself a guess, not measured). Before
+phase 3: keep phase 1's live alert-only scan running to accumulate
+genuinely independent, forward (not backfilled) signals, and treat any
+live-execution numbers phase 3 eventually produces as the real test - not
+this report.
 
 ## Phase 1 caveats / known limits
 
