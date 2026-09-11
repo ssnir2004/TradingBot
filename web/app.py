@@ -1098,6 +1098,68 @@ def api_refresh_account(mode: str = Depends(require_mode), account_id: int = Dep
     return {"ok": True}
 
 
+TRADE_HISTORY_SCAN_LIMIT = 3000  # same "scan N recent rows, filter in Python" reasoning as
+                                 # db.get_decision_log_for_symbol's own scan_limit - a single
+                                 # account's trade history is small enough that this is cheap,
+                                 # and get_trades has no per-symbol filter to push this down to.
+
+
+def _today_entry_refs(account_id: int, mode: str) -> dict[str, tuple[float, str]]:
+    """{symbol: (weighted_avg_fill_price, "entry")} for every symbol that
+    was flat (net 0 shares) immediately before today's FIRST fill and has
+    at least one fill today - i.e. a position genuinely opened today, by
+    ANY route (the bot's own entry_scan, a manual price trigger, a direct
+    trade.py/open_position.py call - every one of those writes to the
+    same trades table, so this needs no special-casing per origin).
+
+    This replaces an earlier version of this fix that only recognized a
+    position the BOT's own positions table was tracking (bot_pos with
+    entry_time_iso == today) - which meant a position opened by a MANUAL
+    price trigger (see web/templates/trading.html's own trigger UI) still
+    fell through to yesterday's close, showing a "Daily P&L" that folded
+    in whatever the symbol did before the user actually bought in (e.g.
+    an overnight gap), while Unrealized P&L (avg_cost-based, always
+    correct) quietly told the true story a few columns over - confirmed
+    live, 2026-09-11: HPQ bought at 10:26 ET today (avg cost $35.855,
+    entirely from today's own fills, yfinance's prior close $32.73) showed
+    "Daily P&L $326" despite Unrealized P&L (the actual gain since
+    buying) being ~$13.50 - the other ~$312 was HPQ's overnight gap
+    BEFORE this position existed, not anything actually captured.
+
+    A symbol with any fill strictly before today is left alone (still
+    yesterday's close) - a partial add-to-an-existing-position case isn't
+    handled specially here, same scope limitation the bot_pos-only
+    version already had (it only ever looked at the single currently-open
+    entry_time_iso, never a partial-add history either)."""
+    trades = db.get_trades(account_id, mode, limit=TRADE_HISTORY_SCAN_LIMIT)
+    today_et = datetime.now(cycle.ET).date()
+    by_symbol: dict[str, list[dict]] = {}
+    for t in trades:
+        by_symbol.setdefault(t["symbol"], []).append(t)
+
+    refs = {}
+    for symbol, symbol_trades in by_symbol.items():
+        symbol_trades.sort(key=lambda t: t["timestamp_iso"])  # oldest first (get_trades returns DESC)
+        net_qty_before_today = 0.0
+        today_fills: list[dict] = []
+        for t in symbol_trades:
+            try:
+                t_date = datetime.fromisoformat(t["timestamp_iso"]).astimezone(cycle.ET).date()
+            except Exception:
+                continue
+            signed = t["size"] if t["side"] == "BUY" else -t["size"]
+            if t_date < today_et:
+                net_qty_before_today += signed
+            elif t_date == today_et:
+                today_fills.append(t)
+        if today_fills and abs(net_qty_before_today) < 1e-9:
+            total_qty = sum(t["size"] for t in today_fills)
+            if total_qty > 0:
+                weighted_price = sum(t["fill_price"] * t["size"] for t in today_fills) / total_qty
+                refs[symbol] = (weighted_price, "entry")
+    return refs
+
+
 @app.get("/api/broker_positions")
 def api_broker_positions(mode: str = Depends(require_mode), account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     """Every real IBKR holding in this mode's account, independent of
@@ -1109,17 +1171,17 @@ def api_broker_positions(mode: str = Depends(require_mode), account_id: int = De
     for o in db.get_broker_orders(account_id, mode)["orders"]:
         orders_by_symbol.setdefault(o["symbol"], []).append(o)
 
-    # For "Daily P&L"/the Last Price column's $ figure below: a position the
-    # bot opened TODAY has no meaningful "yesterday's close" reference - the
-    # move from yesterday's close to now includes the overnight gap and
-    # whatever the symbol did before the position even existed, which can
-    # show a phantom gain (or hide a real loss) that has nothing to do with
-    # what was actually bought/sold. Use the bot's own entry_price as the
-    # reference instead whenever entry_time_iso falls on today's date;
-    # otherwise (a position already open before today) yesterday's close is
-    # still the right "how much today" reference, same as before.
-    open_positions_by_symbol = {p["symbol"]: p for p in db.get_open_positions(account_id, mode)}
-    today_et = datetime.now(cycle.ET).date()
+    # For "Daily P&L"/the Last Price column's $ figure below: a position
+    # opened TODAY (by any route - see _today_entry_refs) has no
+    # meaningful "yesterday's close" reference - the move from yesterday's
+    # close to now includes the overnight gap and whatever the symbol did
+    # before the position even existed, which can show a phantom gain (or
+    # hide a real loss) that has nothing to do with what was actually
+    # bought/sold. Use today's own weighted-average fill price instead
+    # whenever _today_entry_refs recognizes this symbol as freshly opened;
+    # otherwise (a position already open before today) yesterday's close
+    # is still the right "how much today" reference, same as before.
+    today_entry_refs = _today_entry_refs(account_id, mode)
 
     for pos in data["positions"]:
         price = None
@@ -1135,14 +1197,8 @@ def api_broker_positions(mode: str = Depends(require_mode), account_id: int = De
         pos["current_price"] = price
 
         daily_ref, daily_ref_label = prior_close, "yesterday's close"
-        bot_pos = open_positions_by_symbol.get(pos["symbol"])
-        if bot_pos:
-            try:
-                entry_date = datetime.fromisoformat(bot_pos["entry_time_iso"]).astimezone(cycle.ET).date()
-                if entry_date == today_et:
-                    daily_ref, daily_ref_label = bot_pos["entry_price"], "entry"
-            except Exception:
-                pass
+        if pos["symbol"] in today_entry_refs:
+            daily_ref, daily_ref_label = today_entry_refs[pos["symbol"]]
 
         pos["unrealized_pnl"] = ((price - pos["avg_cost"]) * pos["qty"]) if price is not None else None
         pos["daily_pnl"] = ((price - daily_ref) * pos["qty"]) if price is not None and daily_ref is not None else None
