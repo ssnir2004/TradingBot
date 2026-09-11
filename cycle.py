@@ -51,7 +51,7 @@ import yfinance as yf
 from dotenv import dotenv_values
 from ib_async import LimitOrder, Stock, StopOrder
 
-from src import db, es_filter, mode_config, orb, touch_turn
+from src import db, es_filter, mode_config, orb, sst_swing, touch_turn
 from src.ibkr_client import IBKRClient, belongs_to_account, cancel_order_any_client, scoped_positions
 from src.notify import notify
 
@@ -74,6 +74,9 @@ FORCE_CLOSE_START = dt_time(15, 51)
 CLOSED_START = dt_time(16, 0)
 
 ACCOUNT_REFRESH_CLIENT_ID = 5  # dedicated id so this never collides with the cycle (2) or trade.py (3) connections
+SST_SWING_CLIENT_ID = 26  # sst_swing_live.py's own once-daily connection - dedicated so it never collides with
+                          # the per-minute cycle (2) or a concurrent trade.py invocation (3); 6-18 and 25 (momentum)
+                          # are already taken by other scripts - see this file's own git history for the full map
 
 # Used by manage_position only when a held position's side no longer has an
 # active strategy (deactivated or deleted after the position was opened) —
@@ -299,6 +302,21 @@ def _market_close(account_id: int, mode: str, ib, symbol: str, quantity: int, si
 def _get_5min_bars(symbol: str) -> pd.DataFrame | None:
     try:
         bars = yf.Ticker(symbol.replace(" ", "-")).history(period="2d", interval="5m")
+        return bars if not bars.empty else None
+    except Exception:
+        return None
+
+
+def _fetch_sst_daily_bars(symbol: str) -> pd.DataFrame | None:
+    """Daily OHLC for SST Swing (src.sst_swing.evaluate_sst_entry/
+    trailing_stop_update) - 1y comfortably covers every lookback that
+    module needs, including its 200-day SMA obstruction check
+    (avoid_200sma_obstruction). Only ever called once/day (sst_swing_live.
+    py's own scheduled job, G-SST-6), never from the per-minute cycle, so
+    a fresh yfinance fetch per symbol per day is cheap enough - no caching
+    needed the way the intraday-bar helpers above might eventually want."""
+    try:
+        bars = yf.Ticker(symbol.replace(" ", "-")).history(period="1y", interval="1d")
         return bars if not bars.empty else None
     except Exception:
         return None
@@ -1992,6 +2010,229 @@ def virtual_entry_scan(account_id: int, mode: str, ib, rules: dict, env: dict, s
         open_notional += size * price
         notify(f"[VIRTUAL] {strategy_label}: {action} {ticker}", f"@ ${price:.2f}, stop ${initial_stop:.2f}, qty {size}", "default")
         log_decision(account_id, mode, {"event": "entry", "symbol": ticker, "side": side, "price": price, "stop": initial_stop, "qty": size, "strategy_id": strategy_id, "virtual": True})
+
+
+# --------------------------------------------------------- SST Swing ---
+# Called only from sst_swing_live.py's own once-daily scheduled job
+# (G-SST-6), never from run_cycle's per-minute loop - entry_scan/
+# virtual_entry_scan both explicitly skip rules["strategy_type"] ==
+# "sst_swing" (see their own docstrings) so this family is never
+# double-evaluated. Reuses the same real order-placement primitives as
+# entry_scan (trade.py subprocess, _place_stop, _broker_position delayed-
+# fill recovery, _RealPositionOps/_VirtualPositionOps for the daily
+# trailing-stop update below) rather than a second, parallel execution
+# path, per the source prompt's own explicit instruction. Stop-OUT
+# detection itself needs nothing new here: check_stop_outs (real) and
+# check_virtual_stop_outs (virtual) already run every cycle for every
+# open position regardless of strategy, generically comparing price
+# against pos["stop_price"] - SST positions are covered automatically,
+# see sst_manage_positions/sst_manage_virtual_positions below for the
+# ONE thing that's actually SST-specific: moving that stop per Rule 6.
+def sst_entry_scan(account_id: int, mode: str, ib, positions: list[dict], rules: dict, side: str,
+                    strategy_run: dict) -> list[dict]:
+    """SST Swing's real-money entry evaluation for one side of one
+    strategy_run - entry_scan's counterpart, on DAILY bars against
+    db.get_sst_watchlist(status="pass") ('review' rows need a human look
+    first, per G-SST-4) instead of entry_scan's intraday watchlist/
+    filters. Every candidate's signal is logged via log_decision
+    regardless of pass/fail (G-SST-7 - "log every signal, even ones not
+    taken"), unlike entry_scan which only logs on a pass."""
+    strategy_id = strategy_run["strategy_id"]
+    max_concurrent = rules["risk"]["max_concurrent_positions"]
+    side_positions = [p for p in positions if p.get("side", "long") == side and p.get("strategy_id") == strategy_id]
+    if len(side_positions) >= max_concurrent:
+        return positions
+
+    strategy_positions = [p for p in positions if p.get("strategy_id") == strategy_id]
+    strategy_open_notional = sum(p["qty"] * p["entry_price"] for p in strategy_positions)
+    can_enter, reason = _strategy_can_enter(strategy_run, len(strategy_positions), strategy_open_notional, 0.0)
+    if not can_enter:
+        log_decision(account_id, mode, {"event": "strategy_entry_blocked", "side": side, "strategy_id": strategy_id, "reason": reason})
+        return positions
+
+    held_symbols = {p.contract.symbol for p in scoped_positions(ib) if p.position != 0}
+    held_symbols |= {p["symbol"] for p in positions}
+
+    risk = mode_config.risk_params(_env(), account_id, mode)
+    portfolio_value = risk["portfolio_value"]
+    action = "BUY" if side == "long" else "SELL"
+
+    for row in db.get_sst_watchlist(status="pass"):
+        if len(side_positions) >= max_concurrent:
+            break
+        symbol = row["symbol"]
+        if symbol in held_symbols:
+            continue
+
+        daily = _fetch_sst_daily_bars(symbol)
+        if daily is None:
+            continue
+        signal = sst_swing.evaluate_sst_entry(daily, rules, side)
+        log_decision(account_id, mode, {"event": "sst_signal", "symbol": symbol, "side": side, "strategy_id": strategy_id, **signal})
+        if not signal.get("pass"):
+            continue
+
+        price, initial_stop = signal["entry_price"], signal["initial_stop"]
+        size, skip_reason = sst_swing.size_for_risk(portfolio_value, price, initial_stop, rules)
+        if size <= 0:
+            log_decision(account_id, mode, {"event": "sst_entry_skipped", "symbol": symbol, "side": side, "strategy_id": strategy_id, "reason": skip_reason})
+            continue
+
+        can_enter, reason = _strategy_can_enter(strategy_run, len(strategy_positions), strategy_open_notional, size * price)
+        if not can_enter:
+            log_decision(account_id, mode, {"event": "strategy_entry_blocked", "symbol": symbol, "side": side, "strategy_id": strategy_id, "reason": reason})
+            continue
+
+        proc = subprocess.run(
+            [sys.executable, str(PROJECT_DIR / "trade.py"), "--mode", mode, "--account-id", str(account_id),
+             "--symbol", symbol, "--side", action, "--size", str(size)],
+            capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT,
+        )
+        log_decision(account_id, mode, {"event": "sst_entry_attempt", "symbol": symbol, "side": side, "qty": size, "price": price, "stdout": proc.stdout})
+        if proc.returncode != 0:
+            # Same delayed-fill race as entry_scan - trade.py may have
+            # given up waiting before the fill actually confirmed.
+            broker_pos = _broker_position(ib, symbol)
+            if broker_pos is None:
+                continue
+            fill_qty, fill_price = abs(broker_pos["qty"]), broker_pos["avg_cost"]
+            log_decision(account_id, mode, {"event": "delayed_fill_recovered", "symbol": symbol, "side": side, "qty": fill_qty, "price": fill_price})
+        else:
+            fill_qty, fill_price = size, price
+
+        stop_order_id = _place_stop(ib, symbol, fill_qty, initial_stop, side)
+        new_position = {
+            "symbol": symbol, "side": side, "entry_price": fill_price,
+            "entry_time_iso": datetime.now(ET).isoformat(timespec="seconds"),
+            "qty": fill_qty, "initial_stop": initial_stop, "stop_price": initial_stop,
+            "stop_order_id": stop_order_id, "state": "sst_swing", "r_multiple": 0.0,
+            "strategy_id": strategy_id, "mae_price": fill_price,
+        }
+        db.upsert_position(account_id, mode, new_position)
+        positions.append(new_position)
+        side_positions.append(new_position)
+        strategy_positions.append(new_position)
+        strategy_open_notional += fill_qty * fill_price
+        held_symbols.add(symbol)
+        notify(f"[{mode.upper()}] SST ENTRY {symbol}", f"{action} {fill_qty} @ ${fill_price:.2f}, stop ${initial_stop:.2f}", "default")
+        log_decision(account_id, mode, {"event": "sst_entry", "symbol": symbol, "side": side, "price": fill_price, "stop": initial_stop, "qty": fill_qty, "strategy_id": strategy_id})
+
+    return positions
+
+
+def virtual_sst_entry_scan(account_id: int, mode: str, rules: dict, side: str, strategy_run: dict) -> None:
+    """sst_entry_scan's virtual-mode counterpart - same signal evaluation
+    and sizing, but writes a simulated fill straight to virtual_positions
+    instead of ever calling trade.py. No `ib` parameter needed at all
+    (unlike virtual_entry_scan, which still takes one for its optional ES
+    futures filter) - SST Swing has no such filter."""
+    strategy_id, strategy_label = strategy_run["strategy_id"], strategy_run.get("strategy_name", "?")
+    open_positions = db.get_virtual_positions(account_id, strategy_id=strategy_id)
+    max_concurrent = rules["risk"]["max_concurrent_positions"]
+    if len(open_positions) >= max_concurrent:
+        return
+
+    held_symbols = {p["symbol"] for p in open_positions}
+    open_notional = sum(p["qty"] * p["entry_price"] for p in open_positions)
+    virtual_capital = strategy_run.get("virtual_capital")
+
+    risk = mode_config.risk_params(_env(), account_id, mode)
+    portfolio_value = risk["portfolio_value"]
+    action = "BUY" if side == "long" else "SELL"
+
+    for row in db.get_sst_watchlist(status="pass"):
+        if len(open_positions) >= max_concurrent:
+            break
+        symbol = row["symbol"]
+        if symbol in held_symbols:
+            continue
+
+        daily = _fetch_sst_daily_bars(symbol)
+        if daily is None:
+            continue
+        signal = sst_swing.evaluate_sst_entry(daily, rules, side)
+        log_decision(account_id, mode, {"event": "sst_signal", "symbol": symbol, "side": side, "strategy_id": strategy_id, "virtual": True, **signal})
+        if not signal.get("pass"):
+            continue
+
+        price, initial_stop = signal["entry_price"], signal["initial_stop"]
+        size, skip_reason = sst_swing.size_for_risk(portfolio_value, price, initial_stop, rules)
+        if size <= 0:
+            log_decision(account_id, mode, {"event": "sst_entry_skipped", "symbol": symbol, "side": side, "strategy_id": strategy_id, "virtual": True, "reason": skip_reason})
+            continue
+
+        if virtual_capital is not None and (open_notional + size * price) > virtual_capital:
+            log_decision(account_id, mode, {"event": "strategy_entry_blocked", "symbol": symbol, "side": side, "strategy_id": strategy_id, "reason": "virtual_capital_exceeded", "virtual": True})
+            continue
+
+        new_position = {
+            "symbol": symbol, "side": side, "entry_price": price,
+            "entry_time_iso": datetime.now(ET).isoformat(timespec="seconds"),
+            "qty": size, "initial_stop": initial_stop, "stop_price": initial_stop,
+            "state": "sst_swing", "r_multiple": 0.0, "mae_price": price,
+        }
+        db.upsert_virtual_position(account_id, strategy_id, new_position)
+        open_positions.append(new_position)
+        held_symbols.add(symbol)
+        open_notional += size * price
+        notify(f"[VIRTUAL] {strategy_label}: SST ENTRY {symbol}", f"{action} {size} @ ${price:.2f}, stop ${initial_stop:.2f}", "default")
+        log_decision(account_id, mode, {"event": "sst_entry", "symbol": symbol, "side": side, "price": price, "stop": initial_stop, "qty": size, "strategy_id": strategy_id, "virtual": True})
+
+
+def sst_manage_positions(account_id: int, mode: str, ib, positions: list[dict]) -> None:
+    """Rule 6's trailing-stop update for every open REAL SST Swing
+    position - the only thing that's actually SST-specific about daily
+    position management (stop-OUT detection is already fully generic,
+    see this section's own header comment). Filters positions itself
+    (rather than requiring the caller to pre-filter) so sst_swing_live.py
+    can just pass every open position for the account, same as
+    check_stop_outs/manage_position already do each cycle."""
+    for pos in positions:
+        rules = _rules_for_position(pos, {})
+        if rules.get("strategy_type") != "sst_swing":
+            continue
+        daily = _fetch_sst_daily_bars(pos["symbol"])
+        if daily is None:
+            continue
+        side = pos.get("side", "long")
+        new_stop = sst_swing.trailing_stop_update(daily, side, pos["stop_price"], rules)
+        if new_stop is None:
+            continue
+        ops = _RealPositionOps(account_id, mode, ib)
+        old_stop = pos["stop_price"]
+        pos["stop_order_id"] = ops.reposition_stop(pos, new_stop, side)
+        pos["stop_price"] = new_stop
+        ops.save(pos)
+        ops.notify(f"SST TRAIL {pos['symbol']}", f"stop ${old_stop:.2f} -> ${new_stop:.2f}", "default")
+        ops.log("sst_trail_stop", symbol=pos["symbol"], side=side, old=old_stop, new=new_stop)
+
+
+def sst_manage_virtual_positions(account_id: int, strategy_run: dict) -> None:
+    """sst_manage_positions' virtual-mode counterpart - Rule 6's trailing
+    update against this strategy_run's own virtual_positions."""
+    strategy_id = strategy_run["strategy_id"]
+    strategy_label = strategy_run.get("strategy_name", "?")
+    strategy = db.get_strategy(strategy_id)
+    if strategy is None:
+        return
+    rules = json.loads(strategy["rules_json"])
+    if rules.get("strategy_type") != "sst_swing":
+        return
+
+    for pos in db.get_virtual_positions(account_id, strategy_id=strategy_id):
+        daily = _fetch_sst_daily_bars(pos["symbol"])
+        if daily is None:
+            continue
+        side = pos.get("side", "long")
+        new_stop = sst_swing.trailing_stop_update(daily, side, pos["stop_price"], rules)
+        if new_stop is None:
+            continue
+        ops = _VirtualPositionOps(account_id, strategy_id, strategy_label)
+        old_stop = pos["stop_price"]
+        pos["stop_price"] = new_stop
+        ops.save(pos)
+        ops.notify(f"SST TRAIL {pos['symbol']}", f"stop ${old_stop:.2f} -> ${new_stop:.2f}", "default")
+        ops.log("sst_trail_stop", symbol=pos["symbol"], side=side, old=old_stop, new=new_stop)
 
 
 def touch_turn_entry_scan(account_id: int, mode: str, ib, rules: dict, env: dict, side: str,
