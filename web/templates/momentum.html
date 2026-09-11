@@ -14,6 +14,11 @@
   .badge-strategy-B { background:#198754; }
   .badge-strategy-C { background:#fd7e14; }
   .badge-strategy-D { background:#6f42c1; }
+  .outcome-win { color:#198754; font-weight:600; }
+  .outcome-loss { color:#dc3545; font-weight:600; }
+  .outcome-scratch { color:#6c757d; }
+  .caveat-box { background:rgba(220,53,69,.08); border:1px solid rgba(220,53,69,.35);
+                border-radius:.5rem; padding:.75rem 1rem; font-size:.9rem; }
 </style>
 </head>
 <body>
@@ -45,6 +50,29 @@
     </div>
   </div>
 
+  <div class="card mb-3" id="backtestCard" style="display:none">
+    <div class="card-header">Backtest Results (Phase 2 — simulated over backfilled signals)</div>
+    <div class="card-body">
+      <div class="caveat-box mb-3">
+        ⚠ <strong>Encouraging, not a green light.</strong> The sample is small, several
+        signals share the same (symbol, day) so they aren't fully independent, a
+        handful of outlier trades drive a large share of the total, and everything
+        here assumes a fill at the exact entry price with no slippage. A modest
+        3¢-worse-fill sensitivity test roughly <strong>halved</strong> the edge
+        (avg R, PF) below. See docs/momentum_strategy_spec.md's "Phase 2" section
+        for the full write-up. Do not size a live-capital decision on this alone.
+      </div>
+      <div class="row mb-3 text-center" id="backtestOverall"></div>
+      <div class="table-responsive">
+        <table class="table table-sm mb-0 mono" style="font-size:.85rem">
+          <thead><tr><th>Strategy</th><th>n</th><th>Win rate</th><th>Avg R</th>
+                 <th>Total R</th><th>Profit Factor</th><th>Nominal $</th></tr></thead>
+          <tbody id="backtestByStrategy"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
   <div class="card">
     <div class="card-header d-flex justify-content-between align-items-center">
       Recent signals
@@ -56,11 +84,11 @@
           <tr>
             <th>Time</th><th>Strategy</th><th>Symbol</th><th>Price</th>
             <th>Entry</th><th>Stop</th><th>Scale 1</th><th>Scale 2</th>
-            <th>Size hint</th><th>Conviction</th>
+            <th>Size hint</th><th>Conviction</th><th>Outcome</th><th>R</th>
           </tr>
         </thead>
         <tbody id="signalsBody">
-          <tr><td colspan="10" class="text-muted">loading…</td></tr>
+          <tr><td colspan="12" class="text-muted">loading…</td></tr>
         </tbody>
       </table>
     </div>
@@ -139,6 +167,41 @@ document.getElementById("masterSwitch").addEventListener("change", async (e) => 
 
 function fmt(n) { return (n === null || n === undefined) ? "—" : Number(n).toFixed(2); }
 
+function statCol(label, value) {
+  return `<div class="col"><div class="text-muted small">${label}</div>
+          <div class="fs-5">${value}</div></div>`;
+}
+
+async function loadBacktestSummary() {
+  let summary;
+  try {
+    summary = await getJSON("/api/momentum/backtest_summary");
+  } catch (err) {
+    return;  // phase 2 hasn't been run yet - leave the card hidden
+  }
+  const o = summary.overall;
+  if (!o || !o.n) return;
+  document.getElementById("backtestCard").style.display = "";
+  document.getElementById("backtestOverall").innerHTML = [
+    statCol("Signals", o.n),
+    statCol("Win rate", o.win_rate_pct + "%"),
+    statCol("Avg R", (o.avg_r >= 0 ? "+" : "") + o.avg_r),
+    statCol("Total R", (o.total_r >= 0 ? "+" : "") + o.total_r),
+    statCol("Profit Factor", o.profit_factor ?? "—"),
+    statCol("Nominal $", "$" + o.total_dollars_nominal.toLocaleString()),
+  ].join("");
+  const body = document.getElementById("backtestByStrategy");
+  body.innerHTML = Object.entries(summary.by_strategy).map(([k, s]) => s.n ? `
+    <tr>
+      <td><span class="badge badge-strategy-${k}">${k}</span> ${STRATEGY_NAMES[k] || ""}</td>
+      <td>${s.n}</td><td>${s.win_rate_pct}%</td>
+      <td>${s.avg_r >= 0 ? "+" : ""}${s.avg_r}</td>
+      <td>${s.total_r >= 0 ? "+" : ""}${s.total_r}</td>
+      <td>${s.profit_factor ?? "—"}</td>
+      <td>$${s.total_dollars_nominal.toLocaleString()}</td>
+    </tr>` : "").join("");
+}
+
 async function loadSignals() {
   const rows = await getJSON("/api/momentum/signals?limit=100");
   const body = document.getElementById("signalsBody");
@@ -146,10 +209,19 @@ async function loadSignals() {
   document.getElementById("signalsToday").textContent =
     rows.filter(r => r.trade_date === today).length;
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="10" class="text-muted">No signals yet.</td></tr>';
+    body.innerHTML = '<tr><td colspan="12" class="text-muted">No signals yet.</td></tr>';
     return;
   }
-  body.innerHTML = rows.map(r => `
+  body.innerHTML = rows.map(r => {
+    let outcomeCell = "—", rCell = "—";
+    if (r.outcome_json) {
+      try {
+        const d = JSON.parse(r.outcome_json);
+        rCell = (d.r_multiple >= 0 ? "+" : "") + Number(d.r_multiple).toFixed(2);
+        outcomeCell = `<span class="outcome-${r.outcome}">${r.outcome}</span> (${d.exit_reason || ""})`;
+      } catch (e) { /* leave dashes */ }
+    }
+    return `
     <tr class="${r.conviction === 'low' ? 'conviction-low' : ''}">
       <td>${r.signal_iso.replace('T', ' ').slice(0, 19)}</td>
       <td><span class="badge badge-strategy-${r.strategy}">${r.strategy}</span></td>
@@ -161,11 +233,15 @@ async function loadSignals() {
       <td>${fmt(r.second_scale_price)}</td>
       <td>${r.shares_hint ?? "—"}</td>
       <td>${r.conviction}</td>
-    </tr>`).join("");
+      <td>${outcomeCell}</td>
+      <td>${rCell}</td>
+    </tr>`;
+  }).join("");
 }
 
 loadStatus();
 loadSignals();
+loadBacktestSummary();
 setInterval(loadSignals, 30000);
 </script>
 </body>

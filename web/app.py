@@ -26,6 +26,7 @@ from fastapi.templating import Jinja2Templates
 import cycle
 import morning_prefilter
 import run_optimization
+from momentum import backtest as momentum_backtest
 from momentum import config as momentum_config
 from momentum import store as momentum_store
 # trades_csv/trades_pdf/trades_xlsx are deliberately NOT imported here -
@@ -3084,3 +3085,11 @@ async def api_momentum_strategy_toggle(request: Request, user: str = Depends(req
 @app.get("/api/momentum/signals")
 def api_momentum_signals(limit: int = Query(100, le=500), user: str = Depends(require_user)):
     return momentum_store.recent_signals(limit)
+
+
+@app.get("/api/momentum/backtest_summary")
+def api_momentum_backtest_summary(mode: str = Query("backfill"), user: str = Depends(require_user)):
+    """Phase 2 report (see momentum/backtest.py) - built from each
+    signal's already-stored outcome_json (run_momentum_backtest.py writes
+    it), not re-simulated on every request."""
+    return momentum_backtest.summary_from_stored(mode)

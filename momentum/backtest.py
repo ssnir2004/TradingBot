@@ -32,6 +32,7 @@ Caveats (this is still a "poor backtest", not a fill simulator):
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import time as dtime
 
@@ -171,6 +172,28 @@ def run_backtest_report(mode: str = "backfill") -> dict:
         if i % 25 == 0:
             log.info("simulated %s/%s", i, len(signals))
 
+    return _summarize(results)
+
+
+def summary_from_stored(mode: str = "backfill") -> dict:
+    """Rebuilds the same summary shape as run_backtest_report(), but from
+    each signal's already-stored outcome_json (set_signal_outcome) instead
+    of re-simulating - the fast path the dashboard's /api/momentum/backtest
+    endpoint uses, since re-fetching bars for every request would be slow
+    and pointless (the outcome doesn't change between page loads)."""
+    rows = [s for s in store.recent_signals(limit=5000) if s["mode"] == mode and s.get("outcome_json")]
+    results = []
+    for s in rows:
+        try:
+            detail = json.loads(s["outcome_json"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        detail["strategy"] = s["strategy"]
+        detail["symbol"] = s["symbol"]
+        detail["trade_date"] = s["trade_date"]
+        detail["conviction"] = s["conviction"]
+        detail.setdefault("outcome", s.get("outcome"))
+        results.append(detail)
     return _summarize(results)
 
 
