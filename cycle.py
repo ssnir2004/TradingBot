@@ -2825,7 +2825,17 @@ def scan_watchlist_filters(account_id: int):
     hard-coding one filter set for the whole table. Every row also carries
     its own strategy_id, so a per-strategy dashboard sheet can filter this
     same shared snapshot down to just its own candidates instead of
-    needing a separate fetch/scan per strategy."""
+    needing a separate fetch/scan per strategy.
+
+    SST Swing (rules["strategy_type"] == "sst_swing") is skipped entirely,
+    same reasoning as entry_scan/virtual_entry_scan's own skip: it has no
+    "opening_range"/"opening_candle" key, so falling through to the
+    classic D1-D3/I1-I3 branch below would evaluate rules keys this
+    family never sets (KeyError) against db.get_watchlist's INTRADAY gap
+    list, which isn't even SST's own candidate source (db.get_sst_
+    watchlist is) - this table is simply not meaningful for a strategy
+    that trades off daily bars evaluated once a day, not this per-5-
+    minute intraday snapshot."""
     status = time_gate()
     if status in ("weekend", "too_early", "closed"):
         return
@@ -2839,6 +2849,8 @@ def scan_watchlist_filters(account_id: int):
         if strategy is None:
             continue
         rules = json.loads(strategy["rules_json"])
+        if rules.get("strategy_type") == "sst_swing":
+            continue
         side = strategy["direction"]
         is_touch_turn = "opening_candle" in rules
         is_orb = "opening_range" in rules
