@@ -44,11 +44,20 @@ def run_one_strategy(
     # engines - no D1-D3 daily bias, fixed-target exits instead of
     # breakeven/trailing, and for Touch & Turn a resting-limit-order fill
     # model instead of an instant-on-signal one), not just a different
-    # rules_json for the same one.
+    # rules_json for the same one. SST Swing (src/sst_swing.py) carries an
+    # explicit "strategy_type": "sst_swing" marker instead of a shape-
+    # sniffed key (G-SST-5 - with 4 families now, shape-sniffing a 4th
+    # distinct rules_json shape was judged less readable/more fragile than
+    # just naming it), replayed by its own DAILY-bar, multi-day-hold
+    # simulator - see simulate_sst_swing_strategy's own docstring for why
+    # it can't share simulate_strategy/simulate_orb_strategy's bar-by-bar,
+    # same-day-only replay loop.
     if "opening_range" in rules:
         simulate = backtest_engine.simulate_orb_strategy
     elif "opening_candle" in rules:
         simulate = backtest_engine.simulate_touch_turn_strategy
+    elif rules.get("strategy_type") == "sst_swing":
+        simulate = backtest_engine.simulate_sst_swing_strategy
     else:
         simulate = backtest_engine.simulate_strategy
     es_intraday = _load_es_intraday(start_date, end_date) if rules.get("es_vwap_filter") else None

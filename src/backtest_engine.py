@@ -45,7 +45,7 @@ import pandas as pd
 import yfinance as yf
 
 import cycle
-from src import backtest_data, entry_metrics, es_filter, orb, touch_turn
+from src import backtest_data, entry_metrics, es_filter, orb, sst_swing, touch_turn
 
 BAR_SIZE = "5 mins"
 DAILY_BAR_SIZE = "1 day"
@@ -2568,5 +2568,228 @@ def simulate_touch_turn_strategy(
                 "exit_reason": "eod_close", "commission": commission_per_trade,
                 "mfe_price": pos["mfe_price"], "mae_price": pos["mae_price"],
             })
+
+    return {"trades": trades, "skipped_symbols": skipped, "filter_stats": filter_stats}
+
+
+_SST_STAGE_ORDER = ["trend", "dmi_trigger", "price_confirmation", "200sma_obstruction"]
+
+
+def _classify_sst_stage(signal: dict) -> str:
+    """Which of _SST_STAGE_ORDER's stages a src.sst_swing.evaluate_sst_
+    entry result reached, read off its own reason/error text (that
+    function's own docstring documents each exact string this matches
+    against) - "insufficient_data" if it never got far enough to check
+    any of the four entry rules, "passed" if it cleared every one of
+    them. Used only for simulate_sst_swing_strategy's filter_stats
+    funnel - never influences any entry/sizing decision itself."""
+    if signal.get("pass"):
+        return "passed"
+    text = signal.get("error") or signal.get("reason") or ""
+    if "insufficient" in text or "not yet available" in text:
+        return "insufficient_data"
+    if "SMA50" in text or text.startswith("trend is"):
+        return "trend"
+    if "DMI" in text:
+        return "dmi_trigger"
+    if "significant day" in text or "breakout" in text:
+        return "price_confirmation"
+    if "200SMA" in text:
+        return "200sma_obstruction"
+    return "insufficient_data"  # defensive fallback - evaluate_sst_entry should never actually reach this
+
+
+def simulate_sst_swing_strategy(
+    strategy_rules: dict,
+    side: str,
+    symbols: list[str],
+    start_date,
+    end_date,
+    portfolio_value: float,
+    max_risk_pct: float,
+    max_trades_per_day: int,
+    commission_per_trade: float = 0.0,
+    es_intraday: pd.DataFrame | None = None,
+) -> dict:
+    """SST Swing's own replay loop - dispatched from src/backtest_runner.py
+    whenever a strategy's rules carry "strategy_type": "sst_swing" (see
+    that dispatch's own comment for why this family uses an explicit
+    marker, G-SST-5, instead of shape-sniffing like ORB/Touch & Turn).
+    Genuinely different shape from every simulator above: DAILY bars only
+    (fetch_daily_bars, no intraday fetch at all - see src/sst_swing.py's
+    own module docstring), and positions held across MULTIPLE days, not
+    same-day-only - no existing simulator here does that, so this is a
+    fresh day-by-day walk rather than a shared bar-by-bar loop. Signal
+    evaluation and stop math are never reimplemented here - every rule
+    comes straight from src.sst_swing (evaluate_sst_entry, size_for_risk,
+    trailing_stop_update), the exact same functions cycle.sst_entry_scan/
+    sst_manage_positions call live, so backtest and live can never
+    quietly drift apart (same reasoning src/orb.py's evaluate_orb_entry
+    is shared between this file and cycle.py).
+
+    max_concurrent_positions/max_trades_per_day are enforced STRATEGY-
+    WIDE across the whole symbol universe for this side, exactly like
+    simulate_strategy/simulate_orb_strategy above (a shared day-outer,
+    symbol-inner loop, not one independent per-symbol pass each blind to
+    what every other symbol is doing that day) - the more realistic
+    portfolio-level cap, not an easier-to-write approximation.
+
+    es_intraday is accepted only for call-site uniformity with the other
+    simulate_* functions (src/backtest_runner.py always passes it) - SST
+    Swing has no ES-VWAP filter (that's an intraday-momentum concept),
+    so it's silently ignored here rather than raising, same as it's None
+    for the vast majority of the OTHER strategies' calls whenever
+    es_vwap_filter isn't set in rules."""
+    max_concurrent = strategy_rules["risk"]["max_concurrent_positions"]
+    action = "BUY" if side == "long" else "SELL"
+    close_action = "SELL" if side == "long" else "BUY"
+
+    daily_by_symbol: dict[str, pd.DataFrame] = {}
+    skipped = []
+    for symbol in symbols:
+        daily = fetch_daily_bars(symbol)
+        if daily is None or daily.empty:
+            skipped.append({"symbol": symbol, "reason": "no daily bars"})
+            continue
+        daily_by_symbol[symbol] = daily
+
+    trades: list[dict] = []
+    trade_id = 0
+    # Same purpose as simulate_strategy's own filter_stats (a pass count
+    # per condition out of "evaluations", surfacing WHICH rule is the
+    # actual bottleneck when a run finds few or no trades) - src/backtest_
+    # runner.py's run_one_strategy reads sim["filter_stats"] unconditionally
+    # for every simulator, SST included, and web/templates/backtest.html's
+    # renderFilterStats reads each key as a PASS count (rendered as % of
+    # evaluations), so this must follow that exact convention, not an
+    # inverted failure-count one. Unlike D1-D3's own independent per-
+    # condition check, evaluate_sst_entry short-circuits on the first
+    # failing rule (Rule 2 trend -> Rule 3 DMI -> Rule 4 price confirmation
+    # -> 200SMA obstruction, in that order) - so this is a FUNNEL: each
+    # stage's count is "reached AND passed", meaning it also implicitly
+    # passed every earlier stage. See _classify_sst_stage below for how a
+    # result's own reason/error text maps to a stage.
+    filter_stats = {"evaluations": 0, "insufficient_data": 0, "trend": 0, "dmi_trigger": 0, "price_confirmation": 0, "200sma_obstruction": 0}
+
+    if not daily_by_symbol:
+        return {"trades": trades, "skipped_symbols": skipped, "filter_stats": filter_stats}
+
+    tz = next(iter(daily_by_symbol.values())).index.tz
+    window_start = pd.Timestamp(start_date, tz=tz)
+    window_end = pd.Timestamp(end_date, tz=tz) + pd.Timedelta(days=1)
+
+    # The master day list this replay steps through - the sorted union of
+    # every symbol's own in-range trading days, not one shared calendar
+    # fetched separately. Different symbols occasionally miss a day each
+    # other has (a late IPO, a halt) - iterating the union (rather than
+    # requiring every symbol to have a bar on every day) means a missing
+    # day for one symbol just skips that symbol that day (see the "no bar
+    # today" checks below), not the whole replay.
+    all_days: set = set()
+    in_range_index: dict[str, pd.DatetimeIndex] = {}
+    for symbol, daily in daily_by_symbol.items():
+        idx = daily.index[(daily.index >= window_start) & (daily.index < window_end)]
+        if len(idx) == 0:
+            skipped.append({"symbol": symbol, "reason": "no cached bars in the requested date range"})
+            continue
+        in_range_index[symbol] = idx
+        all_days.update(idx)
+    trading_days = sorted(all_days)
+
+    open_positions: dict[str, dict] = {}  # symbol -> {entry_price, initial_stop, stop_price, qty}
+
+    for ts in trading_days:
+        entries_today = 0
+
+        # Manage every open position first (mirrors every other simulator's
+        # own "close/trail before looking for new entries" ordering) -
+        # stop-out check, then Rule 6's trailing update for whatever
+        # survives. A symbol with no bar today (halted, delisted) is left
+        # exactly as it was - neither stopped out nor trailed - rather than
+        # guessing at a price.
+        for symbol in list(open_positions):
+            daily = daily_by_symbol[symbol]
+            if ts not in daily.index:
+                continue
+            pos = open_positions[symbol]
+            row = daily.loc[ts]
+            low, high = float(row["Low"]), float(row["High"])
+            stopped = (low <= pos["stop_price"]) if side == "long" else (high >= pos["stop_price"])
+            if stopped:
+                trade_id += 1
+                trades.append({
+                    "id": trade_id, "symbol": symbol, "side": close_action,
+                    "fill_price": pos["stop_price"], "size": pos["qty"],
+                    "timestamp_iso": ts.isoformat(), "exit_reason": "stop_out",
+                    "commission": commission_per_trade,
+                })
+                del open_positions[symbol]
+                continue
+            day_frame = daily.loc[:ts]
+            new_stop = sst_swing.trailing_stop_update(day_frame, side, pos["stop_price"], strategy_rules)
+            if new_stop is not None:
+                pos["stop_price"] = new_stop
+
+        if len(open_positions) >= max_concurrent:
+            continue
+
+        # New entries - deterministic symbol order (alphabetical) so a
+        # given backtest run is reproducible, same "first come" fairness
+        # every other simulator's own plain `for symbol in symbols` loop
+        # already has.
+        for symbol in sorted(in_range_index):
+            if len(open_positions) >= max_concurrent:
+                break
+            if entries_today >= max_trades_per_day:
+                break
+            if symbol in open_positions:
+                continue
+            daily = daily_by_symbol[symbol]
+            if ts not in daily.index:
+                continue
+
+            day_frame = daily.loc[:ts]
+            signal = sst_swing.evaluate_sst_entry(day_frame, strategy_rules, side)
+            filter_stats["evaluations"] += 1
+            stage = _classify_sst_stage(signal)
+            if stage == "insufficient_data":
+                filter_stats["insufficient_data"] += 1
+            else:
+                stage_idx = len(_SST_STAGE_ORDER) if stage == "passed" else _SST_STAGE_ORDER.index(stage)
+                for name in _SST_STAGE_ORDER[:stage_idx]:
+                    filter_stats[name] += 1
+            if not signal.get("pass"):
+                continue
+
+            price, initial_stop = signal["entry_price"], signal["initial_stop"]
+            size, skip_reason = sst_swing.size_for_risk(portfolio_value, price, initial_stop, strategy_rules)
+            if size <= 0:
+                continue
+
+            trade_id += 1
+            trades.append({
+                "id": trade_id, "symbol": symbol, "side": action,
+                "fill_price": price, "size": size, "timestamp_iso": ts.isoformat(),
+                "initial_stop": initial_stop, "commission": commission_per_trade,
+            })
+            open_positions[symbol] = {"entry_price": price, "initial_stop": initial_stop, "stop_price": initial_stop, "qty": size}
+            entries_today += 1
+
+    # Anything still open when the replay window ends - mark-to-market at
+    # each symbol's own last in-range close, same "eod_close"-style
+    # fallback every other simulator applies to a position still open
+    # when ITS OWN replay window ends, just labeled for what it actually
+    # is here: this is a multi-day hold with no real exit yet, not an
+    # intraday close that was simply due at end of day.
+    for symbol, pos in open_positions.items():
+        last_ts = in_range_index[symbol][-1]
+        last_close = float(daily_by_symbol[symbol].loc[last_ts, "Close"])
+        trade_id += 1
+        trades.append({
+            "id": trade_id, "symbol": symbol, "side": close_action,
+            "fill_price": last_close, "size": pos["qty"],
+            "timestamp_iso": last_ts.isoformat(), "exit_reason": "backtest_end",
+            "commission": commission_per_trade,
+        })
 
     return {"trades": trades, "skipped_symbols": skipped, "filter_stats": filter_stats}
