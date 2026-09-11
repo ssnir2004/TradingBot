@@ -102,6 +102,35 @@ CREATE TABLE IF NOT EXISTS watchlist (
     PRIMARY KEY (account_id, mode, symbol)
 );
 
+-- SST Swing's own universe screen (sst_watchlist_scan.py, weekly) - a
+-- fully separate concept from `watchlist` above (that one's the daily,
+-- gap-direction intraday list every day-trading strategy shares) and
+-- deliberately NOT reusing custom_universes (src/custom_universes.py's
+-- file cache) since none of its fields apply here. Not account/mode-
+-- scoped - this is one global, universe-level screen every SST Swing
+-- strategy_run reads from, same as a custom_universe would be if it
+-- were DB-backed. Only symbols that already cleared BOTH hard floors
+-- (liquidity_min_avg_dollar_volume, price_floor_usd - see G-SST-4 in
+-- docs/sst_swing_spec.md) ever get a row at all; status distinguishes
+-- the two ways a symbol that DID clear those floors can still turn out
+-- unsuitable: 'pass' (correlation_spy below correlation_pass_max) vs
+-- 'review' (in the 0.3-0.5 band - G-SST-4 deliberately left this a
+-- manual call, not an auto pass/fail) - correlation_reject_min and
+-- above never gets a row either. noise_score/step_regularity_ratio are
+-- informational ranking fields only (G-SST-4: "rank, don't gate") -
+-- entry_scan/sst_swing_live never filter on them, only the dashboard
+-- (web/templates/sst_watchlist.html) sorts by them for a human to look at.
+CREATE TABLE IF NOT EXISTS sst_watchlist (
+    symbol TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'pass',
+    noise_score REAL,
+    correlation_spy REAL,
+    step_regularity_ratio REAL,
+    avg_dollar_volume REAL,
+    price REAL,
+    generated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS strategies (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
@@ -4359,6 +4388,39 @@ def get_watchlist_filters(account_id: int, mode: str) -> dict:
         return json.loads(raw)
     except json.JSONDecodeError:
         return {"updated_at": "", "results": []}
+
+
+def replace_sst_watchlist(rows: list[dict]):
+    """Replaces the ENTIRE sst_watchlist table - sst_watchlist_scan.py's
+    weekly run is a full re-screen of the universe from scratch, not an
+    incremental update, so a symbol that no longer clears the hard floors
+    (or SPY-correlation reject cutoff - see sst_watchlist's own schema
+    comment) should simply disappear, not linger with stale data."""
+    now = datetime.now(ET).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        conn.execute("DELETE FROM sst_watchlist")
+        rows = [{**r, "generated_at": now} for r in rows]
+        conn.executemany(
+            "INSERT INTO sst_watchlist (symbol, status, noise_score, correlation_spy, step_regularity_ratio, avg_dollar_volume, price, generated_at) "
+            "VALUES (:symbol, :status, :noise_score, :correlation_spy, :step_regularity_ratio, :avg_dollar_volume, :price, :generated_at)",
+            rows,
+        )
+
+
+def get_sst_watchlist(status: str | None = None) -> list[dict]:
+    """status=None returns everything (both 'pass' and 'review' rows) -
+    entry evaluation (sst_swing_live.run_daily_scan) passes status='pass'
+    to trade only the unambiguous names; the dashboard passes None so a
+    human can see 'review' rows too."""
+    query = "SELECT * FROM sst_watchlist"
+    params: list = []
+    if status is not None:
+        query += " WHERE status = ?"
+        params.append(status)
+    query += " ORDER BY noise_score ASC"
+    with get_conn() as conn:
+        rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
 
 
 def update_broker_positions(account_id: int, mode: str, positions: list[dict]):
