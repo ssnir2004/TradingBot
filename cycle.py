@@ -312,11 +312,26 @@ def _fetch_sst_daily_bars(symbol: str) -> pd.DataFrame | None:
     trailing_stop_update) - 1y comfortably covers every lookback that
     module needs, including its 200-day SMA obstruction check
     (avoid_200sma_obstruction). Only ever called once/day (sst_swing_live.
-    py's own scheduled job, G-SST-6), never from the per-minute cycle, so
-    a fresh yfinance fetch per symbol per day is cheap enough - no caching
-    needed the way the intraday-bar helpers above might eventually want."""
+    py's own scheduled job, run near 09:35 ET per G-SST-6 specifically so
+    the prior session's bar is already closed), never from the per-minute
+    cycle, so a fresh yfinance fetch per symbol per day is cheap enough -
+    no caching needed the way the intraday-bar helpers above might
+    eventually want.
+
+    Drops today's row if yfinance already has one - same "once market is
+    open, the last daily row is today's still-forming bar" fact
+    get_prior_close's own comment notes, except here it's not a minor
+    off-by-one, it would corrupt every rule in src/sst_swing.py (all of
+    which treat the frame's LAST row as "the closed day being evaluated"
+    - see evaluate_sst_entry's own docstring): a 5-minutes-old bar reads
+    as an extreme-narrow-range day, silently poisoning classify_days'
+    significant/inside classification and the DMI trigger's smoothing."""
     try:
         bars = yf.Ticker(symbol.replace(" ", "-")).history(period="1y", interval="1d")
+        if bars.empty:
+            return None
+        today = datetime.now(ET).date()
+        bars = bars[bars.index.date < today]
         return bars if not bars.empty else None
     except Exception:
         return None
