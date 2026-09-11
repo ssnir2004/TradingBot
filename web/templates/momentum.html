@@ -19,6 +19,11 @@
   .outcome-scratch { color:#6c757d; }
   .caveat-box { background:rgba(220,53,69,.08); border:1px solid rgba(220,53,69,.35);
                 border-radius:.5rem; padding:.75rem 1rem; font-size:.9rem; }
+  .live-card-off { border:2px solid #6c757d; }
+  .live-card-on  { border:2px solid #dc3545; box-shadow:0 0 0 .2rem rgba(220,53,69,.25); }
+  .live-switch-on .form-check-input:checked { background-color:#dc3545; border-color:#dc3545; }
+  .breaker-blocked { color:#dc3545; font-weight:600; }
+  .breaker-ok { color:#198754; }
 </style>
 </head>
 <body>
@@ -26,10 +31,43 @@
 <div class="container-fluid px-4 pb-5">
 
   <div class="d-flex justify-content-between align-items-center mb-3">
-    <h4 class="mb-0">Momentum Scanner — Phase 1 (Scan + Alert only, no orders placed)</h4>
+    <h4 class="mb-0">Momentum Scanner</h4>
     <div class="form-check form-switch fs-5">
       <input class="form-check-input" type="checkbox" role="switch" id="masterSwitch">
       <label class="form-check-label" id="masterLabel" for="masterSwitch">loading…</label>
+    </div>
+  </div>
+
+  <div class="card mb-3" id="liveCard">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <strong>⚠ LIVE TRADING — real orders on the live account</strong>
+      <div class="form-check form-switch fs-5 live-switch-on">
+        <input class="form-check-input" type="checkbox" role="switch" id="liveSwitch">
+        <label class="form-check-label" id="liveLabel" for="liveSwitch">loading…</label>
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="row mb-2 text-center" id="liveOverall"></div>
+      <div class="table-responsive">
+        <table class="table table-sm mb-0 mono" style="font-size:.85rem">
+          <thead><tr><th>Strategy</th><th>Open</th><th>Entries today</th><th>P&L today</th></tr></thead>
+          <tbody id="liveByStrategy"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      Open positions (real)
+      <button class="btn btn-sm btn-outline-secondary" onclick="loadPositions()">Refresh</button>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-sm mb-0 mono" style="font-size:.85rem">
+        <thead><tr><th>Strategy</th><th>Symbol</th><th>Qty</th><th>Entry</th>
+               <th>Stop (current)</th><th>State</th><th>Opened</th></tr></thead>
+        <tbody id="positionsBody"><tr><td colspan="7" class="text-muted">loading…</td></tr></tbody>
+      </table>
     </div>
   </div>
 
@@ -246,10 +284,81 @@ async function loadSignals() {
   }).join("");
 }
 
+function fmtUsd(n) { return (n >= 0 ? "+$" : "-$") + Math.abs(n).toFixed(2); }
+
+async function loadLiveStatus() {
+  const s = await getJSON("/api/momentum/live_status");
+  const card = document.getElementById("liveCard");
+  const sw = document.getElementById("liveSwitch");
+  sw.checked = s.enabled;
+  document.getElementById("liveLabel").textContent = s.enabled ? "ARMED — placing real orders" : "OFF";
+  card.className = "card mb-3 " + (s.enabled ? "live-card-on" : "live-card-off");
+
+  document.getElementById("liveOverall").innerHTML = [
+    statCol("Account equity", s.equity != null ? "$" + s.equity.toLocaleString() : "—"),
+    statCol("Global P&L today", fmtUsd(s.global_pnl_today) + ` / -$${s.global_daily_max_loss_usd}`),
+  ].join("");
+
+  const body = document.getElementById("liveByStrategy");
+  body.innerHTML = Object.entries(s.per_strategy).map(([k, v]) => {
+    const posBlocked = v.open_positions >= v.max_concurrent_positions;
+    const tradesBlocked = v.trades_today >= v.daily_max_trades;
+    const lossBlocked = v.pnl_today <= -Math.abs(v.daily_max_loss_usd);
+    return `
+    <tr>
+      <td><span class="badge badge-strategy-${k}">${k}</span> ${v.name}</td>
+      <td class="${posBlocked ? 'breaker-blocked' : 'breaker-ok'}">${v.open_positions} / ${v.max_concurrent_positions}</td>
+      <td class="${tradesBlocked ? 'breaker-blocked' : 'breaker-ok'}">${v.trades_today} / ${v.daily_max_trades}</td>
+      <td class="${lossBlocked ? 'breaker-blocked' : 'breaker-ok'}">${fmtUsd(v.pnl_today)} / -$${v.daily_max_loss_usd}</td>
+    </tr>`;
+  }).join("");
+}
+
+document.getElementById("liveSwitch").addEventListener("change", async (e) => {
+  const turningOn = e.target.checked;
+  if (turningOn && !confirm(
+    "Arm LIVE TRADING? This places REAL orders with REAL money on the live account " +
+    "for every approved strategy's next eligible signal. Confirm you mean to do this now."
+  )) {
+    e.target.checked = false;
+    return;
+  }
+  try {
+    const r = await postJSON("/api/momentum/live_toggle", { enabled: turningOn });
+    await loadLiveStatus();
+  } catch (err) {
+    alert("Failed to toggle live trading: " + err.message);
+    e.target.checked = !turningOn;
+  }
+});
+
+async function loadPositions() {
+  const data = await getJSON("/api/momentum/positions");
+  const body = document.getElementById("positionsBody");
+  if (!data.open.length) {
+    body.innerHTML = '<tr><td colspan="7" class="text-muted">No open positions.</td></tr>';
+    return;
+  }
+  body.innerHTML = data.open.map(p => `
+    <tr>
+      <td><span class="badge badge-strategy-${p.strategy}">${p.strategy}</span></td>
+      <td>${p.symbol}</td>
+      <td>${p.qty}</td>
+      <td>${fmt(p.entry_price)}</td>
+      <td>${fmt(p.stop_price)}</td>
+      <td>${p.state}</td>
+      <td>${p.entry_time_iso.replace('T', ' ').slice(0, 19)}</td>
+    </tr>`).join("");
+}
+
 loadStatus();
 loadSignals();
 loadBacktestSummary();
+loadLiveStatus();
+loadPositions();
 setInterval(loadSignals, 30000);
+setInterval(loadLiveStatus, 15000);
+setInterval(loadPositions, 15000);
 </script>
 </body>
 </html>

@@ -154,6 +154,19 @@ def _evaluate_candidate(c: scanner.Candidate, cfg: dict, detectors, account_id: 
             continue
         emit(sig, account_id, mode="alert")
         fired += 1
+
+        # Phase 3: real order placement - gated on BOTH the master live
+        # kill switch and this specific strategy being approved for it.
+        # Exceptions here must never break the scan/alert loop (an alert
+        # has already gone out above regardless of what happens next) -
+        # see momentum.live's own module docstring for the isolation and
+        # safety design.
+        if cfg["live"]["enabled"] and sig.strategy in cfg["live_strategies"]:
+            try:
+                from momentum import live
+                live.place_entry(sig, cfg)
+            except Exception:
+                log.exception("live.place_entry failed for %s %s", sig.strategy, sig.symbol)
     return fired
 
 

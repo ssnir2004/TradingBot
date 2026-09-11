@@ -16,6 +16,13 @@ momentum_signals    : one row per detector hit (strategy A/B/C/D). Carries
 momentum_bars_meta  : which symbol/timeframe bar files exist in
     data/momentum_bars/ and the range they cover, so the loop can decide
     whether to re-fetch.
+momentum_positions  : phase 3 (momentum.live) - one row per REAL open
+    position this engine placed. Distinct from the S&P engine's own
+    `positions` table (never shared) - a manual/other position in the
+    same broker account never appears here and this engine never touches
+    positions it didn't itself open.
+momentum_trades     : phase 3 - one row per REAL fill (entry, scale-out,
+    stop, or close) against a momentum_positions row.
 """
 import json
 from datetime import datetime
@@ -77,6 +84,43 @@ CREATE TABLE IF NOT EXISTS momentum_bars_meta (
     updated_iso TEXT,
     PRIMARY KEY (symbol, timeframe)
 );
+
+CREATE TABLE IF NOT EXISTS momentum_positions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id       INTEGER,
+    strategy        TEXT NOT NULL,
+    symbol          TEXT NOT NULL,
+    qty             INTEGER NOT NULL,
+    entry_price     REAL NOT NULL,
+    entry_time_iso  TEXT NOT NULL,
+    trade_date      TEXT NOT NULL,
+    stop_price      REAL NOT NULL,           -- CURRENT resting stop - moves to breakeven, then trails
+    initial_stop_price REAL NOT NULL,        -- captured once at entry, never touched again - the true "1R" reference
+    stop_order_id   INTEGER,
+    entry_order_id  INTEGER,
+    state           TEXT NOT NULL DEFAULT 'open',   -- open | scaled | closed
+    scaled1         INTEGER NOT NULL DEFAULT 0,
+    closed_at_iso   TEXT,
+    close_reason    TEXT,
+    realized_pnl_usd REAL NOT NULL DEFAULT 0.0
+);
+CREATE INDEX IF NOT EXISTS ix_mom_pos_state ON momentum_positions (state);
+CREATE INDEX IF NOT EXISTS ix_mom_pos_strat_date ON momentum_positions (strategy, trade_date);
+
+CREATE TABLE IF NOT EXISTS momentum_trades (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id     INTEGER NOT NULL,
+    strategy        TEXT NOT NULL,
+    symbol          TEXT NOT NULL,
+    side            TEXT NOT NULL,           -- BUY | SELL
+    qty             INTEGER NOT NULL,
+    price           REAL NOT NULL,
+    order_id        INTEGER,
+    reason          TEXT NOT NULL,           -- entry | scale1 | stop | breakeven_stop | red_candle | bailout | eod | broker_reconcile
+    timestamp_iso   TEXT NOT NULL,
+    trade_date      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_mom_trade_strat_date ON momentum_trades (strategy, trade_date);
 """
 
 
@@ -194,3 +238,84 @@ def trim_old_rows(retention_days: int = 120) -> None:
             "WHERE scan_iso < datetime('now', ?)",
             (f"-{retention_days} days",),
         )
+
+
+# --------------------------------------------------------- phase 3: positions ---
+def open_position(pos: dict) -> int:
+    cols = ("signal_id", "strategy", "symbol", "qty", "entry_price", "entry_time_iso",
+            "trade_date", "stop_price", "initial_stop_price", "stop_order_id", "entry_order_id", "state")
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"INSERT INTO momentum_positions ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
+            tuple(pos.get(c) for c in cols),
+        )
+        return cur.lastrowid
+
+
+def get_open_positions(strategy: str | None = None) -> list[dict]:
+    with get_conn() as conn:
+        if strategy:
+            rows = conn.execute(
+                "SELECT * FROM momentum_positions WHERE state != 'closed' AND strategy = ? ORDER BY id",
+                (strategy,),
+            )
+        else:
+            rows = conn.execute("SELECT * FROM momentum_positions WHERE state != 'closed' ORDER BY id")
+        return [dict(r) for r in rows]
+
+
+def update_position(position_id: int, **fields) -> None:
+    if not fields:
+        return
+    cols = ", ".join(f"{k} = ?" for k in fields)
+    with get_conn() as conn:
+        conn.execute(f"UPDATE momentum_positions SET {cols} WHERE id = ?", (*fields.values(), position_id))
+
+
+def close_position(position_id: int, closed_at_iso: str, close_reason: str, realized_pnl_usd: float) -> None:
+    update_position(position_id, state="closed", closed_at_iso=closed_at_iso,
+                    close_reason=close_reason, realized_pnl_usd=realized_pnl_usd)
+
+
+def record_position_trade(trade: dict) -> int:
+    cols = ("position_id", "strategy", "symbol", "side", "qty", "price",
+            "order_id", "reason", "timestamp_iso", "trade_date")
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"INSERT INTO momentum_trades ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
+            tuple(trade.get(c) for c in cols),
+        )
+        return cur.lastrowid
+
+
+def count_trades_today(strategy: str, trade_date: str, reason: str = "entry") -> int:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT count(*) FROM momentum_trades WHERE strategy = ? AND trade_date = ? AND reason = ?",
+            (strategy, trade_date, reason),
+        ).fetchone()
+        return row[0] if row else 0
+
+
+def realized_pnl_today(trade_date: str, strategy: str | None = None) -> float:
+    with get_conn() as conn:
+        if strategy:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(realized_pnl_usd), 0) FROM momentum_positions "
+                "WHERE trade_date = ? AND strategy = ? AND state = 'closed'",
+                (trade_date, strategy),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(realized_pnl_usd), 0) FROM momentum_positions "
+                "WHERE trade_date = ? AND state = 'closed'",
+                (trade_date,),
+            ).fetchone()
+        return float(row[0]) if row else 0.0
+
+
+def recent_position_trades(limit: int = 100) -> list[dict]:
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM momentum_trades ORDER BY id DESC LIMIT ?", (limit,),
+        )]

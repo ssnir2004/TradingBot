@@ -168,7 +168,36 @@ DEFAULTS = {
 
     # which strategies proceed past phase 1 (alert) toward live. Phase 1
     # runs every enabled detector regardless - this only gates phases 3+.
-    "live_strategies": ["A"],
+    # Updated 2026-09-11 (was ["A"]) - the phase 2 backtest (with the
+    # tuned exit rule) found D the strongest net performer (PF 4.1) and A
+    # still solid (PF 2.08); both approved for phase 3 together, C
+    # excluded (net loser, PF 0.78 - see docs/momentum_strategy_spec.md's
+    # "Phase 2" section).
+    "live_strategies": ["A", "D"],
+
+    # ---- Phase 3 : real order placement --------------------------------
+    # Everything above this point only ever computes levels and alerts
+    # (phase 1) or backtests against history (phase 2) - nothing places an
+    # order. This block is the one and only gate for that: `enabled` is a
+    # hard kill switch, independent of the scan/alert "enabled" flag at
+    # the top of this file (you can keep scanning+alerting with live
+    # trading off, but never the reverse - live.enabled with the master
+    # scanner off simply never fires because no signal reaches it).
+    # Circuit breakers are PER STRATEGY (the user's own choice, given A
+    # and D run simultaneously) so one strategy having a bad day never
+    # gates the other's remaining budget - global_daily_max_loss_usd is
+    # the one shared backstop across both.
+    "live": {
+        "enabled": False,                   # THE master switch. False until explicitly armed.
+        "client_id_env": "MOMENTUM_LIVE_CLIENT_ID",  # .env var name; falls back to 25 if unset
+        "management_poll_seconds": 20,      # how often open positions are checked/managed
+        "force_close_et": "15:55",          # flatten anything still open before the close
+        "global_daily_max_loss_usd": 200,   # hard stop across BOTH strategies combined
+        "per_strategy": {
+            "A": {"max_concurrent_positions": 1, "daily_max_trades": 3, "daily_max_loss_usd": 100},
+            "D": {"max_concurrent_positions": 1, "daily_max_trades": 3, "daily_max_loss_usd": 100},
+        },
+    },
 }
 
 

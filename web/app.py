@@ -28,6 +28,7 @@ import morning_prefilter
 import run_optimization
 from momentum import backtest as momentum_backtest
 from momentum import config as momentum_config
+from momentum import live as momentum_live
 from momentum import store as momentum_store
 # trades_csv/trades_pdf/trades_xlsx are deliberately NOT imported here -
 # trades_pdf pulls in reportlab+bidi (~18MB RSS) and trades_xlsx pulls in
@@ -3094,3 +3095,57 @@ def api_momentum_backtest_summary(mode: str = Query("backfill"), user: str = Dep
     signal's already-stored outcome_json (run_momentum_backtest.py writes
     it), not re-simulated on every request."""
     return momentum_backtest.summary_from_stored(mode)
+
+
+# --------------------------------------------------- phase 3: live trading ---
+@app.get("/api/momentum/live_status")
+def api_momentum_live_status(user: str = Depends(require_user)):
+    """Real order-placement status: the master switch plus, per approved
+    strategy, its circuit-breaker state today (open positions vs cap,
+    entries vs cap, realized P&L vs cap) - the dashboard's LIVE TRADING
+    card. Read-only; never places or touches an order itself."""
+    cfg = momentum_config.load_config()
+    today = date.today().isoformat()
+    per_strategy = {}
+    for strat in cfg["live_strategies"]:
+        per = cfg["live"]["per_strategy"].get(strat, {})
+        per_strategy[strat] = {
+            "name": MOMENTUM_STRATEGY_NAMES.get(strat, strat),
+            "open_positions": len(momentum_store.get_open_positions(strat)),
+            "max_concurrent_positions": per.get("max_concurrent_positions"),
+            "trades_today": momentum_store.count_trades_today(strat, today, reason="entry"),
+            "daily_max_trades": per.get("daily_max_trades"),
+            "pnl_today": momentum_store.realized_pnl_today(today, strat),
+            "daily_max_loss_usd": per.get("daily_max_loss_usd"),
+        }
+    return {
+        "enabled": cfg["live"]["enabled"],
+        "equity": momentum_live.real_equity(),
+        "global_pnl_today": momentum_store.realized_pnl_today(today),
+        "global_daily_max_loss_usd": cfg["live"]["global_daily_max_loss_usd"],
+        "per_strategy": per_strategy,
+    }
+
+
+@app.post("/api/momentum/live_toggle")
+async def api_momentum_live_toggle(request: Request, user: str = Depends(require_admin)):
+    """THE master kill switch for real order placement - admin-only
+    (unlike the scan/alert toggle) given the stakes. Flipping this to
+    true does not open any position by itself; it only allows the next
+    eligible signal to reach momentum.live.place_entry."""
+    body = await request.json()
+    enabled = bool(body.get("enabled"))
+    momentum_config.update_override({"live": {"enabled": enabled}})
+    db.log_decision(db.get_default_account_id(), "live", "dashboard_control",
+                    action="momentum_live_toggle", enabled=enabled, user=user)
+    return {"enabled": enabled}
+
+
+@app.get("/api/momentum/positions")
+def api_momentum_positions(user: str = Depends(require_user)):
+    """Open positions plus the most recent real fills (momentum_trades) -
+    the dashboard's live-positions table."""
+    return {
+        "open": momentum_store.get_open_positions(),
+        "recent_trades": momentum_store.recent_position_trades(50),
+    }
