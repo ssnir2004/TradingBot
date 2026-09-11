@@ -5,14 +5,25 @@ sideways into the 9 EMA. Lower conviction than a clean flag - the sideways
 action already shows some weakness - so every signal is tagged
 conviction="low" (never dropped: G18's explicit note).
 
-Precondition : an impulse, then a sideways stretch of >= sideways_min_candles
-               that did NOT break out, and price has come down to tap the
-               9 EMA (a candle low within tap_tol_cents of it, or wicking it).
+Precondition : a REAL recent impulse (>= min_impulse_pct over the last
+               impulse_lookback_candles), then a TIGHT sideways stretch of
+               >= sideways_min_candles (its own high-low range capped at
+               sideways_max_range_pct of price - this is what "stalled",
+               not "still moving", means) that did NOT break out, and the
+               most recent candle tapped the 9 EMA (its low within
+               tap_tol_cents of it).
 Fire (a)     : the first closed candle to make a new high after the tap.
 Fire (b)     : if a prior candle already made a new high but faked out
                (closed back below the flag top), the break of the flag top
                per G14 - i.e. this degrades to a flat-top break.
 Entry ref    : the new-high candle's high (a), or the flag top (b).
+
+Tightened 2026-09-10: the original version scoped "the impulse" to
+EVERYTHING before the sideways window (any prior bar) and never checked
+the sideways window's own range, so a normal intraday grind - any 4
+candles that simply didn't make a new high - satisfied it constantly
+(347/488 signals, 71%, in a same-day backfill). Both gates below exist to
+make "stalled flag" mean something narrower than "recent 20 minutes".
 """
 from __future__ import annotations
 
@@ -29,7 +40,7 @@ class MAPullback9ema(Detector):
         sc = self._strat_cfg(ctx)
         p = ctx.cfg["patterns"]
         s = ctx.session_5m
-        need = sc["sideways_min_candles"] + 3
+        need = sc["sideways_min_candles"] + sc["impulse_lookback_candles"] + 1
         if len(s) < need:
             return None
 
@@ -38,20 +49,33 @@ class MAPullback9ema(Detector):
         last = s.iloc[-1]
         prev = s.iloc[-2]
 
-        # sideways stretch = the last N candles held a tight range and did
+        # sideways stretch = the last N candles, required to actually be a
+        # tight stall (own range capped at sideways_max_range_pct) that did
         # not make a decisive new high until now
         sideways = s.iloc[-(sc["sideways_min_candles"] + 1):-1]
         flag_top = float(sideways["High"].max())
-        base_before = s.iloc[:-(sc["sideways_min_candles"] + 1)]
-        if base_before.empty:
+        flag_low = float(sideways["Low"].min())
+        mid_price = float(sideways["Close"].iloc[-1])
+        if mid_price <= 0 or (flag_top - flag_low) / mid_price * 100.0 > sc["sideways_max_range_pct"]:
+            return None  # still moving, not stalled - Strategy B's territory, not this one's
+
+        # impulse = a BOUNDED, recent lookback right before the stall - not
+        # "anything before it" - required to have actually run up by
+        # min_impulse_pct (a real move to stall out of, not just noise)
+        impulse_start = max(0, len(s) - sc["sideways_min_candles"] - 1 - sc["impulse_lookback_candles"])
+        impulse = s.iloc[impulse_start: len(s) - sc["sideways_min_candles"] - 1]
+        if impulse.empty:
             return None
-        impulse_high = float(base_before["High"].max())
+        impulse_open = float(impulse["Open"].iloc[0])
+        impulse_high = float(impulse["High"].max())
+        if impulse_open <= 0 or (impulse_high - impulse_open) / impulse_open * 100.0 < sc["min_impulse_pct"]:
+            return None
         if flag_top > impulse_high * 1.001:   # it already broke out - that's Strategy B's job
             return None
 
-        # tap: a recent candle's low came within tap_tol of the 9 EMA
-        recent = s.iloc[-(sc["sideways_min_candles"] + 1):]
-        tapped = bool((recent["Low"] <= ema9 + tap_tol).any())
+        # tap: the MOST RECENT (last sideways) candle's low came within
+        # tap_tol of the 9 EMA - not "sometime in the last N candles"
+        tapped = float(sideways["Low"].iloc[-1]) <= ema9 + tap_tol
         if not tapped:
             return None
 

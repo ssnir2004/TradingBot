@@ -64,17 +64,34 @@ def check_detectors(cfg) -> list[str]:
     sig = ALL_DETECTORS["B"].evaluate(ctx)
     out.append(f"B BullFlagFlatTop: {'FIRED entry=%.2f' % sig.entry_ref if sig else 'no signal'}")
 
-    # C: impulse to 3.90, then a long flat drift at ~3.72 (below the impulse
-    # high) that taps a rising 9ema, then a green new-high candle
+    # C: a real bounded impulse (+7.3% over 8 candles), then a TIGHT 4-candle
+    # stall (~1.9% range) that taps a rising 9ema on its last candle, then a
+    # green new-high candle - the shape required after the 2026-09-10
+    # tightening (see ma_pullback.py's own docstring).
     s = _mk_session(
-        closes=[3.05, 3.35, 3.62, 3.86, 3.74, 3.71, 3.73, 3.70, 3.72, 3.90],
-        opens= [3.00, 3.06, 3.36, 3.63, 3.85, 3.72, 3.70, 3.72, 3.69, 3.72],
-        highs= [3.08, 3.38, 3.65, 3.90, 3.88, 3.75, 3.76, 3.74, 3.75, 3.93],
-        lows=  [2.98, 3.04, 3.34, 3.60, 3.70, 3.66, 3.67, 3.66, 3.67, 3.70],
+        closes=[3.03, 3.06, 3.09, 3.12, 3.15, 3.18, 3.20, 3.19,
+                3.17, 3.16, 3.15, 3.16, 3.22],
+        opens= [3.00, 3.03, 3.06, 3.09, 3.12, 3.15, 3.18, 3.20,
+                3.19, 3.17, 3.16, 3.15, 3.16],
+        highs= [3.04, 3.07, 3.10, 3.13, 3.16, 3.19, 3.22, 3.21,
+                3.19, 3.18, 3.17, 3.18, 3.23],
+        lows=  [2.99, 3.02, 3.05, 3.08, 3.11, 3.14, 3.17, 3.18,
+                3.15, 3.14, 3.13, 3.14, 3.15],
     )
-    ctx = _ctx(cfg, s, price=3.92)
+    ctx = _ctx(cfg, s, price=3.23)
     sig = ALL_DETECTORS["C"].evaluate(ctx)
     out.append(f"C MAPullback9ema: {'FIRED entry=%.2f' % sig.entry_ref if sig else 'no signal'}")
+
+    # C-negative: a normal grinding uptrend with no tight stall (every
+    # 4-candle window still has real range) should NOT fire post-tightening
+    grind = _mk_session(
+        closes=[3.00, 3.10, 3.05, 3.15, 3.08, 3.20, 3.12, 3.25,
+                3.16, 3.30, 3.20, 3.35, 3.40],
+    )
+    ctx = _ctx(cfg, grind, price=3.40)
+    sig = ALL_DETECTORS["C"].evaluate(ctx)
+    out.append(f"C MAPullback9ema (choppy grind, should NOT fire): "
+              f"{'FIRED entry=%.2f' % sig.entry_ref if sig else 'no signal (good)'}")
 
     # D: swing-low(1) ~2.72 @ idx4, pivot swing-high(2) ~3.32 @ idx6,
     # higher swing-low(3) ~2.90 @ idx9, then break the pivot(4)

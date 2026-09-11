@@ -30,10 +30,14 @@ momentum/
   loop.py             one scan cycle: scan → shortlist → bars → G2/G6 → detectors → alert
   config.py           DEFAULTS (all G-decisions) + settings-table override (momentum:config_json)
   store.py            private tables: momentum_candidates / momentum_signals / momentum_bars_meta
+  universe.py         NASDAQ symbol list (reuses build_custom_universe) + cached float lookups
+  backfill.py          historical reconstruction - see "Backfill / same-night validation" below
   selftest.py         `python -m momentum.selftest [--live]`
 
 run_momentum.py             entrypoint: `--exec alert` (phase 1) | `--once`
+run_momentum_backfill.py    one-shot historical reconstruction (see below) - not scheduled
 deploy/momentum-scan.service systemd unit (no IBKR dependency in phase 1)
+web/templates/momentum.html  dashboard page: master + per-strategy on/off switches, signal feed
 ```
 
 ### Data sources
@@ -110,7 +114,7 @@ managed until phase 3.*
 |---|---|
 | G16 (A) | `levels` [whole, half] · `arm_distance_cents` 15 · `require_within_hod_pct` 2.0 |
 | G17 (B) | `impulse_min/max_candles` 3/6 · `impulse_max_counter_candles` 1 · `pullback_min/max_candles` 2/4 · `flat_top_tol_pct` 0.5 · `pullback_max_retrace_pct` 50 |
-| G18 (C) | `ma_period` 9 · `ma_timeframe` 5m · `sideways_min_candles` 4 · `tap_tol_cents` 5 · `conviction` low |
+| G18 (C) | `ma_period` 9 · `ma_timeframe` 5m · `sideways_min_candles` 4 · `sideways_max_range_pct` 3.0 · `impulse_lookback_candles` 8 · `min_impulse_pct` 5.0 · `tap_tol_cents` 3 · `conviction` low |
 | G19 (D) | `swing_fractal_bars` 2 · `require_higher_low` true · `max_base_candles` 15 · `stop_mode` shared |
 
 ---
@@ -123,6 +127,50 @@ managed until phase 3.*
 | 2 | "Poor backtest" over the archived bars | per-pattern PnL report on real pre-screened data |
 | 3 | Strategy **A** end-to-end + Shared Exit Engine | A live with circuit breakers |
 | 4 | B, C, D live | all four live |
+
+## Backfill / same-night validation
+
+`momentum/backfill.py` (entrypoint `run_momentum_backfill.py`) exists because
+waiting ~3 weeks for phase 1 to accumulate live signals is too slow to
+validate the detectors against. It substitutes a proxy screen built from
+data already fully accessible (see the module's own docstring for the full
+reasoning and caveats): bulk yfinance DAILY bars over the NASDAQ-listed
+universe approximate the G1/G3 screener, real yfinance 5-minute bars for
+the surviving (symbol, day) pairs get replayed candle-by-candle with no
+lookahead through the same four detectors, restricted to the real entry
+window (not the full pre/post-market session). Results land in
+`momentum_signals` tagged `mode="backfill"`.
+
+**This server has under 1GB RAM and runs the live trading engine on the
+same box** - `stream_daily_candidates` deliberately processes the universe
+in small (25-symbol) chunks, screening and discarding each chunk's bars
+immediately, rather than a single `yf.download` batch that would hold the
+whole ~4300-symbol universe in memory at once (confirmed by testing: this
+was a genuine risk before the fix, not a theoretical one). Always launch
+a backfill under a memory cap so a bug here can never touch the live
+engine's own cgroup:
+
+```bash
+sudo systemd-run --uid=tradingbot --gid=tradingbot --unit=momentum-backfill --scope \
+  -p MemoryMax=220M -p MemoryHigh=190M -p CPUWeight=20 \
+  bash -c 'cd /opt/tradingbot && .venv/bin/python run_momentum_backfill.py --days-back 45 --max-fetches 300'
+```
+
+A full run (~4300 symbols) takes ~20-25 minutes and holds under 200MB RSS
+throughout (measured 2026-09-10/11). `--limit N` caps the universe for a
+quick smoke test.
+
+## Post-backfill tuning log
+
+- **2026-09-10, Strategy C over-firing:** a 4328-symbol backfill (see below)
+  showed C at 71% of all signals (347/488) - "stalled flag" was matching
+  any 4 candles that simply didn't make a new high, scored against
+  "the impulse" = any prior bar in the session. Added `sideways_max_range_pct`
+  (the stall must actually be tight) and `min_impulse_pct`/
+  `impulse_lookback_candles` (a real, recent, bounded run-up before it),
+  tightened the EMA tap to the most recent candle only. Re-validated on a
+  2500-symbol backfill: C dropped to 14/142 (10%), A/D now dominate (55%/33%),
+  B stayed rare (2%, expected - the most specific of the four patterns).
 
 ## Phase 1 caveats / known limits
 

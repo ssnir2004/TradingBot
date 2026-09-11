@@ -104,13 +104,24 @@ DEFAULTS = {
         "pullback_max_retrace_pct": 50.0,
     },
     # ---- G18 : Strategy C - MAPullback9ema ------------------------
+    # sideways_max_range_pct / min_impulse_pct / impulse_lookback_candles
+    # were added after the 2026-09-10 backfill showed this detector firing
+    # on 71% of all signals (347/488) - the original version treated ANY
+    # 4 candles that didn't make a new high as "the stalled flag" against
+    # ANY prior bar as "the impulse", which a normal intraday grind
+    # satisfies constantly. These three require the stall to actually be
+    # tight and the impulse before it to be a real, recent, sized move -
+    # see momentum/strategies/ma_pullback.py's own docstring.
     "strategy_C": {
         "enabled": True,
         "ma_period": 9,
         "ma_timeframe": "5m",
         "ma_price": "close",
         "sideways_min_candles": 4,
-        "tap_tol_cents": 5,
+        "sideways_max_range_pct": 3.0,     # the stall's own high-low range, as % of price
+        "impulse_lookback_candles": 8,     # only look this far back for "the impulse"
+        "min_impulse_pct": 5.0,            # that lookback must have run at least this much
+        "tap_tol_cents": 3,
         "conviction": "low",
     },
     # ---- G19 : Strategy D - Setup1234 -----------------------------

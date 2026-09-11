@@ -54,8 +54,12 @@ class Signal:
             self.shares_hint = max(0, min(shares, notional_cap))
         return self
 
-    def to_store_row(self, mode: str = "alert") -> dict:
-        now = datetime.now(ET)
+    def to_store_row(self, mode: str = "alert", at: datetime | None = None) -> dict:
+        """`at` overrides "now" as the signal's timestamp - used by
+        momentum.backfill to stamp a signal with the historical bar time
+        it actually fired at, instead of the moment the backfill happened
+        to run."""
+        now = at or datetime.now(ET)
         return {
             "signal_iso": now.isoformat(timespec="seconds"),
             "trade_date": now.date().isoformat(),
