@@ -357,6 +357,28 @@ def decision_center_page(request: Request):
     })
 
 
+@app.get("/sst_watchlist", response_class=HTMLResponse)
+def sst_watchlist_page(request: Request):
+    """SST Swing's own universe screen (see sst_watchlist_scan.py, the
+    weekly job that fills db.sst_watchlist) - strictly read-only, same
+    viewer-redirect precedent as /decision_center: this feeds the live/
+    backtest symbol universe rather than being a backtest result itself,
+    so it's treated as an operational screen, not something a viewer
+    account can reach."""
+    if not db.any_users_exist():
+        return RedirectResponse("/setup", status_code=303)
+    username = read_session(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    account = db.get_user_by_username(username)
+    if account and account.get("role") == "viewer":
+        return RedirectResponse("/backtest", status_code=303)
+    return templates.TemplateResponse(request, "sst_watchlist.html", {
+        "active_page": "sst_watchlist",
+        "is_admin": bool(account and account.get("is_admin")),
+    })
+
+
 @app.get("/guide", response_class=HTMLResponse)
 def guide(request: Request):
     if not read_session(request):
@@ -840,6 +862,16 @@ def api_positions(mode: str = Depends(require_mode), account_id: int = Depends(r
 # anywhere in this section cannot affect a single live trading decision.
 def _rules_for_side(account_id: int, side: str) -> dict:
     return db.get_active_rules(account_id, side) or {"exit": cycle._FALLBACK_EXIT_CFG}
+
+
+@app.get("/api/sst_watchlist")
+def api_sst_watchlist(user: str = Depends(require_full_access)):
+    """No mode/account_id at all - unlike almost every other API route in
+    this file, db.sst_watchlist is genuinely global (see its own schema
+    comment in src/db.py): one shared universe screen every account's own
+    SST Swing strategy_run reads from, not scoped per account or paper/
+    live mode."""
+    return {"rows": db.get_sst_watchlist()}
 
 
 @app.get("/api/decision_center/overview")
