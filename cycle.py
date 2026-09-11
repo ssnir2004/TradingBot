@@ -1017,13 +1017,35 @@ def manage_virtual_position(account_id: int, strategy_id: int, strategy_label: s
 
 
 # ---------------------------------------------------------------- Step 6 ---
+def _is_swing_hold(pos: dict) -> bool:
+    """True for a position whose OWN strategy (looked up fresh by its
+    strategy_id - see _rules_for_position's docstring on why "the position's
+    own strategy" and "whatever's active right now" are not the same thing)
+    declares no_eod_force_close in its rules_json. SST Swing sets this: it
+    holds days-to-weeks and is closed only by its own trailing stop, never
+    by the EOD clock. Unlike hold_overnight (a one-shot, per-day, human
+    toggle - see db.set_hold_overnight), this is a standing property of the
+    position for as long as it stays open: nothing to reset, checked fresh
+    every EOD. A position with no strategy_id (predates multi-strategy
+    support, or was opened unattributed) is never a swing hold."""
+    strategy_id = pos.get("strategy_id")
+    if strategy_id is None:
+        return False
+    strategy = db.get_strategy(strategy_id)
+    if strategy is None:
+        return False
+    return bool(json.loads(strategy["rules_json"]).get("no_eod_force_close"))
+
+
 def force_close_all(account_id: int, mode: str, ib, positions: list[dict]):
     if not positions:
         return
 
-    held = [p for p in positions if p.get("hold_overnight")]
-    to_close = [p for p in positions if not p.get("hold_overnight")]
-    for pos in held:
+    manual_held = [p for p in positions if p.get("hold_overnight")]
+    swing_held = [p for p in positions if not p.get("hold_overnight") and _is_swing_hold(p)]
+    held = manual_held + swing_held
+    to_close = [p for p in positions if p not in held]
+    for pos in manual_held:
         # One-shot opt-out (see db.set_hold_overnight) - reset it now so it
         # only ever skips today's close, never silently forever, and leave
         # the position's stop and DB tracking completely untouched so it
@@ -1035,13 +1057,22 @@ def force_close_all(account_id: int, mode: str, ib, positions: list[dict]):
             "EOD force-close skipped by request - stop stays active, will force-close normally tomorrow unless held again",
             "default",
         )
+    for pos in swing_held:
+        # Not one-shot - this position stays exempt every day it's open,
+        # per its own strategy's rules, not a per-day human request.
+        log_decision(account_id, mode, {"event": "force_close_skipped", "symbol": pos["symbol"], "side": pos.get("side", "long"), "qty": pos["qty"], "reason": "swing_hold"})
+        notify(
+            f"[{mode.upper()}] Swing hold: {pos['symbol']}",
+            "EOD force-close skipped - this position's own strategy holds multi-day, closes only via its own trailing stop",
+            "default",
+        )
 
     if not to_close:
         return
 
     notify(
         f"[{mode.upper()}] EOD Force Close",
-        f"flattening {len(to_close)} position(s)" + (f" ({len(held)} held overnight by request)" if held else ""),
+        f"flattening {len(to_close)} position(s)" + (f" ({len(held)} held" + (f", {len(swing_held)} swing" if swing_held else "") + ")" if held else ""),
         "high",
     )
     for pos in to_close:
