@@ -30,6 +30,8 @@ import cycle
 import fetch_backtest_data
 import morning_prefilter
 import daily_summary
+import sst_swing_live
+import sst_watchlist_scan
 from src import db
 from src.custom_universes import CUSTOM_UNIVERSES
 from src.sp500_tickers import SP500_TICKERS
@@ -134,6 +136,21 @@ def main():
         id="watchlist_filters", misfire_grace_time=60,
     )
 
+    # SST Swing's own once-daily entry+trailing-stop evaluation (G-SST-6) -
+    # deliberately NOT inside the account_id==default block below: like
+    # "cycle"/"account_refresh"/"watchlist_filters" above, an SST Swing
+    # strategy can exist per-account (own strategy_run, own run_mode), so
+    # every account's own instance runs this for itself, same reasoning as
+    # those three. 09:35 ET mirrors TOO_EARLY_END (cycle.py's own earliest-
+    # entry time for every other strategy) and, per _fetch_sst_daily_bars'
+    # own comment, is comfortably after the prior session's daily bar is
+    # fully closed and yfinance has caught up.
+    scheduler.add_job(
+        lambda: _guarded(mode, "sst_daily_scan", account_id, sst_swing_live.run_daily_scan, account_id, mode),
+        CronTrigger(day_of_week="mon-fri", hour=9, minute=35, timezone=ET),
+        id="sst_daily_scan", misfire_grace_time=1800,
+    )
+
     if account_id == db.get_default_account_id():
         # True shared/account-agnostic jobs — the gap scan is plain market
         # data (fanned out to every account's own watchlist by
@@ -185,6 +202,16 @@ def main():
                 CronTrigger(day_of_week="sun", hour=8, minute=0, timezone=ET),
                 id=f"build_universe_{universe_key}", misfire_grace_time=3600,
             )
+        # SST Swing's own universe screen (source prompt section 6;
+        # G-SST-4/6) - noise/step-regularity/correlation drift over weeks
+        # like the custom-universe fundamentals just above, so weekly is
+        # plenty. Own 8:30 slot (after build_universe's 8:00, before
+        # fetch_backtest_data's 9:00) so a slow run doesn't block either.
+        scheduler.add_job(
+            lambda: _guarded(mode, "sst_watchlist_scan", account_id, sst_watchlist_scan.run_scan, None, None, False),
+            CronTrigger(day_of_week="sun", hour=8, minute=30, timezone=ET),
+            id="sst_watchlist_scan", misfire_grace_time=3600,
+        )
         # Backtest data cache: unlike the gap prefilter (plain internet)
         # this needs a live IBKR connection, on its own dedicated client ID
         # (IBKR_BACKTEST_CLIENT_ID) so it never collides with the cycle's
