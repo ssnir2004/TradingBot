@@ -3118,12 +3118,39 @@ def api_momentum_live_status(user: str = Depends(require_user)):
             "pnl_today": momentum_store.realized_pnl_today(today, strat),
             "daily_max_loss_usd": per.get("daily_max_loss_usd"),
         }
+    equity = momentum_live.real_equity()
+    risk_per_trade_usd = round(equity * (cfg["risk"]["per_trade_pct"] / 100.0), 2) if equity else None
+    max_daily_capital_exposure_usd = sum(
+        cfg["live"]["per_strategy"].get(s, {}).get("max_concurrent_positions", 0)
+        * cfg["risk"]["max_position_notional_usd"]
+        for s in cfg["live_strategies"]
+    )
+    open_positions = momentum_store.get_open_positions()
+    capital_deployed_now_usd = round(sum(p["qty"] * p["entry_price"] for p in open_positions), 2)
+
+    def _pct(usd):
+        return round(usd / equity * 100.0, 2) if equity and usd is not None else None
+
     return {
         "enabled": cfg["live"]["enabled"],
-        "equity": momentum_live.real_equity(),
+        "equity": equity,
         "global_pnl_today": momentum_store.realized_pnl_today(today),
         "global_daily_max_loss_usd": cfg["live"]["global_daily_max_loss_usd"],
         "per_strategy": per_strategy,
+        # summary risk figures for the dashboard's own top-line cards -
+        # see the "how much budget, what's R" conversation this was added
+        # from: static ceilings (risk_per_trade / max_daily_capital_exposure
+        # / global_daily_max_loss) alongside what's ACTUALLY deployed right
+        # now, so the card shows ceiling vs reality in one glance, not just
+        # the ceiling alone.
+        "risk_per_trade_usd": risk_per_trade_usd,
+        "risk_per_trade_pct": cfg["risk"]["per_trade_pct"],
+        "max_daily_capital_exposure_usd": max_daily_capital_exposure_usd,
+        "max_daily_capital_exposure_pct": _pct(max_daily_capital_exposure_usd),
+        "capital_deployed_now_usd": capital_deployed_now_usd,
+        "capital_deployed_now_pct": _pct(capital_deployed_now_usd),
+        "daily_loss_floor_usd": cfg["live"]["global_daily_max_loss_usd"],
+        "daily_loss_floor_pct": _pct(cfg["live"]["global_daily_max_loss_usd"]),
     }
 
 

@@ -294,9 +294,18 @@ async function loadLiveStatus() {
   document.getElementById("liveLabel").textContent = s.enabled ? "ARMED — placing real orders" : "OFF";
   card.className = "card mb-3 " + (s.enabled ? "live-card-on" : "live-card-off");
 
+  const pct = (p) => p != null ? ` (${p}%)` : "";
   document.getElementById("liveOverall").innerHTML = [
     statCol("Account equity", s.equity != null ? "$" + s.equity.toLocaleString() : "—"),
-    statCol("Global P&L today", fmtUsd(s.global_pnl_today) + ` / -$${s.global_daily_max_loss_usd}`),
+    statCol("Risk budget / trade (1R)",
+            s.risk_per_trade_usd != null ? "$" + s.risk_per_trade_usd.toFixed(2) + pct(s.risk_per_trade_pct) : "—"),
+    statCol("Max daily capital exposure",
+            "$" + s.max_daily_capital_exposure_usd.toLocaleString() + pct(s.max_daily_capital_exposure_pct)),
+    statCol("Capital deployed now",
+            "$" + s.capital_deployed_now_usd.toLocaleString() + pct(s.capital_deployed_now_pct)),
+    statCol("Daily loss floor",
+            "-$" + s.daily_loss_floor_usd.toLocaleString() + pct(s.daily_loss_floor_pct)),
+    statCol("Global P&L today", fmtUsd(s.global_pnl_today)),
   ].join("");
 
   const body = document.getElementById("liveByStrategy");
