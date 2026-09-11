@@ -92,7 +92,16 @@ def _chunked(seq, n):
 
 
 def _yahoo_to_ibkr(ticker: str) -> str:
-    return ticker.replace(".", " ")
+    # Dash, not dot - matches cycle._fetch_sst_daily_bars/_get_5min_bars'
+    # own symbol.replace(" ", "-") convention. build_custom_universe.py's
+    # dot conversion (for yf.Ticker(...).info fundamentals lookups) does
+    # NOT carry over to yf.download's OHLCV endpoint - confirmed live:
+    # "BRK.B"/"BF.B" both 404 there, "BRK-B"/"BF-B" return real bars.
+    return ticker.replace("-", " ")
+
+
+def _ibkr_to_yahoo(ticker: str) -> str:
+    return ticker.replace(" ", "-")
 
 
 def compute_noise_score(daily: pd.DataFrame, lookback: int = NOISE_LOOKBACK_DAYS) -> float | None:
@@ -168,8 +177,16 @@ def screen_one(symbol: str, daily: pd.DataFrame, ref_daily: pd.DataFrame, params
 
 
 def run_scan(symbols: list[str] | None = None, params: dict | None = None, dry_run: bool = False) -> dict:
+    """symbols, like everywhere else in this codebase, is IBKR-format
+    (e.g. "BRK B", a space before the share-class letter) - converted to
+    Yahoo's dash form ("BRK-B", same convention cycle._fetch_sst_daily_
+    bars already uses) for the actual yf.download calls below, and back
+    via _yahoo_to_ibkr when a row is actually stored. A plain space reads
+    as a genuinely different (and nonexistent) Yahoo ticker - confirmed
+    live: BRK B/BF B (the only two S&P 500 dual-class tickers) both
+    404'd until this conversion was added."""
     started = time.monotonic()
-    symbols = symbols if symbols is not None else sorted(SP500_TICKERS)
+    symbols = [_ibkr_to_yahoo(s) for s in (symbols if symbols is not None else sorted(SP500_TICKERS))]
     p = {
         "noise_lookback_days": NOISE_LOOKBACK_DAYS,
         "step_regularity_lookback_days": STEP_REGULARITY_LOOKBACK_DAYS,
