@@ -49,6 +49,24 @@ def _equity(account_id: int) -> float | None:
         return None
 
 
+def _log_rejection(account_id: int, symbol: str, reason: str, **extra) -> None:
+    """A shortlisted candidate (already cleared the G1/G3 screener, see
+    momentum_candidates' own reject_reason for that earlier stage) that
+    didn't become a signal - and WHY, one level deeper than the screener
+    reject_reason. Before this, a candidate could sit shortlisted for an
+    entire session (confirmed live: MKDW, 2026-09-11, passed_screener for
+    over an hour straight, ~80 evaluations) with zero persisted trace of
+    which of the four gates below actually blocked it every single time.
+    Called only for shortlisted candidates (a handful per cycle, not the
+    full scanned universe), so volume stays bounded - same reasoning
+    alert.emit's own log_decision call already accepts. Never allowed to
+    break the scan loop, same as alert.emit's own try/except."""
+    try:
+        db.log_decision(account_id, "live", "momentum_rejected", symbol=symbol, reason=reason, **extra)
+    except Exception:
+        log.exception("log_decision failed for rejection %s %s", symbol, reason)
+
+
 def _closed_session_5m(symbol: str) -> pd.DataFrame | None:
     df = bars.get_intraday(symbol, "5m", archive=True)
     if df is None or df.empty:
@@ -98,6 +116,7 @@ def _evaluate_candidate(c: scanner.Candidate, cfg: dict, detectors, account_id: 
                         equity: float | None) -> int:
     session = _closed_session_5m(c.symbol)
     if session is None:
+        _log_rejection(account_id, c.symbol, "no_bar_data")
         return 0
 
     # G2 - per-minute volume spike (informational gate; annotate only in v1)
@@ -116,6 +135,7 @@ def _evaluate_candidate(c: scanner.Candidate, cfg: dict, detectors, account_id: 
         cfg["screener"]["resistance_headroom_pct"],
     )
     if mode == "reject" and not clear:
+        _log_rejection(account_id, c.symbol, "resistance_blocked", price=c.price, ceiling=_r(ceiling))
         return 0
 
     # guard against a scan price that's badly out of step with the bars
@@ -125,6 +145,7 @@ def _evaluate_candidate(c: scanner.Candidate, cfg: dict, detectors, account_id: 
     if last_close > 0 and not (0.94 <= c.price / last_close <= 1.20):
         log.info("skip %s: scan price %.2f vs last 5m close %.2f (out of band)",
                  c.symbol, c.price, last_close)
+        _log_rejection(account_id, c.symbol, "price_out_of_band", scan_price=c.price, last_5m_close=last_close)
         return 0
 
     hod = F.session_hod(session)
@@ -133,9 +154,12 @@ def _evaluate_candidate(c: scanner.Candidate, cfg: dict, detectors, account_id: 
                         daily=daily, hod=hod)
 
     fired = 0
+    no_match: list[str] = []
+    suppressed: list[dict] = []
     for det in detectors:
         sig: Signal | None = det.evaluate(ctx)
         if sig is None:
+            no_match.append(det.key)
             continue
         sig.features.update({
             "volume_spike": bool(spiked), "volume_spike_ratio": _r(spike_ratio),
@@ -151,6 +175,7 @@ def _evaluate_candidate(c: scanner.Candidate, cfg: dict, detectors, account_id: 
         ok, why = cooldown_ok(sig, cfg)
         if not ok:
             log.info("suppressed: %s", why)
+            suppressed.append({"strategy": det.key, "why": why})
             continue
         emit(sig, account_id, mode="alert")
         fired += 1
@@ -167,6 +192,18 @@ def _evaluate_candidate(c: scanner.Candidate, cfg: dict, detectors, account_id: 
                 live.place_entry(sig, cfg)
             except Exception:
                 log.exception("live.place_entry failed for %s %s", sig.strategy, sig.symbol)
+
+    if fired == 0:
+        # Every enabled detector either found no pattern match at all, or
+        # matched but was suppressed by cooldown - the two are reported
+        # separately (no_pattern_match still carries which detectors were
+        # actually tried) since a run of cooldown suppressions on an
+        # otherwise-qualifying setup is a materially different situation
+        # from the pattern simply never forming.
+        if suppressed:
+            _log_rejection(account_id, c.symbol, "cooldown_suppressed", suppressed=suppressed)
+        else:
+            _log_rejection(account_id, c.symbol, "no_pattern_match", detectors_tried=no_match)
     return fired
 
 
