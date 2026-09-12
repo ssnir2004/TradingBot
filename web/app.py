@@ -1575,6 +1575,17 @@ def api_watchlist_filters(mode: str = Depends(require_mode), account_id: int = D
     return db.get_watchlist_filters(account_id, mode)
 
 
+@app.get("/api/sst_candidates")
+def api_sst_candidates(strategy_id: int, user: str = Depends(require_full_access)):
+    """SST Swing's own counterpart to /api/watchlist_filters - see db.
+    update_sst_candidates' own docstring for why this is a separate
+    endpoint/table rather than reusing that one (no account/mode scoping,
+    once/day cadence, populated by cycle.sst_entry_scan/virtual_sst_
+    entry_scan as a byproduct of their own real evaluation rather than a
+    second scan)."""
+    return db.get_sst_candidates(strategy_id)
+
+
 @app.get("/api/quick_fill")
 def api_quick_fill(symbol: str, strategy_id: int, mode: str = Depends(require_mode),
                    account_id: int = Depends(require_account), user: str = Depends(require_full_access)):

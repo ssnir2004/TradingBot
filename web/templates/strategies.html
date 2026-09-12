@@ -341,6 +341,19 @@ function strategyLabel(strategyId) {
   return s ? (s.key ? `${s.key} — ${s.name}` : s.name) : (strategyId ? `#${strategyId}` : "—");
 }
 
+// SST Swing has no "opening_range"/"opening_candle" key to shape-sniff
+// (see cycle.py's own G-SST-5 comment) - the explicit strategy_type
+// marker is the only reliable way to tell an SST tab apart from every
+// other family here too, same reasoning as the backend's own dispatch.
+// list_strategies (unlike the single-strategy detail fetch) returns raw
+// rules_json text, not a parsed "rules" field - parsed here on demand
+// rather than eagerly for every strategy on every load.
+function isSstStrategy(strategyId) {
+  const s = strategiesCache[strategyId];
+  if (!s || !s.rules_json) return false;
+  try { return JSON.parse(s.rules_json).strategy_type === "sst_swing"; } catch (e) { return false; }
+}
+
 async function refreshPositions() {
   const rows = await modeApi("/api/positions");
   const body = document.getElementById("positions-body");
@@ -747,8 +760,62 @@ function renderCandidatesTable(rows) {
 function renderTabCandidates(strategyId) {
   const el = document.getElementById(`tab-candidates-${strategyId}`);
   if (!el) return;
+  if (isSstStrategy(strategyId)) {
+    loadSstCandidates(strategyId);
+    return;
+  }
   const rows = latestWatchlistRows.filter(r => r.strategy_id === strategyId);
   el.innerHTML = renderCandidatesTable(rows);
+}
+
+// SST Swing's own Candidates renderer - db.get_sst_watchlist's universe
+// checked against THIS strategy's own four rules (trend/DMI trigger/
+// price confirmation/200SMA), refreshed once/day by cycle.sst_entry_scan
+// (see /api/sst_candidates' own docstring) rather than every 5 minutes
+// like the classic/ORB/Touch&Turn table above - a manual "Run scan now"
+// click does nothing for this table, since SST isn't part of that scan
+// at all; the real next update is tomorrow's daily job.
+async function loadSstCandidates(strategyId) {
+  const el = document.getElementById(`tab-candidates-${strategyId}`);
+  if (!el) return;
+  try {
+    const data = await api(`/api/sst_candidates?strategy_id=${strategyId}`);
+    const rows = data.results || [];
+    if (!rows.length) {
+      el.innerHTML = '<p class="text-muted small mb-0">No candidates yet - the daily SST scan (~09:35 ET) hasn\'t run since this strategy went live, or nothing on the SST watchlist evaluated cleanly.</p>';
+      return;
+    }
+    const updatedNote = data.updated_at ? `<div class="text-muted small mb-2">Last SST daily scan: ${data.updated_at.replace("T", " ").slice(0, 19)}</div>` : "";
+    const stagesReached = r => [r.trend_ok, r.dmi_ok, r.price_confirmed, r.sma200_ok].filter(Boolean).length;
+    const sorted = [...rows].sort((a, b) => (b.pass - a.pass) || (stagesReached(b) - stagesReached(a)));
+    el.innerHTML = updatedNote + `<table class="table table-sm mb-0">
+      <thead><tr>
+        <th>Symbol</th><th>Side</th><th>Passed</th>
+        <th>Trend</th><th>DMI</th><th>Price confirm</th><th>200SMA</th>
+        <th>Price</th><th>Entry</th><th>Stop</th><th></th>
+      </tr></thead>
+      <tbody>${sorted.map(r => {
+        const passedBadge = r.pass
+          ? '<span class="badge bg-success" title="Would enter live right now">✓ READY</span>'
+          : `<span class="badge bg-secondary" title="${r.reason || ""}">not triggered</span>`;
+        return `<tr>
+          <td class="fw-bold"><a href="#" class="candidate-symbol-link" data-symbol="${r.symbol}" data-side="${r.side}" data-strategy-id="${strategyId}">${r.symbol}</a></td>
+          <td>${sideBadge(r.side)}</td>
+          <td>${passedBadge}</td>
+          <td>${r.trend_ok ? "✓" : "✗"}</td>
+          <td>${r.dmi_ok ? "✓" : "✗"}</td>
+          <td>${r.price_confirmed ? "✓" : "✗"}</td>
+          <td>${r.sma200_ok ? "✓" : "✗"}</td>
+          <td>${fmtMoney(r.price)}</td>
+          <td>${fmtMoney(r.entry_price)}</td>
+          <td>${fmtMoney(r.initial_stop)}</td>
+          <td><button type="button" class="btn btn-sm btn-outline-primary quick-trigger-btn" data-symbol="${r.symbol}" data-side="${r.side}" data-strategy-id="${strategyId}">${r.side === "short" ? "מכירה" : "קניה"} ⚡</button></td>
+        </tr>`;
+      }).join("")}</tbody>
+    </table>`;
+  } catch (e) {
+    el.innerHTML = `<p class="text-danger small mb-0">Failed to load SST candidates: ${e.message}</p>`;
+  }
 }
 
 function renderTabVirtualTrades(strategyId, trades) {

@@ -4407,6 +4407,31 @@ def get_watchlist_filters(account_id: int, mode: str) -> dict:
         return {"updated_at": "", "results": []}
 
 
+def update_sst_candidates(strategy_id: int, results: list[dict]):
+    """SST Swing's own counterpart to update_watchlist_filters above - one
+    snapshot per strategy_id (not per account/mode: unlike the classic/
+    ORB/Touch&Turn families, SST's own watchlist and rules aren't account-
+    scoped, and its own sst_entry_scan/virtual_sst_entry_scan run once/day
+    rather than every 5 minutes, so this updates on that same cadence,
+    piggybacking on bars those functions already fetched rather than a
+    second scan). Powers Strategy Sheets' SST Swing Long/Short tabs, which
+    scan_watchlist_filters itself explicitly never populates (see its own
+    docstring) - SST needed a dedicated candidates view instead of being
+    silently blank."""
+    payload = {"updated_at": datetime.now(ET).isoformat(timespec="seconds"), "results": results}
+    set_setting(f"sst_candidates:{strategy_id}", json.dumps(payload))
+
+
+def get_sst_candidates(strategy_id: int) -> dict:
+    raw = get_setting(f"sst_candidates:{strategy_id}", "")
+    if not raw:
+        return {"updated_at": "", "results": []}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {"updated_at": "", "results": []}
+
+
 def replace_sst_watchlist(rows: list[dict]):
     """Replaces the ENTIRE sst_watchlist table - sst_watchlist_scan.py's
     weekly run is a full re-screen of the universe from scratch, not an
@@ -4582,10 +4607,17 @@ def _check_direction(direction: str):
 
 
 def list_strategies(account_id: int) -> list[dict]:
+    # rules_json included (raw text, NOT parsed into "rules" the way
+    # get_strategy/api_get_strategy does for the single-strategy detail
+    # fetch) so the dashboard's Strategy Sheets can tell an SST Swing tab
+    # apart from every other strategy family (rules.strategy_type ==
+    # "sst_swing") without a second per-strategy request - it needs that
+    # distinction just to know which Candidates renderer/endpoint to use,
+    # not the full rules detail an edit form needs.
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT s.id, s.name, s.key, s.direction, s.risk_rating, s.description, s.created_at, s.updated_at, "
-            "(a.strategy_id IS NOT NULL) AS is_active "
+            "s.rules_json, (a.strategy_id IS NOT NULL) AS is_active "
             "FROM strategies s "
             "LEFT JOIN account_active_strategy a ON a.strategy_id = s.id AND a.account_id = ? "
             "ORDER BY s.direction, s.id",
