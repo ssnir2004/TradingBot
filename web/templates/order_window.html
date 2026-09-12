@@ -89,10 +89,10 @@ feature's own commit message for why).
   </div>
   <div id="indicator-toolbar">
     <label class="ind-toggle"><input type="checkbox" data-ind="volume" checked><span class="swatch" style="background:#26a69a;"></span>Volume</label>
-    <label class="ind-toggle"><input type="checkbox" data-ind="ma20" checked><span class="swatch" style="background:#16a085;"></span>MA20</label>
-    <label class="ind-toggle"><input type="checkbox" data-ind="ma200" checked><span class="swatch" style="background:#2980b9;"></span>MA200</label>
-    <label class="ind-toggle"><input type="checkbox" data-ind="sma50" checked><span class="swatch" style="background:#f39c12;"></span>SMA50</label>
-    <label class="ind-toggle"><input type="checkbox" data-ind="sma200ref" checked><span class="swatch" style="background:#2980b9;"></span>SMA200 ref</label>
+    <label class="ind-toggle"><input type="checkbox" data-ind="ma20"><span class="swatch" style="background:#16a085;"></span>MA20</label>
+    <label class="ind-toggle"><input type="checkbox" data-ind="ma200"><span class="swatch" style="background:#2980b9;"></span>MA200</label>
+    <label class="ind-toggle"><input type="checkbox" data-ind="sma50"><span class="swatch" style="background:#f39c12;"></span>SMA50</label>
+    <label class="ind-toggle"><input type="checkbox" data-ind="sma200ref"><span class="swatch" style="background:#2980b9;"></span>SMA200 ref</label>
     <label class="ind-toggle"><input type="checkbox" data-ind="rsi" checked><span class="swatch" style="background:#8e44ad;"></span>RSI</label>
   </div>
   <div id="chart-container"></div>
@@ -182,7 +182,9 @@ let chartRefreshTimer = null;
 // both the line series AND its own price-scale band collapsing to 0 width
 // so hiding it actually reclaims the vertical space instead of leaving a
 // blank strip.
-const indicatorVisible = { volume: true, ma20: true, ma200: true, sma50: true, sma200ref: true, rsi: true };
+// Default view: RSI + Volume only - matches this toolbar's own checkbox
+// defaults above (only those two start checked).
+const indicatorVisible = { volume: true, ma20: false, ma200: false, sma50: false, sma200ref: false, rsi: true };
 
 if (showChart && symbol) {
   const container = document.getElementById("chart-container");
