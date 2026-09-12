@@ -133,11 +133,11 @@
             <tr>
               <th>Symbol</th><th>Exch</th><th>Price</th><th>Δ open %</th><th>RVOL</th>
               <th>Float</th><th>Volume</th><th>Avg Vol 10d</th><th>Premkt %</th>
-              <th>Passed?</th><th>Reject reason</th>
+              <th>Passed?</th><th>Reject reason</th><th></th>
             </tr>
           </thead>
           <tbody id="candidatesBody">
-            <tr><td colspan="11" class="text-muted">loading…</td></tr>
+            <tr><td colspan="12" class="text-muted">loading…</td></tr>
           </tbody>
         </table>
       </div>
@@ -155,11 +155,11 @@
           <tr>
             <th>Time</th><th>Strategy</th><th>Symbol</th><th>Price</th>
             <th>Entry</th><th>Stop</th><th>Scale 1</th><th>Scale 2</th>
-            <th>Size hint</th><th>Conviction</th><th>Outcome</th><th>R</th>
+            <th>Size hint</th><th>Conviction</th><th>Outcome</th><th>R</th><th></th>
           </tr>
         </thead>
         <tbody id="signalsBody">
-          <tr><td colspan="12" class="text-muted">loading…</td></tr>
+          <tr><td colspan="13" class="text-muted">loading…</td></tr>
         </tbody>
       </table>
     </div>
@@ -251,7 +251,7 @@ async function loadCandidates() {
   document.getElementById("candScanTime").textContent =
     data.scan_iso ? `as of ${data.scan_iso.replace('T', ' ').slice(0, 19)}` : "";
   if (!data.rows.length) {
-    body.innerHTML = '<tr><td colspan="11" class="text-muted">No scan has run yet.</td></tr>';
+    body.innerHTML = '<tr><td colspan="12" class="text-muted">No scan has run yet.</td></tr>';
     return;
   }
   body.innerHTML = data.rows.map(r => `
@@ -267,8 +267,42 @@ async function loadCandidates() {
       <td>${r.premarket_pct === null ? "—" : (r.premarket_pct >= 0 ? "+" : "") + r.premarket_pct.toFixed(1) + "%"}</td>
       <td><span class="badge ${r.passed_screener ? 'cand-passed' : 'cand-rejected'}">${r.passed_screener ? "pass" : "reject"}</span></td>
       <td class="text-muted">${r.reject_reason ?? "—"}</td>
+      <td><button type="button" class="btn btn-sm btn-outline-primary momentum-order-btn" data-symbol="${r.symbol}" data-chart="0">קניה ⚡</button></td>
     </tr>`).join("");
 }
+
+// Momentum's own version of strategies.html's openOrderWindow - same
+// /order_window popup, same real price-trigger submission mechanism,
+// just backed by /api/momentum/quick_fill (real fired signal's own
+// entry_ref/stop_price/shares_hint when one exists, else just the
+// scan price for a bare candidate - see that endpoint's own docstring).
+// Every momentum strategy (A-D) is long-only, so side is always "long".
+async function openMomentumOrderWindow(symbol, chart) {
+  let fill = {};
+  try {
+    fill = await getJSON(`/api/momentum/quick_fill?symbol=${encodeURIComponent(symbol)}`);
+  } catch (e) { /* window still opens below, unfilled - see strategies.html's identical fallback */ }
+  const qs = new URLSearchParams({
+    symbol, side: "long", chart: chart ? "1" : "0",
+    trigger: fill.trigger_price ?? "", stop: fill.stop_price ?? "", qty: fill.qty ?? "",
+    source: fill.source ?? "", label: fill.strategy ? `Momentum ${fill.strategy}` : "Momentum",
+  });
+  const w = chart ? screen.availWidth : 460;
+  const h = chart ? screen.availHeight : 560;
+  window.open(`/order_window?${qs}`, `order_${symbol}_${Date.now()}`,
+              `width=${w},height=${h},left=0,top=0,noopener`);
+}
+
+document.getElementById("candidatesBody").addEventListener("click", (e) => {
+  const btn = e.target.closest(".momentum-order-btn");
+  if (!btn) return;
+  openMomentumOrderWindow(btn.dataset.symbol, btn.dataset.chart === "1");
+});
+document.getElementById("signalsBody").addEventListener("click", (e) => {
+  const btn = e.target.closest(".momentum-order-btn");
+  if (!btn) return;
+  openMomentumOrderWindow(btn.dataset.symbol, btn.dataset.chart === "1");
+});
 
 function statCol(label, value) {
   return `<div class="col"><div class="text-muted small">${label}</div>
@@ -314,7 +348,7 @@ async function loadSignals() {
   document.getElementById("signalsToday").textContent =
     rows.filter(r => r.trade_date === today).length;
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="12" class="text-muted">No signals yet.</td></tr>';
+    body.innerHTML = '<tr><td colspan="13" class="text-muted">No signals yet.</td></tr>';
     return;
   }
   body.innerHTML = rows.map(r => {
@@ -328,6 +362,13 @@ async function loadSignals() {
         outcomeCell = `<span class="outcome-${r.outcome}">${r.outcome}</span> (${d.exit_reason || ""})`;
       } catch (e) { /* leave dashes */ }
     }
+    // Only today's real (non-backfill) signals are still an actionable
+    // "buy this now" opportunity - a historical/backfill row is a test
+    // record, offering a quick-order button on it would be misleading.
+    const actionable = r.mode !== "backfill" && r.trade_date === today;
+    const actionCell = actionable
+      ? `<button type="button" class="btn btn-sm btn-outline-primary momentum-order-btn" data-symbol="${r.symbol}" data-chart="0">קניה ⚡</button>`
+      : "";
     return `
     <tr class="${r.conviction === 'low' ? 'conviction-low' : ''}">
       <td>${r.signal_iso.replace('T', ' ').slice(0, 19)}</td>
@@ -342,6 +383,7 @@ async function loadSignals() {
       <td>${r.conviction}</td>
       <td>${outcomeCell}</td>
       <td>${rCell}</td>
+      <td>${actionCell}</td>
     </tr>`;
   }).join("");
 }
