@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TradingBot — Quick Order</title>
+<!--
+Genuinely separate popup window (opened via window.open(), never a
+modal embedded in another page) for the "קניה⚡" quick-order flow -
+Strategy Sheets' candidate rows and Momentum's Candidates/Recent
+Signals tables all open this same page, just with different query
+params. Two modes, one template:
+  - ?chart=1 (default): candles + the order form, sized to fill
+    whatever window the caller opened (see strategies.html/momentum.
+    html's own openOrderWindow, which sizes the popup to the screen's
+    own available area so nothing here needs to scroll).
+  - ?chart=0: order form ONLY, no chart fetch at all - the "blitz"
+    flow. The caller opens a small fixed-size window for this one.
+Every field arrives pre-filled from the caller (symbol/side/trigger/
+stop/qty), computed server-side by /api/quick_fill or /api/momentum/
+quick_fill - EXACTLY what the live bot would use for a real entry
+right now, never re-derived here. This page only ever submits the
+SAME real mechanism every other order on this dashboard already uses
+(POST /api/price_triggers, a real resting IBKR STP order) - there is
+no separate "instant market order" path, by design (see this
+feature's own commit message for why).
+-->
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #14161a; color: #e9ecef;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+  }
+  #chart-area { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  #chart-container { flex: 1 1 auto; min-height: 0; }
+  #chart-caption { padding: 2px 12px; font-size: 11px; color: #868e96; flex: 0 0 auto; }
+  #order-panel { flex: 0 0 auto; padding: 14px 16px; background: #1c1f24; border-top: 1px solid #2b2f36; }
+  .hdr { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .hdr .symbol { font-size: 22px; font-weight: 700; }
+  .side-badge { padding: 3px 10px; border-radius: 4px; font-size: 12px; font-weight: 700; }
+  .side-long { background: #1f6f43; color: #d4f4e2; }
+  .side-short { background: #7a2530; color: #ffd9dc; }
+  .warn-banner {
+    background: #3a3222; border: 1px solid #665a2e; color: #ffda6a;
+    border-radius: 6px; padding: 8px 10px; font-size: 12.5px; margin-bottom: 10px;
+  }
+  .fields { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .field label { display: block; font-size: 11px; color: #adb5bd; margin-bottom: 3px; }
+  .field input {
+    width: 110px; background: #0f1114; border: 1px solid #3a3f47; color: #e9ecef;
+    border-radius: 5px; padding: 7px 8px; font-size: 15px; font-family: ui-monospace, monospace;
+  }
+  .field input:focus { outline: none; border-color: #4a90e2; }
+  #btn-send {
+    width: 100%; padding: 13px; font-size: 16px; font-weight: 700; border: none;
+    border-radius: 7px; background: #c0392b; color: #fff; cursor: pointer;
+  }
+  #btn-send:hover { background: #a93226; }
+  #btn-send:disabled { background: #4a4f57; cursor: not-allowed; }
+  #msg { margin-top: 9px; font-size: 13px; min-height: 18px; }
+  #msg.err { color: #ff8a8a; }
+  #msg.ok { color: #7ee0a5; }
+  #source-note { font-size: 11px; color: #868e96; margin-top: -4px; margin-bottom: 10px; }
+</style>
+</head>
+<body>
+
+<div id="chart-area">
+  <div id="chart-container"></div>
+  <div id="chart-caption"></div>
+</div>
+
+<div id="order-panel">
+  <div class="hdr">
+    <span class="symbol" id="ord-symbol">—</span>
+    <span class="side-badge" id="ord-side-badge">—</span>
+    <span class="text-muted" style="font-size:12px;color:#868e96;" id="ord-label"></span>
+  </div>
+  <div id="warn-area"></div>
+  <div class="fields">
+    <div class="field">
+      <label>מחיר טריגר</label>
+      <input type="number" step="0.01" id="f-trigger">
+    </div>
+    <div class="field">
+      <label>סטופ</label>
+      <input type="number" step="0.01" id="f-stop">
+    </div>
+    <div class="field">
+      <label>כמות</label>
+      <input type="number" step="1" id="f-qty">
+    </div>
+  </div>
+  <button id="btn-send">🔴 שלח הוראת LIVE</button>
+  <div id="msg"></div>
+</div>
+
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<script>
+const params = new URLSearchParams(location.search);
+const symbol = (params.get("symbol") || "").toUpperCase();
+const side = params.get("side") === "short" ? "short" : "long";
+const showChart = params.get("chart") !== "0";
+const source = params.get("source") || "";
+const label = params.get("label") || "";
+
+document.title = `${symbol} — Quick Order`;
+document.getElementById("ord-symbol").textContent = symbol || "—";
+const badge = document.getElementById("ord-side-badge");
+badge.textContent = side === "short" ? "SHORT" : "LONG";
+badge.className = "side-badge " + (side === "short" ? "side-short" : "side-long");
+document.getElementById("ord-label").textContent = label;
+
+if (params.get("trigger")) document.getElementById("f-trigger").value = Number(params.get("trigger")).toFixed(2);
+if (params.get("stop")) document.getElementById("f-stop").value = Number(params.get("stop")).toFixed(2);
+if (params.get("qty")) document.getElementById("f-qty").value = params.get("qty");
+
+if (source === "candidate_only") {
+  document.getElementById("warn-area").innerHTML =
+    '<div class="warn-banner">⚠ מועמד בלבד - אף פעם לא נוצר סיגנל אמיתי בשבילו. רק מחיר הסריקה מולא; סטופ וכמות דורשים מילוי ידני.</div>';
+}
+
+if (!showChart) {
+  document.getElementById("chart-area").style.display = "none";
+}
+
+async function api(path, options) {
+  const res = await fetch(path, Object.assign({ credentials: "same-origin" }, options || {}));
+  if (!res.ok) {
+    const text = await res.text();
+    let detail = text;
+    try { detail = JSON.parse(text).detail || text; } catch (e) { /* leave raw text */ }
+    throw new Error(detail);
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+// ---------------------------------------------------------------- chart ---
+if (showChart && symbol) {
+  (async () => {
+    const container = document.getElementById("chart-container");
+    if (typeof LightweightCharts === "undefined") {
+      container.innerHTML = '<p style="color:#ff8a8a;padding:12px;">Could not load the charting library.</p>';
+      return;
+    }
+    const chart = LightweightCharts.createChart(container, {
+      width: container.clientWidth, height: container.clientHeight,
+      layout: { background: { color: "#14161a" }, textColor: "#e9ecef" },
+      grid: { vertLines: { color: "#22262c" }, horzLines: { color: "#22262c" } },
+      timeScale: { timeVisible: true, secondsVisible: false },
+      rightPriceScale: { scaleMargins: { top: 0.05, bottom: 0.25 } },
+    });
+    const candleSeries = chart.addCandlestickSeries();
+    const volumeSeries = chart.addHistogramSeries({ priceFormat: { type: "volume" }, priceScaleId: "volume" });
+    chart.priceScale("volume").applyOptions({ scaleMargins: { top: 0.78, bottom: 0.0 } });
+
+    try {
+      const data = await api(`/api/candles?symbol=${encodeURIComponent(symbol)}&interval=5m&mode=live`);
+      const candles = data.candles || [];
+      candleSeries.setData(candles);
+      const candleByTime = new Map(candles.map(c => [c.time, c]));
+      volumeSeries.setData((data.volume || []).map(v => {
+        const c = candleByTime.get(v.time);
+        const up = !c || c.close >= c.open;
+        return { time: v.time, value: v.value, color: up ? "rgba(38,166,154,0.5)" : "rgba(239,83,80,0.5)" };
+      }));
+      if (data.sma50 !== null && data.sma50 !== undefined) {
+        candleSeries.createPriceLine({ price: data.sma50, color: "#f39c12", lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: "SMA50" });
+      }
+      if (data.sma200 !== null && data.sma200 !== undefined) {
+        candleSeries.createPriceLine({ price: data.sma200, color: "#2980b9", lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: "SMA200" });
+      }
+      document.getElementById("chart-caption").textContent = "5m · " + new Date().toLocaleTimeString();
+    } catch (e) {
+      document.getElementById("chart-caption").textContent = "Chart load failed: " + e.message;
+    }
+    window.addEventListener("resize", () => chart.applyOptions({ width: container.clientWidth, height: container.clientHeight }));
+  })();
+}
+
+// ----------------------------------------------------------------- send ---
+document.getElementById("btn-send").addEventListener("click", async () => {
+  const msg = document.getElementById("msg");
+  const btn = document.getElementById("btn-send");
+  msg.textContent = ""; msg.className = "";
+  const trigger_price = document.getElementById("f-trigger").value;
+  const stop_price = document.getElementById("f-stop").value;
+  const qty = document.getElementById("f-qty").value;
+  if (!symbol || !trigger_price || !stop_price || !qty) {
+    msg.textContent = "חסרים שדות - מלא הכל לפני שליחה.";
+    msg.className = "err";
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = "שולח...";
+  try {
+    await api("/api/price_triggers?mode=live", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbol, side, trigger_price, stop_price, qty, confirm: "ok" }),
+    });
+    msg.textContent = "✓ ההוראה נשלחה. החלון ייסגר...";
+    msg.className = "ok";
+    setTimeout(() => window.close(), 1800);
+  } catch (e) {
+    msg.textContent = "שליחה נכשלה: " + e.message;
+    msg.className = "err";
+    btn.disabled = false;
+    btn.textContent = "🔴 שלח הוראת LIVE";
+  }
+});
+</script>
+</body>
+</html>

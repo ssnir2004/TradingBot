@@ -379,6 +379,26 @@ def sst_watchlist_page(request: Request):
     })
 
 
+@app.get("/order_window", response_class=HTMLResponse)
+def order_window_page(request: Request):
+    """The quick-order popup (see order_window.html's own docstring) -
+    opened via window.open() from Strategy Sheets' candidate rows and
+    Momentum's Candidates/Recent Signals tables, never embedded in the
+    page itself. Same viewer exclusion as every other screen that can
+    touch a real order - a viewer account gets redirected away, not
+    just hidden buttons (the page itself must never be reachable by
+    URL either)."""
+    if not db.any_users_exist():
+        return RedirectResponse("/setup", status_code=303)
+    username = read_session(request)
+    if not username:
+        return RedirectResponse("/login", status_code=303)
+    account = db.get_user_by_username(username)
+    if account and account.get("role") == "viewer":
+        return RedirectResponse("/backtest", status_code=303)
+    return templates.TemplateResponse(request, "order_window.html", {})
+
+
 @app.get("/guide", response_class=HTMLResponse)
 def guide(request: Request):
     if not read_session(request):
