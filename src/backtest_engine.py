@@ -2572,31 +2572,14 @@ def simulate_touch_turn_strategy(
     return {"trades": trades, "skipped_symbols": skipped, "filter_stats": filter_stats}
 
 
-_SST_STAGE_ORDER = ["trend", "dmi_trigger", "price_confirmation", "200sma_obstruction"]
-
-
-def _classify_sst_stage(signal: dict) -> str:
-    """Which of _SST_STAGE_ORDER's stages a src.sst_swing.evaluate_sst_
-    entry result reached, read off its own reason/error text (that
-    function's own docstring documents each exact string this matches
-    against) - "insufficient_data" if it never got far enough to check
-    any of the four entry rules, "passed" if it cleared every one of
-    them. Used only for simulate_sst_swing_strategy's filter_stats
-    funnel - never influences any entry/sizing decision itself."""
-    if signal.get("pass"):
-        return "passed"
-    text = signal.get("error") or signal.get("reason") or ""
-    if "insufficient" in text or "not yet available" in text:
-        return "insufficient_data"
-    if "SMA50" in text or text.startswith("trend is"):
-        return "trend"
-    if "DMI" in text:
-        return "dmi_trigger"
-    if "significant day" in text or "breakout" in text:
-        return "price_confirmation"
-    if "200SMA" in text:
-        return "200sma_obstruction"
-    return "insufficient_data"  # defensive fallback - evaluate_sst_entry should never actually reach this
+# _SST_STAGE_ORDER/_classify_sst_stage used to live here - moved to
+# src/sst_swing.py (as STAGE_ORDER/classify_stage) once cycle.py's own
+# candidate-visibility feature needed the exact same classification and
+# couldn't import it from here without a circular import (this module
+# already imports cycle). Aliased back to their original names so the
+# call sites below didn't need to change.
+_SST_STAGE_ORDER = sst_swing.STAGE_ORDER
+_classify_sst_stage = sst_swing.classify_stage
 
 
 def simulate_sst_swing_strategy(

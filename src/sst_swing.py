@@ -267,3 +267,37 @@ def size_for_risk(equity: float, entry_price: float, stop_price: float, rules: d
     if shares <= 0:
         return 0, "stop too far for account size (0 shares)"
     return shares, None
+
+
+# ---------------------------------------------------- entry-stage classification ---
+# Lives here (not in src/backtest_engine.py, where it was first written for
+# simulate_sst_swing_strategy's own filter_stats funnel) because cycle.py's
+# candidate-visibility feature needs the exact same classification and
+# cannot import from backtest_engine.py without a circular import
+# (backtest_engine.py itself already imports cycle). Shared, single
+# implementation either way - never influences any entry/sizing decision
+# itself, purely descriptive of where evaluate_sst_entry's own result
+# landed.
+STAGE_ORDER = ["trend", "dmi_trigger", "price_confirmation", "200sma_obstruction"]
+
+
+def classify_stage(signal: dict) -> str:
+    """Which of STAGE_ORDER's stages an evaluate_sst_entry result reached,
+    read off its own reason/error text (this module's own evaluate_sst_
+    entry docstring documents each exact string this matches against) -
+    "insufficient_data" if it never got far enough to check any of the
+    four entry rules, "passed" if it cleared every one of them."""
+    if signal.get("pass"):
+        return "passed"
+    text = signal.get("error") or signal.get("reason") or ""
+    if "insufficient" in text or "not yet available" in text:
+        return "insufficient_data"
+    if "SMA50" in text or text.startswith("trend is"):
+        return "trend"
+    if "DMI" in text:
+        return "dmi_trigger"
+    if "significant day" in text or "breakout" in text:
+        return "price_confirmation"
+    if "200SMA" in text:
+        return "200sma_obstruction"
+    return "insufficient_data"  # defensive fallback - evaluate_sst_entry should never actually reach this
