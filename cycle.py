@@ -838,7 +838,20 @@ def _manage_position_core(pos: dict, rules: dict, ops: _PositionOps) -> dict:
     `if`/`elif` — a breakeven flip and a trailing-stop check can both fire
     on the same tick, since the state mutates in between (see
     _breakeven_decision/_trailing_stop_decision, the pure decision logic
-    both stages and backtest_engine.py share)."""
+    both stages and backtest_engine.py share).
+
+    pos["no_bot_manage"] (set once, at creation, by check_price_triggers -
+    see its own comment) short-circuits ALL of the above: no breakeven
+    flip, no trailing stop, not even the purely-observational r_multiple/
+    mae_price tracking every other position gets. A manually-triggered
+    position is deliberately left alone entirely - its own initial
+    protective stop (placed for real at fill time) is the only thing that
+    ever touches it again, until a human closes it by hand. force_close_
+    all's own held_no_manage partition is what keeps it out of the EOD
+    sweep too - the two together are what "not bot-managed" actually
+    means end to end."""
+    if pos.get("no_bot_manage"):
+        return pos
     exit_cfg = rules["exit"]
     side = pos.get("side", "long")
     price = _current_price(pos["symbol"])
@@ -1094,7 +1107,8 @@ def force_close_all(account_id: int, mode: str, ib, positions: list[dict]):
 
     manual_held = [p for p in positions if p.get("hold_overnight")]
     swing_held = [p for p in positions if not p.get("hold_overnight") and _is_swing_hold(p)]
-    held = manual_held + swing_held
+    no_manage_held = [p for p in positions if not p.get("hold_overnight") and not _is_swing_hold(p) and p.get("no_bot_manage")]
+    held = manual_held + swing_held + no_manage_held
     to_close = [p for p in positions if p not in held]
     for pos in manual_held:
         # One-shot opt-out (see db.set_hold_overnight) - reset it now so it
@@ -1117,13 +1131,23 @@ def force_close_all(account_id: int, mode: str, ib, positions: list[dict]):
             "EOD force-close skipped - this position's own strategy holds multi-day, closes only via its own trailing stop",
             "default",
         )
+    for pos in no_manage_held:
+        # Same "permanent, not a per-day toggle" reasoning as swing_held -
+        # a manually-triggered position (see check_price_triggers' own
+        # comment) stays exempt every day it's open, not just today.
+        log_decision(account_id, mode, {"event": "force_close_skipped", "symbol": pos["symbol"], "side": pos.get("side", "long"), "qty": pos["qty"], "reason": "no_bot_manage"})
+        notify(
+            f"[{mode.upper()}] Not bot-managed: {pos['symbol']}",
+            "EOD force-close skipped - manually-triggered position, the bot never manages or closes it - close by hand when ready",
+            "default",
+        )
 
     if not to_close:
         return
 
     notify(
         f"[{mode.upper()}] EOD Force Close",
-        f"flattening {len(to_close)} position(s)" + (f" ({len(held)} held" + (f", {len(swing_held)} swing" if swing_held else "") + ")" if held else ""),
+        f"flattening {len(to_close)} position(s)" + (f" ({len(held)} held" + (f", {len(swing_held)} swing" if swing_held else "") + (f", {len(no_manage_held)} manual" if no_manage_held else "") + ")" if held else ""),
         "high",
     )
     for pos in to_close:
@@ -2707,13 +2731,24 @@ def check_price_triggers(account_id: int, mode: str, ib, positions: list[dict]) 
                 "initial_stop": trig["stop_price"], "stop_price": trig["stop_price"],
                 "stop_order_id": stop_order_id, "state": "pre_breakeven", "r_multiple": 0.0,
                 "mae_price": fill_price,
+                # A manually-triggered position (this "buy line"/"sell
+                # line" form, or the /order_window quick-order popup - same
+                # code path, no way or reason to tell them apart) is
+                # explicitly NOT bot-managed: no breakeven/trailing-stop
+                # (see manage_position's own early return) and no EOD
+                # force-close (see force_close_all's own held_no_manage
+                # partition) - only this initial protective stop, placed
+                # for real just above, ever guards it. A human decided to
+                # enter this by hand; the bot leaves it alone by hand too,
+                # until that same human closes it.
+                "no_bot_manage": True,
             }
             db.upsert_position(account_id, mode, new_position)
             positions.append(new_position)
             db.resolve_price_trigger(account_id, mode, trig["id"], "filled", filled_at=now_iso, fill_price=fill_price)
             notify(
                 f"[{mode.upper()}] Price trigger FILLED: {symbol}",
-                f"{side} @ ${fill_price:.2f}, qty {fill_qty}, stop ${trig['stop_price']:.2f} - now bot-managed",
+                f"{side} @ ${fill_price:.2f}, qty {fill_qty}, stop ${trig['stop_price']:.2f} - NOT bot-managed (manual entry)",
                 "default",
             )
             log_decision(account_id, mode, {

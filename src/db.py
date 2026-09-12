@@ -3232,6 +3232,22 @@ def init_db(seed_rules_path: Path | None = None):
         # symbol) unchanged, so "one real position per symbol" is still
         # enforced by the table itself, same as before this column existed.
         _migrate_add_column(conn, "positions", "strategy_id", "INTEGER")
+        # Set once, at creation, for a position that came from a manually-
+        # placed price trigger ("buy line"/"sell line" - place_price_
+        # trigger.py, cycle.check_price_triggers) - both the chart's own
+        # line-drag form and the /order_window quick-order popup place the
+        # exact same order through the exact same code path, so there is no
+        # way (or reason) to tell those two UI entry points apart here; the
+        # user wants EVERY manually-triggered position treated the same
+        # way regardless of which screen opened it. 0 for every strategy-
+        # opened position (entry_scan/touch_turn/virtual) and every
+        # position that predates this column. See cycle.manage_position's
+        # and force_close_all's own comments for what this actually
+        # changes: no breakeven/trailing-stop management at all, and no
+        # EOD force-close - the position's own initial protective stop
+        # (placed for real at fill time) is the only thing that ever
+        # touches it again, until a human closes it by hand.
+        _migrate_add_column(conn, "positions", "no_bot_manage", "INTEGER NOT NULL DEFAULT 0")
         _migrate_add_column(conn, "watchlist", "universe", "TEXT NOT NULL DEFAULT ',default,'")
         _migrate_add_column(conn, "watchlist", "direction", "TEXT NOT NULL DEFAULT 'long'")
         # NULL for trades recorded the old way (trade.py/close_position.py's
@@ -3966,24 +3982,25 @@ def upsert_position(account_id: int, mode: str, pos: dict):
     pos = {
         "side": "long", "target_price": None, "hard_stop_price": None,
         "mfe_price": None, "trail_activated": False, "trail_activated_at_r": None,
-        "mae_price": None, "strategy_id": None,
+        "mae_price": None, "strategy_id": None, "no_bot_manage": False,
         **pos,
     }
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO positions (account_id, mode, symbol, side, entry_price, entry_time_iso, qty, initial_stop, "
             "stop_price, stop_order_id, state, r_multiple, target_price, hard_stop_price, mfe_price, "
-            "trail_activated, trail_activated_at_r, mae_price, strategy_id) VALUES "
+            "trail_activated, trail_activated_at_r, mae_price, strategy_id, no_bot_manage) VALUES "
             "(:account_id, :mode, :symbol, :side, :entry_price, :entry_time_iso, :qty, :initial_stop, :stop_price, "
             ":stop_order_id, :state, :r_multiple, :target_price, :hard_stop_price, :mfe_price, "
-            ":trail_activated, :trail_activated_at_r, :mae_price, :strategy_id) "
-            # strategy_id is deliberately NOT in this DO UPDATE SET - it's
-            # attribution set once at entry (whichever strategy opened the
-            # position), never touched again by a later re-upsert (every
-            # other tick of manage_position re-upserting the same position
-            # for its whole life) - a caller that doesn't carry it forward
-            # (e.g. a legacy/manual upsert) must never be able to silently
-            # clear an existing position's strategy attribution back to NULL.
+            ":trail_activated, :trail_activated_at_r, :mae_price, :strategy_id, :no_bot_manage) "
+            # strategy_id/no_bot_manage are deliberately NOT in this DO
+            # UPDATE SET - both are attribution set once at entry, never
+            # touched again by a later re-upsert (every other tick of
+            # manage_position re-upserting the same position for its whole
+            # life) - a caller that doesn't carry them forward (e.g. a
+            # legacy/manual upsert) must never be able to silently clear
+            # an existing position's strategy attribution or no_bot_manage
+            # flag back to their defaults.
             "ON CONFLICT(account_id, mode, symbol) DO UPDATE SET "
             "qty=excluded.qty, initial_stop=excluded.initial_stop, stop_price=excluded.stop_price, "
             "stop_order_id=excluded.stop_order_id, state=excluded.state, r_multiple=excluded.r_multiple, "
