@@ -256,7 +256,7 @@ async function loadCandidates() {
   }
   body.innerHTML = data.rows.map(r => `
     <tr class="${r.passed_screener ? 'cand-row-passed' : ''}">
-      <td class="fw-semibold">${r.symbol}</td>
+      <td class="fw-semibold"><a href="#" class="momentum-symbol-link" data-symbol="${r.symbol}">${r.symbol}</a></td>
       <td>${r.exchange ?? "—"}</td>
       <td>${fmt(r.price)}</td>
       <td>${r.change_from_open_pct === null ? "—" : (r.change_from_open_pct >= 0 ? "+" : "") + r.change_from_open_pct.toFixed(1) + "%"}</td>
@@ -294,9 +294,16 @@ async function openMomentumOrderWindow(symbol, chart) {
 }
 
 document.getElementById("candidatesBody").addEventListener("click", (e) => {
+  const symLink = e.target.closest(".momentum-symbol-link");
+  if (symLink) {
+    e.preventDefault();
+    openMomentumOrderWindow(symLink.dataset.symbol, true);
+    return;
+  }
   const btn = e.target.closest(".momentum-order-btn");
-  if (!btn) return;
-  openMomentumOrderWindow(btn.dataset.symbol, btn.dataset.chart === "1");
+  if (btn) {
+    openMomentumOrderWindow(btn.dataset.symbol, btn.dataset.chart === "1");
+  }
 });
 document.getElementById("signalsBody").addEventListener("click", (e) => {
   const btn = e.target.closest(".momentum-order-btn");
