@@ -41,6 +41,10 @@ feature's own commit message for why).
   }
   .interval-btn:hover { border-color: #4a90e2; color: #e9ecef; }
   .interval-btn.active { background: #2c5f8a; border-color: #4a90e2; color: #fff; }
+  #indicator-toolbar { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 4px 12px; background: #1c1f24; border-bottom: 1px solid #2b2f36; flex-wrap: wrap; }
+  .ind-toggle { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #adb5bd; cursor: pointer; user-select: none; }
+  .ind-toggle input { accent-color: #4a90e2; cursor: pointer; }
+  .ind-toggle .swatch { width: 10px; height: 3px; border-radius: 2px; display: inline-block; }
   #chart-container { flex: 1 1 auto; min-height: 0; }
   #chart-caption { padding: 2px 12px; font-size: 11px; color: #868e96; flex: 0 0 auto; }
   #order-panel { flex: 0 0 auto; padding: 14px 16px; background: #1c1f24; border-top: 1px solid #2b2f36; }
@@ -82,6 +86,14 @@ feature's own commit message for why).
     <button type="button" class="interval-btn" data-interval="30m">30m</button>
     <button type="button" class="interval-btn" data-interval="1h">1h</button>
     <button type="button" class="interval-btn" data-interval="1d">1D</button>
+  </div>
+  <div id="indicator-toolbar">
+    <label class="ind-toggle"><input type="checkbox" data-ind="volume" checked><span class="swatch" style="background:#26a69a;"></span>Volume</label>
+    <label class="ind-toggle"><input type="checkbox" data-ind="ma20" checked><span class="swatch" style="background:#16a085;"></span>MA20</label>
+    <label class="ind-toggle"><input type="checkbox" data-ind="ma200" checked><span class="swatch" style="background:#2980b9;"></span>MA200</label>
+    <label class="ind-toggle"><input type="checkbox" data-ind="sma50" checked><span class="swatch" style="background:#f39c12;"></span>SMA50</label>
+    <label class="ind-toggle"><input type="checkbox" data-ind="sma200ref" checked><span class="swatch" style="background:#2980b9;"></span>SMA200 ref</label>
+    <label class="ind-toggle"><input type="checkbox" data-ind="rsi" checked><span class="swatch" style="background:#8e44ad;"></span>RSI</label>
   </div>
   <div id="chart-container"></div>
   <div id="chart-caption"></div>
@@ -161,8 +173,16 @@ async function api(path, options) {
 // rest of this page.
 let currentInterval = "5m";
 let chart, candleSeries, volumeSeries, rsiSeries, sma20LineSeries, sma200LineSeries;
-let chartSmaLines = [];
+let sma50RefLine = null, sma200RefLine = null;
 let chartRefreshTimer = null;
+// One checkbox each: volume/ma20/ma200 toggle their own series directly
+// (lightweight-charts keeps each series' own data while hidden, so this
+// never needs a reload); sma50/sma200ref toggle the two static reference
+// price lines (created fresh each loadChartData - see below); rsi toggles
+// both the line series AND its own price-scale band collapsing to 0 width
+// so hiding it actually reclaims the vertical space instead of leaving a
+// blank strip.
+const indicatorVisible = { volume: true, ma20: true, ma200: true, sma50: true, sma200ref: true, rsi: true };
 
 if (showChart && symbol) {
   const container = document.getElementById("chart-container");
@@ -198,9 +218,31 @@ if (showChart && symbol) {
     });
     document.querySelector(`.interval-btn[data-interval="${currentInterval}"]`).classList.add("active");
 
+    document.querySelectorAll('.ind-toggle input[data-ind]').forEach(cb => {
+      cb.addEventListener("change", () => {
+        indicatorVisible[cb.dataset.ind] = cb.checked;
+        applyIndicatorVisibility();
+      });
+    });
+
     loadChartData();
     chartRefreshTimer = setInterval(loadChartData, 30000);
   }
+}
+
+function applyIndicatorVisibility() {
+  volumeSeries.applyOptions({ visible: indicatorVisible.volume });
+  sma20LineSeries.applyOptions({ visible: indicatorVisible.ma20 });
+  sma200LineSeries.applyOptions({ visible: indicatorVisible.ma200 });
+  rsiSeries.applyOptions({ visible: indicatorVisible.rsi });
+  // Collapsed to a 0-height band when hidden so the price/volume panes
+  // reclaim the space instead of leaving a blank strip - restored to the
+  // same band loadChartData's own chart setup originally gave it.
+  chart.priceScale("rsi").applyOptions(indicatorVisible.rsi
+    ? { scaleMargins: { top: 0.75, bottom: 0.02 } }
+    : { scaleMargins: { top: 1.0, bottom: 0.0 } });
+  if (sma50RefLine) sma50RefLine.applyOptions({ lineVisible: indicatorVisible.sma50, axisLabelVisible: indicatorVisible.sma50 });
+  if (sma200RefLine) sma200RefLine.applyOptions({ lineVisible: indicatorVisible.sma200ref, axisLabelVisible: indicatorVisible.sma200ref });
 }
 
 async function loadChartData() {
@@ -221,16 +263,17 @@ async function loadChartData() {
 
     // Reference price lines don't update in place - clear last load's and
     // redraw so a stale level doesn't linger after an interval switch.
-    chartSmaLines.forEach(l => candleSeries.removePriceLine(l));
-    chartSmaLines = [];
+    if (sma50RefLine) { candleSeries.removePriceLine(sma50RefLine); sma50RefLine = null; }
+    if (sma200RefLine) { candleSeries.removePriceLine(sma200RefLine); sma200RefLine = null; }
     if (data.sma50 !== null && data.sma50 !== undefined) {
-      chartSmaLines.push(candleSeries.createPriceLine({ price: data.sma50, color: "#f39c12", lineWidth: 1,
-        lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: "SMA50" }));
+      sma50RefLine = candleSeries.createPriceLine({ price: data.sma50, color: "#f39c12", lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: "SMA50" });
     }
     if (data.sma200 !== null && data.sma200 !== undefined) {
-      chartSmaLines.push(candleSeries.createPriceLine({ price: data.sma200, color: "#2980b9", lineWidth: 1,
-        lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: "SMA200" }));
+      sma200RefLine = candleSeries.createPriceLine({ price: data.sma200, color: "#2980b9", lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: "SMA200" });
     }
+    applyIndicatorVisibility();
     document.getElementById("chart-caption").textContent = currentInterval + " · " + new Date().toLocaleTimeString();
   } catch (e) {
     document.getElementById("chart-caption").textContent = "Chart load failed: " + e.message;
