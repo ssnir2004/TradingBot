@@ -680,13 +680,13 @@ function renderCandidatesTable(rows) {
     return `<table class="table table-sm mb-0">
       <thead><tr><th>Symbol</th><th>Side</th><th>Status</th><th>Limit</th><th>Stop</th><th>Target</th><th>Gap</th><th></th></tr></thead>
       <tbody>${rows.map(r => `<tr>
-        <td class="fw-bold">${symbolLink(r.symbol)}</td>
+        <td class="fw-bold"><a href="#" class="candidate-symbol-link" data-symbol="${r.symbol}" data-side="${r.side}" data-strategy-id="${r.strategy_id}">${r.symbol}</a></td>
         <td>${sideBadge(r.side)}</td>
         <td>${r.error ? `<span class="badge bg-secondary" title="${r.error}">n/a</span>`
           : r.pass ? '<span class="badge bg-success">✓ READY</span>' : '<span class="badge bg-secondary">not triggered</span>'}</td>
         <td>${fmtMoney(r.limit_price)}</td><td>${fmtMoney(r.initial_stop)}</td><td>${fmtMoney(r.target_price)}</td>
         <td>${r.gap_pct !== undefined && r.gap_pct !== null ? Number(r.gap_pct).toFixed(2) + "%" : "-"}</td>
-        <td><button type="button" class="btn btn-sm btn-outline-primary quick-trigger-btn" data-symbol="${r.symbol}" data-side="${r.side}" data-price="${r.limit_price ?? ""}">${r.side === "short" ? "מכירה" : "קניה"} ⚡</button></td>
+        <td><button type="button" class="btn btn-sm btn-outline-primary quick-trigger-btn" data-symbol="${r.symbol}" data-side="${r.side}" data-strategy-id="${r.strategy_id}">${r.side === "short" ? "מכירה" : "קניה"} ⚡</button></td>
       </tr>`).join("")}</tbody>
     </table>`;
   }
@@ -725,7 +725,7 @@ function renderCandidatesTable(rows) {
         ? `<span class="badge bg-success" title="Live entry trigger is active right now">${r._passedCount}/${total} ✓ READY</span>`
         : `<span class="badge ${r._passedCount >= Math.ceil(total * 0.66) ? "bg-warning text-dark" : "bg-secondary"}" title="Sub-checks only - not the same as a live buy trigger.">${r._passedCount}/${total} (not triggered)</span>`;
       return `<tr>
-        <td class="fw-bold">${symbolLink(r.symbol)}</td>
+        <td class="fw-bold"><a href="#" class="candidate-symbol-link" data-symbol="${r.symbol}" data-side="${r.side}" data-strategy-id="${r.strategy_id}">${r.symbol}</a></td>
         <td>${sideBadge(r.side)}</td>
         <td>${passedBadge}</td>
         ${CLASSIC_FILTER_KEYS.map(k => filterCell(r, k, "classic")).join("")}
@@ -738,7 +738,7 @@ function renderCandidatesTable(rows) {
         <td data-col="orb">${r.atr_pct !== undefined && r.atr_pct !== null ? Number(r.atr_pct).toFixed(2) + "%" : "-"}</td>
         <td data-col="classic-rsi">${r.rsi !== undefined && r.rsi !== null ? Number(r.rsi).toFixed(1) : "-"}</td>
         <td>${fmtMoney(r.price)}</td>
-        <td><button type="button" class="btn btn-sm btn-outline-primary quick-trigger-btn" data-symbol="${r.symbol}" data-side="${r.side}" data-price="${r.price ?? ""}">${r.side === "short" ? "מכירה" : "קניה"} ⚡</button></td>
+        <td><button type="button" class="btn btn-sm btn-outline-primary quick-trigger-btn" data-symbol="${r.symbol}" data-side="${r.side}" data-strategy-id="${r.strategy_id}">${r.side === "short" ? "מכירה" : "קניה"} ⚡</button></td>
       </tr>`;
     }).join("")}</tbody>
   </table>`;
@@ -771,9 +771,16 @@ function renderTabVirtualTrades(strategyId, trades) {
 }
 
 document.getElementById("strategy-tab-content").addEventListener("click", (e) => {
+  const symLink = e.target.closest(".candidate-symbol-link");
+  if (symLink) {
+    e.preventDefault();
+    openOrderWindow(symLink.dataset.symbol, symLink.dataset.side, symLink.dataset.strategyId, true);
+    return;
+  }
   const btn = e.target.closest(".quick-trigger-btn");
-  if (!btn) return;
-  openQuickTrigger(btn.dataset.symbol, btn.dataset.side, btn.dataset.price);
+  if (btn) {
+    openOrderWindow(btn.dataset.symbol, btn.dataset.side, btn.dataset.strategyId, false);
+  }
 });
 
 // ------------------------------------------------------------ Watchlist ---
@@ -803,18 +810,30 @@ document.getElementById("btn-run-prefilter").addEventListener("click", async () 
   }
 });
 
-// Watchlist row's "Quick trade" button - opens the same chart modal + buy/
-// sell-line form (see shared.js's refreshPriceTriggers/pt-submit) that
-// already exists for the STOP-trigger feature, just pre-filled with this
-// row's own side and current price so placing the order needs only a stop
-// price and quantity instead of typing everything from scratch.
-function openQuickTrigger(symbol, side, price) {
-  openChart(symbol);
-  const sideEl = document.getElementById("pt-side");
-  const priceEl = document.getElementById("pt-trigger-price");
-  if (sideEl) sideEl.value = side === "short" ? "short" : "long";
-  if (priceEl) priceEl.value = price ? Number(price).toFixed(2) : "";
-  document.getElementById("pt-qty")?.focus();
+// Candidate row's own symbol link (chart=true) or its "קניה⚡" button
+// (chart=false, the blitz flow) - both open /order_window, a genuinely
+// separate popup (never this page's own chart-modal/pt-* form), pre-
+// filled via /api/quick_fill with EXACTLY what entry_scan would use for
+// a real order on this candidate right now (same stop-resolution rule,
+// same risk-based sizing) - see that endpoint's own docstring. A quick_
+// fill failure (e.g. the candidate fell out of the cached watchlist_
+// filters snapshot between page load and click) still opens the window,
+// just with nothing pre-filled - the window is always usable manually,
+// auto-fill is a convenience layered on top, never a requirement to
+// place an order at all.
+async function openOrderWindow(symbol, side, strategyId, chart) {
+  let fill = {};
+  try {
+    fill = await modeApi(`/api/quick_fill?symbol=${encodeURIComponent(symbol)}&strategy_id=${strategyId}`);
+  } catch (e) { /* window still opens below, just unfilled - see this function's own docstring */ }
+  const qs = new URLSearchParams({
+    symbol, side: side === "short" ? "short" : "long", chart: chart ? "1" : "0",
+    trigger: fill.trigger_price ?? "", stop: fill.stop_price ?? "", qty: fill.qty ?? "",
+  });
+  const w = chart ? screen.availWidth : 460;
+  const h = chart ? screen.availHeight : 560;
+  window.open(`/order_window?${qs}`, `order_${symbol}_${Date.now()}`,
+              `width=${w},height=${h},left=0,top=0,noopener`);
 }
 
 async function refreshTrades() {
