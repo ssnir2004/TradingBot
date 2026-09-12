@@ -34,6 +34,13 @@ feature's own commit message for why).
     height: 100vh; display: flex; flex-direction: column; overflow: hidden;
   }
   #chart-area { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  #chart-toolbar { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 6px 12px; background: #1c1f24; border-bottom: 1px solid #2b2f36; }
+  .interval-btn {
+    background: transparent; border: 1px solid #3a3f47; color: #adb5bd; font-size: 11px;
+    padding: 3px 9px; border-radius: 4px; cursor: pointer;
+  }
+  .interval-btn:hover { border-color: #4a90e2; color: #e9ecef; }
+  .interval-btn.active { background: #2c5f8a; border-color: #4a90e2; color: #fff; }
   #chart-container { flex: 1 1 auto; min-height: 0; }
   #chart-caption { padding: 2px 12px; font-size: 11px; color: #868e96; flex: 0 0 auto; }
   #order-panel { flex: 0 0 auto; padding: 14px 16px; background: #1c1f24; border-top: 1px solid #2b2f36; }
@@ -68,6 +75,14 @@ feature's own commit message for why).
 <body>
 
 <div id="chart-area">
+  <div id="chart-toolbar">
+    <button type="button" class="interval-btn" data-interval="1m">1m</button>
+    <button type="button" class="interval-btn" data-interval="5m">5m</button>
+    <button type="button" class="interval-btn" data-interval="15m">15m</button>
+    <button type="button" class="interval-btn" data-interval="30m">30m</button>
+    <button type="button" class="interval-btn" data-interval="1h">1h</button>
+    <button type="button" class="interval-btn" data-interval="1d">1D</button>
+  </div>
   <div id="chart-container"></div>
   <div id="chart-caption"></div>
 </div>
@@ -138,48 +153,88 @@ async function api(path, options) {
 }
 
 // ---------------------------------------------------------------- chart ---
+// Full parity with strategies.html/trading.html's own chart modal
+// (shared.js's openChart/loadChartData) - candles, volume, RSI pane,
+// MA20/MA200 moving lines, SMA50/SMA200 static reference levels, and
+// the same six interval buttons - just laid out for this standalone
+// popup instead of a bootstrap modal, and dark-themed to match the
+// rest of this page.
+let currentInterval = "5m";
+let chart, candleSeries, volumeSeries, rsiSeries, sma20LineSeries, sma200LineSeries;
+let chartSmaLines = [];
+let chartRefreshTimer = null;
+
 if (showChart && symbol) {
-  (async () => {
-    const container = document.getElementById("chart-container");
-    if (typeof LightweightCharts === "undefined") {
-      container.innerHTML = '<p style="color:#ff8a8a;padding:12px;">Could not load the charting library.</p>';
-      return;
-    }
-    const chart = LightweightCharts.createChart(container, {
+  const container = document.getElementById("chart-container");
+  if (typeof LightweightCharts === "undefined") {
+    container.innerHTML = '<p style="color:#ff8a8a;padding:12px;">Could not load the charting library.</p>';
+  } else {
+    chart = LightweightCharts.createChart(container, {
       width: container.clientWidth, height: container.clientHeight,
       layout: { background: { color: "#14161a" }, textColor: "#e9ecef" },
       grid: { vertLines: { color: "#22262c" }, horzLines: { color: "#22262c" } },
       timeScale: { timeVisible: true, secondsVisible: false },
-      rightPriceScale: { scaleMargins: { top: 0.05, bottom: 0.25 } },
+      rightPriceScale: { scaleMargins: { top: 0.05, bottom: 0.45 } },
     });
-    const candleSeries = chart.addCandlestickSeries();
-    const volumeSeries = chart.addHistogramSeries({ priceFormat: { type: "volume" }, priceScaleId: "volume" });
-    chart.priceScale("volume").applyOptions({ scaleMargins: { top: 0.78, bottom: 0.0 } });
+    candleSeries = chart.addCandlestickSeries();
+    sma20LineSeries = chart.addLineSeries({ color: "#16a085", lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: "MA20" });
+    sma200LineSeries = chart.addLineSeries({ color: "#2980b9", lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: "MA200" });
 
-    try {
-      const data = await api(`/api/candles?symbol=${encodeURIComponent(symbol)}&interval=5m&mode=live`);
-      const candles = data.candles || [];
-      candleSeries.setData(candles);
-      const candleByTime = new Map(candles.map(c => [c.time, c]));
-      volumeSeries.setData((data.volume || []).map(v => {
-        const c = candleByTime.get(v.time);
-        const up = !c || c.close >= c.open;
-        return { time: v.time, value: v.value, color: up ? "rgba(38,166,154,0.5)" : "rgba(239,83,80,0.5)" };
-      }));
-      if (data.sma50 !== null && data.sma50 !== undefined) {
-        candleSeries.createPriceLine({ price: data.sma50, color: "#f39c12", lineWidth: 1,
-          lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: "SMA50" });
-      }
-      if (data.sma200 !== null && data.sma200 !== undefined) {
-        candleSeries.createPriceLine({ price: data.sma200, color: "#2980b9", lineWidth: 1,
-          lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: "SMA200" });
-      }
-      document.getElementById("chart-caption").textContent = "5m · " + new Date().toLocaleTimeString();
-    } catch (e) {
-      document.getElementById("chart-caption").textContent = "Chart load failed: " + e.message;
-    }
+    volumeSeries = chart.addHistogramSeries({ priceFormat: { type: "volume" }, priceScaleId: "volume" });
+    chart.priceScale("volume").applyOptions({ scaleMargins: { top: 0.58, bottom: 0.30 } });
+
+    rsiSeries = chart.addLineSeries({ color: "#8e44ad", lineWidth: 1.5, priceScaleId: "rsi" });
+    chart.priceScale("rsi").applyOptions({ scaleMargins: { top: 0.75, bottom: 0.02 } });
+    rsiSeries.createPriceLine({ price: 50, color: "#555b64", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: false, title: "" });
+
     window.addEventListener("resize", () => chart.applyOptions({ width: container.clientWidth, height: container.clientHeight }));
-  })();
+
+    document.querySelectorAll(".interval-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        currentInterval = btn.dataset.interval;
+        document.querySelectorAll(".interval-btn").forEach(b => b.classList.toggle("active", b === btn));
+        loadChartData();
+      });
+    });
+    document.querySelector(`.interval-btn[data-interval="${currentInterval}"]`).classList.add("active");
+
+    loadChartData();
+    chartRefreshTimer = setInterval(loadChartData, 30000);
+  }
+}
+
+async function loadChartData() {
+  if (!candleSeries) return;
+  try {
+    const data = await api(`/api/candles?symbol=${encodeURIComponent(symbol)}&interval=${currentInterval}&mode=live`);
+    const candles = data.candles || [];
+    candleSeries.setData(candles);
+    const candleByTime = new Map(candles.map(c => [c.time, c]));
+    volumeSeries.setData((data.volume || []).map(v => {
+      const c = candleByTime.get(v.time);
+      const up = !c || c.close >= c.open;
+      return { time: v.time, value: v.value, color: up ? "rgba(38,166,154,0.5)" : "rgba(239,83,80,0.5)" };
+    }));
+    rsiSeries.setData(data.rsi || []);
+    sma20LineSeries.setData(data.sma20_series || []);
+    sma200LineSeries.setData(data.sma200_series || []);
+
+    // Reference price lines don't update in place - clear last load's and
+    // redraw so a stale level doesn't linger after an interval switch.
+    chartSmaLines.forEach(l => candleSeries.removePriceLine(l));
+    chartSmaLines = [];
+    if (data.sma50 !== null && data.sma50 !== undefined) {
+      chartSmaLines.push(candleSeries.createPriceLine({ price: data.sma50, color: "#f39c12", lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: "SMA50" }));
+    }
+    if (data.sma200 !== null && data.sma200 !== undefined) {
+      chartSmaLines.push(candleSeries.createPriceLine({ price: data.sma200, color: "#2980b9", lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: "SMA200" }));
+    }
+    document.getElementById("chart-caption").textContent = currentInterval + " · " + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById("chart-caption").textContent = "Chart load failed: " + e.message;
+  }
 }
 
 // ----------------------------------------------------------------- send ---
