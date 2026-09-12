@@ -1,18 +1,26 @@
 name: Deploy to Oracle server
 
-# Pushes straight to production the moment a commit lands on this repo's
-# own default branch (claude/ai-trading-bot-ibkr-haqc10 - there is no
-# "main" here) - no tests, no open-position check, no manual approval, by
-# explicit choice (see DEPLOY.md's own "Automatic deployment" section for
-# why). workflow_dispatch lets you re-run the exact same deploy on demand
-# (e.g. after a one-off server-side fix) without needing a new commit.
+# DISABLED 2026-09-12: the automatic push trigger below was removed -
+# every one of its ~71 runs failed (all deploys this whole session were
+# done by hand instead, directly on the server), and it was only ever
+# duplicating that manual work anyway (git pull + restart against a
+# checkout already up to date). workflow_dispatch is kept so this can
+# still be run on demand from the Actions tab if the secrets/SSH setup
+# ever get fixed - re-add the `push:` block below to re-enable automatic
+# deploys again.
+#
+# Original behavior (for when re-enabling): pushed straight to production
+# the moment a commit landed on this repo's own default branch (claude/
+# ai-trading-bot-ibkr-haqc10 - there is no "main" here) - no tests, no
+# open-position check, no manual approval, by explicit choice (see
+# DEPLOY.md's own "Automatic deployment" section for why).
 #
 # If you later rename/replace the default branch (e.g. introduce a real
 # "main"), update the branch name below AND in DEPLOY.md's own setup
 # section to match, or this workflow silently stops firing.
 on:
-  push:
-    branches: [claude/ai-trading-bot-ibkr-haqc10]
+  # push:
+  #   branches: [claude/ai-trading-bot-ibkr-haqc10]
   workflow_dispatch: {}
 
 # Serializes deploys so two pushes close together can't run git pull +
