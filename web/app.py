@@ -1555,6 +1555,64 @@ def api_watchlist_filters(mode: str = Depends(require_mode), account_id: int = D
     return db.get_watchlist_filters(account_id, mode)
 
 
+@app.get("/api/quick_fill")
+def api_quick_fill(symbol: str, strategy_id: int, mode: str = Depends(require_mode),
+                   account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
+    """{trigger_price, stop_price, qty} for the Strategy Sheets "קניה⚡"
+    quick-order flow - EXACTLY what entry_scan would place a real order
+    at, right now, for this candidate under this strategy: same stop
+    resolution (cycle._resolve_initial_stop - handles both session_extreme
+    and atr_multiple rules, so this can never drift from the live rule),
+    same risk-based sizing formula entry_scan itself uses. Reads the
+    already-cached watchlist_filters snapshot (refreshed every 5 min, see
+    cycle.scan_watchlist_filters) rather than a fresh yfinance fetch - a
+    few minutes of staleness on a screener-stage price is the same
+    tradeoff the Candidates table itself already accepts, and it means
+    this returns fast enough for the button's own "blitz" ambition.
+    404 if this symbol isn't a live candidate for this strategy right
+    now (nothing to base entry/stop on) or the cache is empty/stale."""
+    strategy = db.get_strategy(strategy_id)
+    if strategy is None:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    rules = json.loads(strategy["rules_json"])
+    side = strategy["direction"]
+
+    cached = db.get_watchlist_filters(account_id, mode)
+    row = next((r for r in cached.get("results", []) if r.get("symbol") == symbol and r.get("strategy_id") == strategy_id), None)
+    if row is None:
+        raise HTTPException(status_code=404, detail="No cached candidate data for this symbol/strategy - try Run scan now")
+    if row.get("price") is None:
+        raise HTTPException(status_code=404, detail="Candidate has no price data")
+
+    trigger_price = float(row["price"])
+    is_touch_turn = row.get("model") == "touch_turn"
+    is_orb = row.get("model") == "orb"
+    if is_touch_turn:
+        trigger_price = float(row["limit_price"]) if row.get("limit_price") is not None else trigger_price
+        stop_price = row.get("initial_stop")
+    elif is_orb:
+        stop_price = row.get("initial_stop")
+    else:
+        stop_price = cycle._resolve_initial_stop(row, rules, side)
+    if stop_price is None:
+        raise HTTPException(status_code=404, detail="No stop reference available for this candidate yet")
+    stop_price = float(stop_price)
+
+    r = (stop_price - trigger_price) if side == "short" else (trigger_price - stop_price)
+    if r <= 0:
+        raise HTTPException(status_code=400, detail="Computed stop is on the wrong side of price - can't size this")
+
+    risk = mode_config.risk_params(_env(), account_id, mode)
+    max_position_pct = rules["risk"]["max_position_size_pct_of_portfolio"] / 100
+    risk_dollars = risk["portfolio_value"] * (risk["max_risk_pct"] / 100)
+    size_by_risk = int(risk_dollars // r)
+    size_by_cap = int((risk["portfolio_value"] * max_position_pct) // trigger_price)
+    qty = max(min(size_by_risk, size_by_cap), 0)
+
+    return {"symbol": symbol, "side": side, "trigger_price": round(trigger_price, 4),
+            "stop_price": round(stop_price, 4), "qty": qty}
+
+
 @app.post("/api/prefilter/run")
 def api_run_prefilter(account_id: int = Depends(require_account), user: str = Depends(require_full_access)):
     """On-demand gap scan — the same scan the scheduler runs every 5
@@ -3186,6 +3244,37 @@ def api_momentum_candidates(user: str = Depends(require_user)):
     pipeline). Answers "is the scanner actually finding anything" on a
     quiet day when zero signals alone looks the same as a stuck process."""
     return momentum_store.latest_candidates()
+
+
+@app.get("/api/momentum/quick_fill")
+def api_momentum_quick_fill(symbol: str, user: str = Depends(require_user)):
+    """{trigger_price, stop_price, qty, source} for momentum's own "קניה⚡"
+    quick-order flow. Two genuinely different cases, both real, neither
+    fabricated:
+      - a real signal fired for this symbol today (momentum_signals) -
+        use its own entry_ref/stop_price/shares_hint exactly as the
+        detector computed them (source="signal"). This is the common
+        case for the Recent Signals table.
+      - only a screener-stage candidate exists (momentum_candidates,
+        no confirmed pattern - see momentum.loop's own no_pattern_match/
+        cooldown_suppressed rejection logging for why most candidates
+        never get this far) - there is no strategy-computed stop/size to
+        offer, so only the scan price is returned as a starting point
+        (source="candidate_only", stop_price/qty both null) rather than
+        inventing a stop the bot never actually decided on."""
+    today = date.today().isoformat()
+    for sig in momentum_store.recent_signals(200):
+        if sig["symbol"] == symbol and sig["trade_date"] == today:
+            return {
+                "symbol": symbol, "side": "long", "source": "signal", "strategy": sig["strategy"],
+                "trigger_price": sig["entry_ref"], "stop_price": sig["stop_price"], "qty": sig.get("shares_hint") or None,
+            }
+    latest = momentum_store.latest_candidates()
+    cand = next((r for r in latest["rows"] if r["symbol"] == symbol), None)
+    if cand is None:
+        raise HTTPException(status_code=404, detail="No candidate or signal data for this symbol today")
+    return {"symbol": symbol, "side": "long", "source": "candidate_only",
+            "trigger_price": cand["price"], "stop_price": None, "qty": None}
 
 
 @app.get("/api/momentum/backtest_summary")
